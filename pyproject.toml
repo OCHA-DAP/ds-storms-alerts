@@ -1,0 +1,32 @@
+[project]
+name = "ds-storms-alerts"
+version = "0.1.0"
+description = "Storm alert email notification pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ocha-stratus>=0.1.7",
+    "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@v0.2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]

@@ -1,0 +1,42 @@
+name: Run Storm Alert
+
+on:
+  workflow_dispatch:
+    inputs:
+      issued_time:
+        description: 'Issued time of forecast (format: YYYY-MM-DDTHH, e.g. 2025-01-15T12)'
+        type: string
+        required: true
+      test_email:
+        description: 'TEST_EMAIL: If True, send to test list instead of prod (fallback: True)'
+        type: choice
+        options:
+          - 'True'
+          - 'False'
+      dry_run:
+        description: 'DRY_RUN: If True, skip write/email operations (fallback: True)'
+        type: choice
+        options:
+          - 'True'
+          - 'False'
+
+jobs:
+  run-alert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync
+      - name: Run alert pipeline
+        env:
+          DSCI_AZ_BLOB_DEV_SAS: ${{ secrets.DSCI_AZ_BLOB_DEV_SAS }}
+          DSCI_AZ_BLOB_DEV_SAS_WRITE: ${{ secrets.DSCI_AZ_BLOB_DEV_SAS_WRITE }}
+          DSCI_LISTMONK_BASE_URL: https://listmonk-demo-afhcg8e2hde0fxca.eastus2-01.azurewebsites.net/api
+          DSCI_LISTMONK_API_USERNAME: ${{ vars.DSCI_LISTMONK_API_USERNAME }}
+          DSCI_LISTMONK_API_KEY: ${{ secrets.DSCI_LISTMONK_API_KEY }}
+          TEST_EMAIL: ${{ inputs.test_email || vars.TEST_EMAIL || 'True' }}
+          DRY_RUN: ${{ inputs.dry_run || vars.DRY_RUN || 'True' }}
+        run: uv run python pipelines/run_alert.py --issued-time ${{ inputs.issued_time }}
