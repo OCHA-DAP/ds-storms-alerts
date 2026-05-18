@@ -24,8 +24,8 @@ from src.data import (
     fetch_prev_any_pairs,
     fetch_wsp_fcastonly_exposure,
     fetch_wsp_fcastonly_polygons,
-    load_adm0_boundaries,
     load_adm1_boundaries,
+    load_background_countries,
 )
 from src.plots import (
     StormMark,
@@ -229,10 +229,10 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
     )
 
     logger.info("Loading country boundaries...")
-    countries_gdf = load_adm0_boundaries(all_render_iso3s)
+    background_gdf = load_background_countries()
     adm1_gdf = load_adm1_boundaries(all_render_iso3s)
-    iso3_to_name: dict[str, str] = dict(
-        zip(countries_gdf["iso_3"], countries_gdf["adm0_name"])
+    iso3_to_name: dict[str, str] = (
+        adm1_gdf.drop_duplicates("iso_3").set_index("iso_3")["adm0_name"].to_dict()
     )
 
     def _cname(iso3: str) -> str:
@@ -429,12 +429,12 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
         aid_adm1 = adm1_gdf[adm1_gdf["iso_3"].isin(storm_to_iso3s[aid])]
         storm_map_parts: list[str] = []
         wsp_m = track_plot_wsp(
-            aid_tracks, aid_buffers, aid_wsp_poly, countries_gdf,
+            aid_tracks, aid_buffers, aid_wsp_poly, background_gdf,
             wind_threshold_kt=34, adm1_gdf=aid_adm1,
         )
         if wsp_m:
             storm_map_parts.append(f"<h3 style='{_H3}'>WSP 34 kt forecast</h3>{wsp_m}")
-        buf_m = track_plot_buffers(aid_tracks, aid_buffers, countries_gdf, adm1_gdf=aid_adm1)
+        buf_m = track_plot_buffers(aid_tracks, aid_buffers, background_gdf, adm1_gdf=aid_adm1)
         if buf_m:
             storm_map_parts.append(
                 f"<h3 style='{_H3}'>Forecast-only buffers</h3>{buf_m}"

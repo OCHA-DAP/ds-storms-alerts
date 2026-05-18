@@ -10,6 +10,7 @@ _FIELDMAPS_ADM1_URL = (
     "https://data.fieldmaps.io/edge-matched/humanitarian/intl/adm1_polygons.parquet"
 )
 _BOUNDARY_CACHE_DIR = Path(__file__).parents[1] / "data" / "adm1"
+_NE_BACKGROUND_PATH = Path(__file__).parents[1] / "data" / "ne110m_countries.parquet"
 _ADM1_COLS = ["iso_3", "adm0_name", "adm1_id", "adm1_name", "geometry"]
 _BOUNDARY_SIMPLIFY_TOL = 0.001  # degrees (~100 m); sharp enough for adm1 display
 
@@ -294,6 +295,11 @@ def load_adm0_boundaries(iso3s: list[str]) -> gpd.GeoDataFrame:
     adm1 = _load_adm1_from_cache(iso3s)
     dissolved = adm1.dissolve(by="iso_3", as_index=False, aggfunc="first")
     return dissolved[["iso_3", "adm0_name", "geometry"]].reset_index(drop=True)
+
+
+def load_background_countries() -> gpd.GeoDataFrame:
+    """Load Natural Earth 110m world country outlines for map backgrounds."""
+    return gpd.read_parquet(_NE_BACKGROUND_PATH)
 
 
 def load_adm1_boundaries(iso3s: list[str]) -> gpd.GeoDataFrame:
