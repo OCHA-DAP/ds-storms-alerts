@@ -277,23 +277,34 @@ def _drop_tiny_parts(geom, min_area: float = 0.05):
 def _draw_countries(
     ax, countries: gpd.GeoDataFrame, clip_bbox: tuple | None = None
 ) -> None:
+    """Draw adm0 outlines — used for background (non-affected) countries."""
     if countries.empty:
         return
-    # Drop tiny island parts (the bottleneck for countries like USA with 57k parts)
-    # then simplify; much faster than clipping to view extent.
-    geoms = countries.assign(
-        geometry=countries.geometry.map(_drop_tiny_parts)
-        .simplify(0.05, preserve_topology=False)
-    )
+    geoms = countries.copy()
     if clip_bbox is not None:
         xlim, ylim = clip_bbox
         geoms = geoms.clip(_shapely_box(xlim[0], ylim[0], xlim[1], ylim[1]))
     if geoms.empty:
         return
-    geoms.plot(
-        ax=ax, facecolor="#f5f5f5", edgecolor="#999999",
-        linewidth=0.6, zorder=1,
-    )
+    geoms.plot(ax=ax, facecolor="#f5f5f5", edgecolor="#aaaaaa", linewidth=0.5, zorder=1)
+
+
+def _draw_adm1(
+    ax, adm1_gdf: gpd.GeoDataFrame, clip_bbox: tuple | None = None
+) -> None:
+    """Draw adm1 polygons for affected countries with internal division lines."""
+    if adm1_gdf.empty:
+        return
+    geoms = adm1_gdf.copy()
+    if clip_bbox is not None:
+        xlim, ylim = clip_bbox
+        geoms = geoms.clip(_shapely_box(xlim[0], ylim[0], xlim[1], ylim[1]))
+    if geoms.empty:
+        return
+    geoms.plot(ax=ax, facecolor="#f5f5f5", edgecolor="#bbbbbb", linewidth=0.35, zorder=1)
+    # Emphasise the national (adm0) border with a slightly thicker line.
+    outer = geoms.dissolve(by="iso_3", as_index=False)
+    outer.plot(ax=ax, facecolor="none", edgecolor="#888888", linewidth=0.8, zorder=1)
 
 
 def _draw_obsv_buffers(ax, buffers: gpd.GeoDataFrame) -> list[mpatches.Patch]:
@@ -479,10 +490,12 @@ def track_plot_buffers(
     tracks: gpd.GeoDataFrame,
     buffers: gpd.GeoDataFrame,
     countries: gpd.GeoDataFrame,
+    adm1_gdf: gpd.GeoDataFrame | None = None,
 ) -> str:
     """Map: storm tracks + 34/50/64 kt observed and forecast-only buffers.
 
-    Clipped to the forecast cone + the most recent observed points.
+    Affected countries (those in adm1_gdf) are rendered with adm1 division
+    lines; all other countries in the frame use adm0 outlines only.
     """
     if tracks.empty:
         return ""
@@ -490,8 +503,17 @@ def track_plot_buffers(
         buffers[buffers["kind"] == "forecast"] if not buffers.empty else buffers
     )
     xlim, ylim = _forecast_view_bbox(tracks, fcast_features)
+    affected_iso3s = (
+        set(adm1_gdf["iso_3"].unique())
+        if adm1_gdf is not None and not adm1_gdf.empty
+        else set()
+    )
     fig, ax = plt.subplots(figsize=(9, 6))
-    _draw_countries(ax, countries, clip_bbox=(xlim, ylim))
+    _draw_countries(
+        ax, countries[~countries["iso_3"].isin(affected_iso3s)], clip_bbox=(xlim, ylim)
+    )
+    if adm1_gdf is not None and not adm1_gdf.empty:
+        _draw_adm1(ax, adm1_gdf, clip_bbox=(xlim, ylim))
     obsv_proxies = _draw_obsv_buffers(ax, buffers)
     fcast_proxies = _draw_fcast_buffers(ax, buffers)
     _draw_tracks(ax, tracks)
@@ -513,16 +535,27 @@ def track_plot_wsp(
     wsp: gpd.GeoDataFrame,
     countries: gpd.GeoDataFrame,
     wind_threshold_kt: int = 50,
+    adm1_gdf: gpd.GeoDataFrame | None = None,
 ) -> str:
     """Map: tracks + observed buffers + WSP fcastonly polygons (one threshold).
 
-    Clipped to the WSP forecast extent + the most recent observed points.
+    Affected countries (those in adm1_gdf) are rendered with adm1 division
+    lines; all other countries in the frame use adm0 outlines only.
     """
     if tracks.empty:
         return ""
     xlim, ylim = _forecast_view_bbox(tracks, wsp)
+    affected_iso3s = (
+        set(adm1_gdf["iso_3"].unique())
+        if adm1_gdf is not None and not adm1_gdf.empty
+        else set()
+    )
     fig, ax = plt.subplots(figsize=(9, 6))
-    _draw_countries(ax, countries, clip_bbox=(xlim, ylim))
+    _draw_countries(
+        ax, countries[~countries["iso_3"].isin(affected_iso3s)], clip_bbox=(xlim, ylim)
+    )
+    if adm1_gdf is not None and not adm1_gdf.empty:
+        _draw_adm1(ax, adm1_gdf, clip_bbox=(xlim, ylim))
     obsv_proxies = _draw_obsv_buffers(ax, buffers)
     wsp_proxies = _draw_wsp_polygons(ax, wsp, wind_threshold_kt)
     _draw_tracks(ax, tracks)

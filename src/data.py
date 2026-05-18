@@ -11,7 +11,7 @@ _FIELDMAPS_ADM1_URL = (
 )
 _BOUNDARY_CACHE_DIR = Path(__file__).parents[1] / "data" / "adm1"
 _ADM1_COLS = ["iso_3", "adm0_name", "adm1_id", "adm1_name", "geometry"]
-_BOUNDARY_SIMPLIFY_TOL = 0.005  # degrees (~500 m); fine for display, keeps files small
+_BOUNDARY_SIMPLIFY_TOL = 0.001  # degrees (~100 m); sharp enough for adm1 display
 
 _ADMIN_LEVEL = 0
 _WIND_SPEEDS_KT = (34, 50, 64)
