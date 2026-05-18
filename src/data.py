@@ -1,0 +1,500 @@
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import fsspec
+import geopandas as gpd
+import pandas as pd
+from sqlalchemy import Engine, bindparam, text
+
+_FIELDMAPS_ADM1_URL = (
+    "https://data.fieldmaps.io/edge-matched/humanitarian/intl/adm1_polygons.parquet"
+)
+_BOUNDARY_CACHE_DIR = Path(__file__).parents[1] / "data" / "adm1"
+_ADM1_COLS = ["iso_3", "adm0_name", "adm1_id", "adm1_name", "geometry"]
+_BOUNDARY_SIMPLIFY_TOL = 0.005  # degrees (~500 m); fine for display, keeps files small
+
+_ADMIN_LEVEL = 0
+_WIND_SPEEDS_KT = (34, 50, 64)
+
+
+def fetch_fcast_exposure(engine: Engine, issued_time: datetime) -> pd.DataFrame:
+    """Forecast-only exposure for all wind speeds at issued_time (admin0, > 0).
+
+    Returns columns: atcf_id, iso3, wind_speed_kt, pop_exposed, name, season.
+    """
+    sql = text("""
+        SELECT e.atcf_id, e.iso3, e.wind_speed_kt, e.pop_exposed,
+               s.name, s.season
+        FROM storms.nhc_tracks_fcastonly_exposure e
+        LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id
+        WHERE e.issued_time = :issued_time
+          AND e.admin_level = :admin_level
+          AND e.pop_exposed > 0
+    """)
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql,
+            {"issued_time": issued_time, "admin_level": _ADMIN_LEVEL},
+        )
+        return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+
+
+def fetch_current_obsv_exposure(
+    engine: Engine, atcf_ids: list[str], issued_time: datetime
+) -> pd.DataFrame:
+    """Latest cumulative observed exposure per (atcf_id, iso3, wind_speed_kt).
+
+    Uses valid_time <= issued_time.
+    Returns columns: atcf_id, iso3, wind_speed_kt, pop_exposed, name, season.
+    """
+    cols = ["atcf_id", "iso3", "wind_speed_kt", "pop_exposed", "name", "season"]
+    if not atcf_ids:
+        return pd.DataFrame(columns=cols)
+    sql = text("""
+        SELECT DISTINCT ON (e.atcf_id, e.iso3, e.wind_speed_kt)
+          e.atcf_id, e.iso3, e.wind_speed_kt, e.pop_exposed,
+          s.name, s.season
+        FROM storms.nhc_tracks_obsv_exposure e
+        LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id
+        WHERE e.atcf_id IN :atcf_ids
+          AND e.admin_level = :admin_level
+          AND e.valid_time <= :issued_time
+        ORDER BY e.atcf_id, e.iso3, e.wind_speed_kt, e.valid_time DESC
+    """).bindparams(bindparam("atcf_ids", expanding=True))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql,
+            {
+                "atcf_ids": atcf_ids,
+                "issued_time": issued_time,
+                "admin_level": _ADMIN_LEVEL,
+            },
+        )
+        return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+
+
+def fetch_gdacs_current_exposure(
+    engine: Engine, atcf_ids: list[str]
+) -> pd.DataFrame:
+    """Latest GDACS exposure per (atcf_id, iso3, wind_speed_kt) for active storms.
+
+    Returns columns: atcf_id, iso3, wind_speed_kt, pop_exposed, name, season.
+    """
+    cols = ["atcf_id", "iso3", "wind_speed_kt", "pop_exposed", "name", "season"]
+    if not atcf_ids:
+        return pd.DataFrame(columns=cols)
+    sql = text("""
+        SELECT DISTINCT ON (lk.atcf_id, g.iso3, g.wind_speed_kt)
+            lk.atcf_id, g.iso3, g.wind_speed_kt, g.pop_exposed,
+            s.name, s.season
+        FROM storms.gdacs_exposure g
+        JOIN storms.storm_id_lookup lk ON lk.gdacs_eventid = g.gdacs_eventid
+        LEFT JOIN storms.nhc_storms s ON s.atcf_id = lk.atcf_id
+        WHERE lk.atcf_id IN :atcf_ids
+          AND g.admin_level = :admin_level
+          AND g.pop_exposed > 0
+        ORDER BY lk.atcf_id, g.iso3, g.wind_speed_kt, g.valid_time DESC
+    """).bindparams(bindparam("atcf_ids", expanding=True))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql,
+            {"atcf_ids": atcf_ids, "admin_level": _ADMIN_LEVEL},
+        )
+        return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+
+
+def fetch_adam_current_exposure(
+    engine: Engine, atcf_ids: list[str]
+) -> pd.DataFrame:
+    """Latest ADAM exposure per (atcf_id, iso3, wind_speed_kt) for active storms.
+
+    Returns columns: atcf_id, iso3, wind_speed_kt, pop_exposed, name, season.
+    """
+    cols = ["atcf_id", "iso3", "wind_speed_kt", "pop_exposed", "name", "season"]
+    if not atcf_ids:
+        return pd.DataFrame(columns=cols)
+    sql = text("""
+        SELECT DISTINCT ON (lk.atcf_id, a.iso3, a.wind_speed_kt)
+            lk.atcf_id, a.iso3, a.wind_speed_kt, a.pop_exposed,
+            s.name, s.season
+        FROM storms.adam_exposure a
+        JOIN storms.storm_id_lookup lk ON lk.adam_eventid = a.adam_eventid
+        LEFT JOIN storms.nhc_storms s ON s.atcf_id = lk.atcf_id
+        WHERE lk.atcf_id IN :atcf_ids
+          AND a.admin_level = :admin_level
+          AND a.pop_exposed > 0
+        ORDER BY lk.atcf_id, a.iso3, a.wind_speed_kt, a.valid_time DESC
+    """).bindparams(bindparam("atcf_ids", expanding=True))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql,
+            {"atcf_ids": atcf_ids, "admin_level": _ADMIN_LEVEL},
+        )
+        return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+
+
+def fetch_adam_historical_exposure(
+    engine: Engine, iso3s: list[str], exclude_atcf_ids: list[str]
+) -> pd.DataFrame:
+    """Final ADAM exposure per (adam_eventid, iso3, wind_speed_kt) for past storms.
+
+    Returns columns:
+        adam_eventid, iso3, wind_speed_kt, pop_exposed, name, season.
+    name/season fall back to f"ADAM {adam_eventid}" / valid_time year if the
+    event is not linked to an NHC storm.
+    """
+    cols = ["adam_eventid", "iso3", "wind_speed_kt",
+            "pop_exposed", "name", "season"]
+    if not iso3s:
+        return pd.DataFrame(columns=cols)
+    sql = text("""
+        SELECT DISTINCT ON (a.adam_eventid, a.iso3, a.wind_speed_kt)
+            a.adam_eventid, a.iso3, a.wind_speed_kt, a.pop_exposed,
+            s.name, s.season,
+            EXTRACT(YEAR FROM a.valid_time)::int AS fallback_year,
+            lk.atcf_id
+        FROM storms.adam_exposure a
+        LEFT JOIN storms.storm_id_lookup lk ON lk.adam_eventid = a.adam_eventid
+        LEFT JOIN storms.nhc_storms s ON s.atcf_id = lk.atcf_id
+        WHERE a.iso3 IN :iso3s
+          AND a.admin_level = :admin_level
+          AND a.pop_exposed > 0
+        ORDER BY a.adam_eventid, a.iso3, a.wind_speed_kt, a.valid_time DESC
+    """).bindparams(bindparam("iso3s", expanding=True))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql,
+            {"iso3s": iso3s, "admin_level": _ADMIN_LEVEL},
+        )
+        df = pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+    df = df[~df["atcf_id"].isin(exclude_atcf_ids)].copy()
+    df["name"] = df["name"].fillna(
+        df["adam_eventid"].apply(lambda e: f"ADAM {e}")
+    )
+    df["season"] = df["season"].fillna(df["fallback_year"]).astype(int)
+    return df[cols].reset_index(drop=True)
+
+
+def fetch_gdacs_historical_exposure(
+    engine: Engine, iso3s: list[str], exclude_atcf_ids: list[str]
+) -> pd.DataFrame:
+    """Final GDACS exposure per (gdacs_eventid, iso3, wind_speed_kt) for past storms.
+
+    Returns columns:
+        gdacs_eventid, iso3, wind_speed_kt, pop_exposed, name, season.
+    name/season come from nhc_storms via storm_id_lookup; when not available,
+    name falls back to f"GDACS {gdacs_eventid}" and season to the year of
+    the GDACS valid_time.
+    """
+    cols = ["gdacs_eventid", "iso3", "wind_speed_kt",
+            "pop_exposed", "name", "season"]
+    if not iso3s:
+        return pd.DataFrame(columns=cols)
+    sql = text("""
+        SELECT DISTINCT ON (g.gdacs_eventid, g.iso3, g.wind_speed_kt)
+            g.gdacs_eventid, g.iso3, g.wind_speed_kt, g.pop_exposed,
+            s.name, s.season,
+            EXTRACT(YEAR FROM g.valid_time)::int AS fallback_year,
+            lk.atcf_id
+        FROM storms.gdacs_exposure g
+        LEFT JOIN storms.storm_id_lookup lk ON lk.gdacs_eventid = g.gdacs_eventid
+        LEFT JOIN storms.nhc_storms s ON s.atcf_id = lk.atcf_id
+        WHERE g.iso3 IN :iso3s
+          AND g.admin_level = :admin_level
+          AND g.pop_exposed > 0
+        ORDER BY g.gdacs_eventid, g.iso3, g.wind_speed_kt, g.valid_time DESC
+    """).bindparams(bindparam("iso3s", expanding=True))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql,
+            {"iso3s": iso3s, "admin_level": _ADMIN_LEVEL},
+        )
+        df = pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+    df = df[~df["atcf_id"].isin(exclude_atcf_ids)].copy()
+    df["name"] = df["name"].fillna(
+        df["gdacs_eventid"].apply(lambda e: f"GDACS {e}")
+    )
+    df["season"] = df["season"].fillna(df["fallback_year"]).astype(int)
+    return df[cols].reset_index(drop=True)
+
+
+def fetch_track_geo(
+    engine: Engine, atcf_ids: list[str], issued_time: datetime
+) -> gpd.GeoDataFrame:
+    """Storm track points for plotting forecast + observed paths.
+
+    For each atcf_id, returns:
+      - observed points: leadtime=0 rows with valid_time <= issued_time
+      - forecast points: rows where issued_time = :issued_time and leadtime > 0
+
+    Returns GeoDataFrame with columns: atcf_id, valid_time, kind, geometry.
+    kind is one of 'observed' or 'forecast'.
+    """
+    if not atcf_ids:
+        return gpd.GeoDataFrame(
+            columns=["atcf_id", "valid_time", "kind", "geometry"], crs="EPSG:4326"
+        )
+    sql = text("""
+        SELECT atcf_id, valid_time, geometry, 'observed' AS kind
+        FROM storms.nhc_tracks_geo
+        WHERE atcf_id IN :atcf_ids
+          AND leadtime = 0
+          AND valid_time <= :issued_time
+        UNION ALL
+        SELECT atcf_id, valid_time, geometry, 'forecast' AS kind
+        FROM storms.nhc_tracks_geo
+        WHERE atcf_id IN :atcf_ids
+          AND issued_time = :issued_time
+          AND leadtime > 0
+    """).bindparams(bindparam("atcf_ids", expanding=True))
+    return gpd.read_postgis(
+        sql,
+        engine,
+        params={"atcf_ids": atcf_ids, "issued_time": issued_time},
+        geom_col="geometry",
+    )
+
+
+def _load_adm1_from_cache(iso3s: list[str]) -> gpd.GeoDataFrame:
+    """Return cached adm1 rows for iso3s, downloading any that are missing.
+
+    Each country is cached as ~/.cache/ds-storms-alerts/adm1/{iso3}.parquet
+    containing all adm1 polygons with columns: iso_3, adm0_name, adm1_id,
+    adm1_name, geometry.
+    """
+    _BOUNDARY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    missing = [i for i in iso3s if not (_BOUNDARY_CACHE_DIR / f"{i}.parquet").exists()]
+    if missing:
+        filters = [("iso_3", "in", missing)]
+        with fsspec.open(_FIELDMAPS_ADM1_URL, "rb") as f:
+            raw = gpd.read_parquet(f, columns=_ADM1_COLS, filters=filters)
+        for iso3, sub in raw.groupby("iso_3"):
+            sub = sub.copy()
+            sub["geometry"] = sub.geometry.simplify(
+                _BOUNDARY_SIMPLIFY_TOL, preserve_topology=True
+            )
+            sub.reset_index(drop=True).to_parquet(
+                _BOUNDARY_CACHE_DIR / f"{iso3}.parquet"
+            )
+    parts = [
+        gpd.read_parquet(_BOUNDARY_CACHE_DIR / f"{iso3}.parquet") for iso3 in iso3s
+    ]
+    return gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=parts[0].crs)
+
+
+def load_adm0_boundaries(iso3s: list[str]) -> gpd.GeoDataFrame:
+    """Load adm0 boundaries by dissolving cached adm1 rows.
+
+    Returns columns: iso_3, adm0_name, geometry.
+    """
+    if not iso3s:
+        return gpd.GeoDataFrame(
+            columns=["iso_3", "adm0_name", "geometry"], crs="EPSG:4326"
+        )
+    adm1 = _load_adm1_from_cache(iso3s)
+    dissolved = adm1.dissolve(by="iso_3", as_index=False, aggfunc="first")
+    return dissolved[["iso_3", "adm0_name", "geometry"]].reset_index(drop=True)
+
+
+def load_adm1_boundaries(iso3s: list[str]) -> gpd.GeoDataFrame:
+    """Load adm1 boundaries for the given iso3s.
+
+    Returns columns: iso_3, adm0_name, adm1_id, adm1_name, geometry.
+    """
+    if not iso3s:
+        return gpd.GeoDataFrame(columns=_ADM1_COLS, crs="EPSG:4326")
+    return _load_adm1_from_cache(iso3s)
+
+
+def fetch_wsp_fcastonly_exposure(
+    engine: Engine, atcf_ids: list[str], issued_time: datetime
+) -> pd.DataFrame:
+    """WSP fcastonly exposure per (atcf_id, iso3, wind_threshold_kt, percentage).
+
+    Returns columns:
+        atcf_id, iso3, wind_threshold_kt, percentage, pop_exposed.
+    """
+    cols = ["atcf_id", "iso3", "wind_threshold_kt", "percentage", "pop_exposed"]
+    if not atcf_ids:
+        return pd.DataFrame(columns=cols)
+    sql = text("""
+        SELECT atcf_id, pcode AS iso3, wind_threshold_kt, percentage, pop_exposed
+        FROM storms.nhc_wsp_fcastonly_exposure
+        WHERE atcf_id IN :atcf_ids
+          AND issued_time = :issued_time
+          AND admin_level = :admin_level
+        ORDER BY atcf_id, iso3, wind_threshold_kt, percentage
+    """).bindparams(bindparam("atcf_ids", expanding=True))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql,
+            {
+                "atcf_ids": atcf_ids,
+                "issued_time": issued_time,
+                "admin_level": _ADMIN_LEVEL,
+            },
+        )
+        return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+
+
+def fetch_wsp_fcastonly_polygons(
+    engine: Engine,
+    atcf_ids: list[str],
+    issued_time: datetime,
+    wind_threshold_kt: int = 50,
+) -> gpd.GeoDataFrame:
+    """Fcastonly WSP polygons for the active storms at one wind threshold.
+
+    Returns GeoDataFrame with columns: atcf_id, percentage, geometry.
+    """
+    if not atcf_ids:
+        return gpd.GeoDataFrame(
+            columns=["atcf_id", "percentage", "geometry"], crs="EPSG:4326"
+        )
+    sql = text("""
+        SELECT atcf_id, percentage, geometry
+        FROM storms.nhc_wsp_fcastonly_polygon
+        WHERE atcf_id IN :atcf_ids
+          AND issued_time = :issued_time
+          AND wind_threshold_kt = :wind_threshold_kt
+          AND geometry IS NOT NULL
+    """).bindparams(bindparam("atcf_ids", expanding=True))
+    return gpd.read_postgis(
+        sql, engine,
+        params={
+            "atcf_ids": atcf_ids,
+            "issued_time": issued_time,
+            "wind_threshold_kt": wind_threshold_kt,
+        },
+        geom_col="geometry",
+    )
+
+
+def fetch_prev_any_pairs(
+    engine: Engine, issued_time: datetime, window_days: int = 7
+) -> list[dict]:
+    """Return (atcf_id, iso3, name, season) rows for storm-country pairs that had
+    non-zero forecasted exposure at ANY wind speed in the advisory immediately
+    preceding issued_time (within window_days). Used to detect "final update" pairs.
+    """
+    cutoff = issued_time - timedelta(days=window_days)
+    sql = text("""
+        WITH prev_track_times AS (
+            SELECT atcf_id, MAX(issued_time) AS prev_time
+            FROM storms.nhc_tracks_fcastonly_exposure
+            WHERE issued_time < :issued_time
+              AND issued_time >= :cutoff
+              AND admin_level = :admin_level
+              AND pop_exposed > 0
+            GROUP BY atcf_id
+        ),
+        track_pairs AS (
+            SELECT e.atcf_id, e.iso3, s.name, s.season
+            FROM storms.nhc_tracks_fcastonly_exposure e
+            JOIN prev_track_times p
+              ON e.atcf_id = p.atcf_id AND e.issued_time = p.prev_time
+            LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id
+            WHERE e.admin_level = :admin_level AND e.pop_exposed > 0
+        ),
+        prev_wsp_times AS (
+            SELECT atcf_id, MAX(issued_time) AS prev_time
+            FROM storms.nhc_wsp_fcastonly_exposure
+            WHERE issued_time < :issued_time
+              AND issued_time >= :cutoff
+              AND admin_level = :admin_level
+              AND pop_exposed > 0
+            GROUP BY atcf_id
+        ),
+        wsp_pairs AS (
+            SELECT e.atcf_id, e.pcode AS iso3, s.name, s.season
+            FROM storms.nhc_wsp_fcastonly_exposure e
+            JOIN prev_wsp_times p
+              ON e.atcf_id = p.atcf_id AND e.issued_time = p.prev_time
+            LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id
+            WHERE e.admin_level = :admin_level AND e.pop_exposed > 0
+        )
+        SELECT atcf_id, iso3, name, season FROM track_pairs
+        UNION
+        SELECT atcf_id, iso3, name, season FROM wsp_pairs
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sql,
+            {
+                "issued_time": issued_time,
+                "cutoff": cutoff,
+                "admin_level": _ADMIN_LEVEL,
+            },
+        ).fetchall()
+    return [{"atcf_id": r[0], "iso3": r[1], "name": r[2], "season": r[3]} for r in rows]
+
+
+def fetch_buffers(
+    engine: Engine, atcf_ids: list[str], issued_time: datetime
+) -> gpd.GeoDataFrame:
+    """Observed and forecast wind buffer polygons at all wind speeds (34/50/64 kt).
+
+    Observed: per (atcf_id, wind_speed_kt), the latest valid_time <= issued_time
+    row from nhc_tracks_obsv_buffers.
+    Forecast: rows for the given issued_time from nhc_tracks_fcastonly_buffers.
+
+    Returns GeoDataFrame with columns: atcf_id, wind_speed_kt, kind, geometry.
+    """
+    if not atcf_ids:
+        return gpd.GeoDataFrame(
+            columns=["atcf_id", "wind_speed_kt", "kind", "geometry"], crs="EPSG:4326"
+        )
+    sql = text("""
+        SELECT atcf_id, wind_speed_kt, kind, geometry FROM (
+            SELECT DISTINCT ON (atcf_id, wind_speed_kt)
+                atcf_id, wind_speed_kt, geometry, 'observed' AS kind
+            FROM storms.nhc_tracks_obsv_buffers
+            WHERE atcf_id IN :atcf_ids
+              AND valid_time <= :issued_time
+            ORDER BY atcf_id, wind_speed_kt, valid_time DESC
+        ) o
+        UNION ALL
+        SELECT atcf_id, wind_speed_kt, kind, geometry FROM (
+            SELECT atcf_id, wind_speed_kt, geometry, 'forecast' AS kind
+            FROM storms.nhc_tracks_fcastonly_buffers
+            WHERE atcf_id IN :atcf_ids
+              AND issued_time = :issued_time
+        ) f
+    """).bindparams(bindparam("atcf_ids", expanding=True))
+    return gpd.read_postgis(
+        sql,
+        engine,
+        params={"atcf_ids": atcf_ids, "issued_time": issued_time},
+        geom_col="geometry",
+    )
+
+
+def fetch_historical_obsv_exposure(
+    engine: Engine, iso3s: list[str], exclude_atcf_ids: list[str]
+) -> pd.DataFrame:
+    """Final cumulative observed exposure per (atcf_id, iso3, wind_speed_kt).
+
+    Latest valid_time row per storm/country/wind-speed, with active atcf_ids
+    excluded.
+    Returns columns: atcf_id, iso3, wind_speed_kt, pop_exposed, name, season.
+    """
+    cols = ["atcf_id", "iso3", "wind_speed_kt", "pop_exposed", "name", "season"]
+    if not iso3s:
+        return pd.DataFrame(columns=cols)
+    sql = text("""
+        SELECT DISTINCT ON (e.atcf_id, e.iso3, e.wind_speed_kt)
+          e.atcf_id, e.iso3, e.wind_speed_kt, e.pop_exposed,
+          s.name, s.season
+        FROM storms.nhc_tracks_obsv_exposure e
+        LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id
+        WHERE e.iso3 IN :iso3s
+          AND e.admin_level = :admin_level
+        ORDER BY e.atcf_id, e.iso3, e.wind_speed_kt, e.valid_time DESC
+    """).bindparams(bindparam("iso3s", expanding=True))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql,
+            {"iso3s": iso3s, "admin_level": _ADMIN_LEVEL},
+        )
+        df = pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+    return df[~df["atcf_id"].isin(exclude_atcf_ids)].reset_index(drop=True)
