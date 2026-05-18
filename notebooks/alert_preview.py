@@ -8,10 +8,10 @@ app = marimo.App(width="full")
 def _imports():
     import marimo as mo
     import ocha_stratus as stratus
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from sqlalchemy import text
     from pipelines.run_alert import generate_alert_html
-    return datetime, generate_alert_html, mo, stratus, text
+    return datetime, generate_alert_html, mo, stratus, text, timedelta
 
 
 @app.cell
@@ -41,7 +41,7 @@ def _storm_selector(mo, storm_options):
 
 
 @app.cell
-def _time_selector(mo, storm, engine, text):
+def _time_selector(mo, storm, engine, text, timedelta):
     _rows = []
     if storm.value is not None:
         with engine.connect() as _conn:
@@ -55,7 +55,15 @@ def _time_selector(mo, storm, engine, text):
                 "WHERE atcf_id = :aid "
                 "ORDER BY issued_time DESC"
             ), {"aid": storm.value}).fetchall()
-    _options = [r[0].strftime("%Y-%m-%dT%H") for r in _rows]
+    _times = [r[0] for r in _rows]
+    # Build options dict: label -> value string
+    _options = {t.strftime("%Y-%m-%dT%H"): t.strftime("%Y-%m-%dT%H") for t in _times}
+    # Prepend synthetic "final advisory" = last advisory + 6h, if not already present
+    if _times:
+        _final_dt = max(_times) + timedelta(hours=6)
+        _final_key = _final_dt.strftime("%Y-%m-%dT%H")
+        if _final_key not in _options:
+            _options = {f"{_final_key} (final advisory)": _final_key, **_options}
     issued_time = mo.ui.dropdown(options=_options, label="Issued time")
     generate_btn = mo.ui.run_button(label="Generate")
     mo.hstack([issued_time, generate_btn], gap=2)

@@ -1,7 +1,10 @@
 import argparse
+import base64
+import io
 import logging
 import math
 import os
+import re
 import sys
 import tempfile
 import webbrowser
@@ -663,8 +666,9 @@ if __name__ == "__main__":
         logger.info("No countries with non-zero 64kt exposure — nothing to send.")
         sys.exit(0)
 
-    subject = f"{'[TEST] ' if TEST_EMAIL else ''}Storm alert: {issued_time}"
-    campaign_name = f"ds-storms-alerts_{issued_time}"
+    prefix = "[TEST] " if TEST_EMAIL else ""
+    subject = f"{prefix}Storm alert: {issued_time}"
+    campaign_name = f"{prefix}ds-storms-alerts_{issued_time}"
 
     if preview:
         style = "font-family:sans-serif;max-width:900px;margin:auto"
@@ -691,6 +695,25 @@ if __name__ == "__main__":
         from ocha_relay.listmonk import ListmonkClient
 
         client = ListmonkClient.from_env()
+
+        logger.info("Uploading images to listmonk media library...")
+        _uploaded: dict[str, str] = {}
+
+        def _upload_image(m: re.Match) -> str:
+            b64 = m.group(1)
+            if b64 not in _uploaded:
+                _uploaded[b64] = client.upload_media(
+                    base64.b64decode(b64), "chart.png"
+                )
+            return _uploaded[b64]
+
+        body = re.sub(
+            r'data:image/png;base64,([A-Za-z0-9+/=]+)',
+            _upload_image,
+            body,
+        )
+        logger.info(f"Uploaded {len(_uploaded)} images.")
+
         cid = client.create_campaign(
             name=campaign_name,
             subject=subject,

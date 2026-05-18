@@ -4,21 +4,23 @@ on:
   workflow_dispatch:
     inputs:
       issued_time:
-        description: 'Issued time of forecast (format: YYYY-MM-DDTHH, e.g. 2025-01-15T12)'
+        description: 'Issued time of forecast (format: YYYY-MM-DDTHH). Leave blank to use current UTC time.'
         type: string
-        required: true
+        required: false
       test_email:
-        description: 'TEST_EMAIL: If True, send to test list instead of prod (fallback: True)'
+        description: 'TEST_EMAIL: If True, send to test list instead of prod (fallback: repo var or True)'
         type: choice
         options:
           - 'True'
           - 'False'
       dry_run:
-        description: 'DRY_RUN: If True, skip write/email operations (fallback: True)'
+        description: 'DRY_RUN: If True, skip write/email operations (fallback: repo var or True)'
         type: choice
         options:
           - 'True'
           - 'False'
+  schedule:
+    - cron: '0 0,6,12,18 * * *'
 
 jobs:
   run-alert:
@@ -30,6 +32,14 @@ jobs:
           enable-cache: true
       - name: Install dependencies
         run: uv sync
+      - name: Set issued time
+        id: time
+        run: |
+          if [ -n "${{ inputs.issued_time }}" ]; then
+            echo "val=${{ inputs.issued_time }}" >> $GITHUB_OUTPUT
+          else
+            echo "val=$(date -u +'%Y-%m-%dT%H')" >> $GITHUB_OUTPUT
+          fi
       - name: Run alert pipeline
         env:
           DSCI_AZ_BLOB_DEV_SAS: ${{ secrets.DSCI_AZ_BLOB_DEV_SAS }}
@@ -42,4 +52,4 @@ jobs:
           DSCI_LISTMONK_API_KEY: ${{ secrets.DSCI_LISTMONK_API_KEY }}
           TEST_EMAIL: ${{ inputs.test_email || vars.TEST_EMAIL || 'True' }}
           DRY_RUN: ${{ inputs.dry_run || vars.DRY_RUN || 'True' }}
-        run: uv run python pipelines/run_alert.py --issued-time ${{ inputs.issued_time }}
+        run: uv run python pipelines/run_alert.py --issued-time ${{ steps.time.outputs.val }}

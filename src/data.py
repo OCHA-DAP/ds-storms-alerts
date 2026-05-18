@@ -377,13 +377,17 @@ def fetch_wsp_fcastonly_polygons(
 
 
 def fetch_prev_any_pairs(
-    engine: Engine, issued_time: datetime, window_days: int = 7
+    engine: Engine, issued_time: datetime, prev_hours: int = 6
 ) -> list[dict]:
     """Return (atcf_id, iso3, name, season) rows for storm-country pairs that had
-    non-zero forecasted exposure at ANY wind speed in the advisory immediately
-    preceding issued_time (within window_days). Used to detect "final update" pairs.
+    non-zero forecasted exposure at ANY wind speed in the advisory issued in the
+    previous 6-hour window [issued_time - prev_hours, issued_time).
+
+    Using a single 6-hour window (matching the NHC advisory cadence) means the
+    final-update notice fires exactly once — in the run immediately after a
+    storm's last advisory — rather than repeatedly for the following 7 days.
     """
-    cutoff = issued_time - timedelta(days=window_days)
+    cutoff = issued_time - timedelta(hours=prev_hours)
     sql = text("""
         WITH prev_track_times AS (
             SELECT atcf_id, MAX(issued_time) AS prev_time
