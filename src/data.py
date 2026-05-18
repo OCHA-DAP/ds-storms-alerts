@@ -1,8 +1,11 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 
 import fsspec
 import geopandas as gpd
+import ocha_stratus as stratus
 import pandas as pd
 from sqlalchemy import Engine, bindparam, text
 
@@ -13,6 +16,10 @@ _BOUNDARY_CACHE_DIR = Path(__file__).parents[1] / "data" / "adm1"
 _NE_BACKGROUND_PATH = Path(__file__).parents[1] / "data" / "ne110m_countries.parquet"
 _ADM1_COLS = ["iso_3", "adm0_name", "adm1_id", "adm1_name", "geometry"]
 _BOUNDARY_SIMPLIFY_TOL = 0.001  # degrees (~100 m); sharp enough for adm1 display
+
+# Shared blob location — same as ds-storms-pipeline (raster container).
+_BLOB_ADM1_CONTAINER = "raster"
+_BLOB_ADM1_PREFIX = "fieldmaps/adm1/"
 
 _ADMIN_LEVEL = 0
 _WIND_SPEEDS_KT = (34, 50, 64)
@@ -256,30 +263,55 @@ def fetch_track_geo(
     )
 
 
-def _load_adm1_from_cache(iso3s: list[str]) -> gpd.GeoDataFrame:
-    """Return cached adm1 rows for iso3s, downloading any that are missing.
+def _load_one_adm1(iso3: str) -> gpd.GeoDataFrame:
+    """Load adm1 for a single country.
 
-    Each country is cached as ~/.cache/ds-storms-alerts/adm1/{iso3}.parquet
-    containing all adm1 polygons with columns: iso_3, adm0_name, adm1_id,
-    adm1_name, geometry.
+    Priority:
+    1. Shared blob (raster/fieldmaps/adm1/{iso3}.parquet) — same source as
+       ds-storms-pipeline; full-res FieldMaps, simplified here for display.
+    2. Local repo file (data/adm1/{iso3}.parquet) — pre-simplified fallback.
+    3. FieldMaps URL — last resort; writes result to local repo for next time.
     """
+    local_path = _BOUNDARY_CACHE_DIR / f"{iso3}.parquet"
+
+    # 1. Try blob
+    try:
+        raw_bytes = stratus.load_blob_data(
+            f"{_BLOB_ADM1_PREFIX}{iso3}.parquet",
+            container_name=_BLOB_ADM1_CONTAINER,
+        )
+        gdf = gpd.read_parquet(BytesIO(raw_bytes))[list(_ADM1_COLS)]
+        gdf = gdf.copy()
+        gdf["geometry"] = gdf.geometry.simplify(
+            _BOUNDARY_SIMPLIFY_TOL, preserve_topology=True
+        )
+        return gdf.reset_index(drop=True)
+    except Exception:
+        pass
+
+    # 2. Local repo file
+    if local_path.exists():
+        return gpd.read_parquet(local_path)
+
+    # 3. FieldMaps URL — download and cache locally
+    with fsspec.open(_FIELDMAPS_ADM1_URL, "rb") as f:
+        raw = gpd.read_parquet(
+            f, columns=_ADM1_COLS, filters=[("iso_3", "==", iso3)]
+        )
+    raw = raw.copy()
+    raw["geometry"] = raw.geometry.simplify(
+        _BOUNDARY_SIMPLIFY_TOL, preserve_topology=True
+    )
+    raw = raw.reset_index(drop=True)
     _BOUNDARY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    missing = [i for i in iso3s if not (_BOUNDARY_CACHE_DIR / f"{i}.parquet").exists()]
-    if missing:
-        filters = [("iso_3", "in", missing)]
-        with fsspec.open(_FIELDMAPS_ADM1_URL, "rb") as f:
-            raw = gpd.read_parquet(f, columns=_ADM1_COLS, filters=filters)
-        for iso3, sub in raw.groupby("iso_3"):
-            sub = sub.copy()
-            sub["geometry"] = sub.geometry.simplify(
-                _BOUNDARY_SIMPLIFY_TOL, preserve_topology=True
-            )
-            sub.reset_index(drop=True).to_parquet(
-                _BOUNDARY_CACHE_DIR / f"{iso3}.parquet"
-            )
-    parts = [
-        gpd.read_parquet(_BOUNDARY_CACHE_DIR / f"{iso3}.parquet") for iso3 in iso3s
-    ]
+    raw.to_parquet(local_path)
+    return raw
+
+
+def _load_adm1_from_cache(iso3s: list[str]) -> gpd.GeoDataFrame:
+    """Load adm1 for multiple countries in parallel."""
+    with ThreadPoolExecutor(max_workers=min(16, len(iso3s))) as ex:
+        parts = list(ex.map(_load_one_adm1, iso3s))
     return gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=parts[0].crs)
 
 
