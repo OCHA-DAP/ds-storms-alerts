@@ -338,17 +338,11 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
     def _storm_exposure_score(aid: str) -> float:
         sub_fcast = fcast_df[fcast_df["atcf_id"] == aid]
         sub_obsv = obsv_df[obsv_df["atcf_id"] == aid]
-        sub_wsp = wsp_exp_df[wsp_exp_df["atcf_id"] == aid]
         candidates: list[float] = [0.0]
         if not sub_fcast.empty:
             candidates.append(float(sub_fcast["pop_exposed"].max()))
         if not sub_obsv.empty:
             candidates.append(float(sub_obsv["pop_exposed"].max()))
-        for iso3 in sub_wsp["iso3"].unique():
-            for wsp in sub_wsp["wind_threshold_kt"].unique():
-                v = _wsp_expected_pop(wsp_exp_df, aid, iso3, int(wsp))
-                if v:
-                    candidates.append(v)
         return max(candidates)
 
     def _country_exposure_score(aid: str, iso3: str) -> float:
@@ -359,10 +353,6 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
             candidates.append(float(sub_fcast["pop_exposed"].max()))
         if not sub_obsv.empty:
             candidates.append(float(sub_obsv["pop_exposed"].max()))
-        for wsp in wind_speeds_in_order:
-            v = _wsp_expected_pop(wsp_exp_df, aid, iso3, wsp)
-            if v:
-                candidates.append(v)
         return max(candidates)
 
     n_seasons = issued_time_dt.year - 2001 + 1
@@ -376,9 +366,6 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
 
     def _best_34kt_total(aid: str, iso3: str) -> float:
         obsv = _obsv_for(obsv_df, aid, iso3, 34)
-        wsp_val = _wsp_expected_pop(wsp_exp_df, aid, iso3, 34)
-        if wsp_val is not None and wsp_val > 0:
-            return wsp_val + obsv
         tr = fcast_df[
             (fcast_df["atcf_id"] == aid)
             & (fcast_df["iso3"] == iso3)
@@ -508,32 +495,22 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                 wsp_color = wind_speed_color(wsp)
                 obsv_floor = _obsv_for(obsv_df, aid, iso3, wsp)
 
-                # Forecast mark: WSP fcastonly primary, track fcastonly fallback.
-                wsp_val = _wsp_expected_pop(wsp_exp_df, aid, iso3, wsp)
+                # Forecast mark: deterministic track fcastonly + observed only.
+                # WSP is shown as the PDF shading only, not as a mark.
                 fcast_total_marks: list[StormMark] = []
-                if wsp_val is not None and wsp_val > 0:
+                tr_row = fcast_df[
+                    (fcast_df["atcf_id"] == aid)
+                    & (fcast_df["iso3"] == iso3)
+                    & (fcast_df["wind_speed_kt"] == wsp)
+                ]
+                if not tr_row.empty and tr_row["pop_exposed"].iloc[0] > 0:
                     fcast_total_marks.append(StormMark(
-                        value=int(wsp_val) + obsv_floor,
+                        value=int(tr_row["pop_exposed"].iloc[0]) + obsv_floor,
                         label=_storm_label(
-                            name_aid, season_aid, "WSP expected (best estimate)"
+                            name_aid, season_aid, "forecast + observed",
                         ),
                         color=wsp_color,
                     ))
-                else:
-                    tr_row = fcast_df[
-                        (fcast_df["atcf_id"] == aid)
-                        & (fcast_df["iso3"] == iso3)
-                        & (fcast_df["wind_speed_kt"] == wsp)
-                    ]
-                    if not tr_row.empty and tr_row["pop_exposed"].iloc[0] > 0:
-                        fcast_total_marks.append(StormMark(
-                            value=int(tr_row["pop_exposed"].iloc[0]) + obsv_floor,
-                            label=_storm_label(
-                                name_aid, season_aid,
-                                "forecasted total (best estimate)",
-                            ),
-                            color=wsp_color,
-                        ))
 
                 obsv_marks_list = _marks(
                     aid_obsv_df, iso3, wsp, wsp_color, "observed up to present",
