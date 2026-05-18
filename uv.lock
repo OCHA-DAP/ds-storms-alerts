@@ -616,7 +616,7 @@ dev = [
 requires-dist = [
     { name = "marimo", specifier = ">=0.23.6" },
     { name = "matplotlib", specifier = ">=3.9" },
-    { name = "ocha-relay", git = "https://github.com/OCHA-DAP/ocha-relay.git?rev=v0.2.0" },
+    { name = "ocha-relay", directory = "../ocha-relay" },
     { name = "ocha-stratus", specifier = ">=0.1.7" },
 ]
 
@@ -1595,9 +1595,20 @@ wheels = [
 [[package]]
 name = "ocha-relay"
 version = "0.2.0"
-source = { git = "https://github.com/OCHA-DAP/ocha-relay.git?rev=v0.2.0#0e316bdf255b0da34fd169250a8de22f16d72e23" }
+source = { directory = "../ocha-relay" }
 dependencies = [
     { name = "requests" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "requests", specifier = ">=2.32" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "ruff", specifier = ">=0.6" },
+    { name = "types-requests", specifier = ">=2.32" },
 ]
 
 [[package]]

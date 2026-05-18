@@ -624,6 +624,97 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
     return toc_html + "\n".join(sections)
 
 
+def generate_exposure_csv(
+    engine, issued_time_dt: datetime
+) -> list[tuple[str, bytes]]:
+    """Return a list of (filename, csv_bytes) — one per active or final-update storm.
+
+    Each CSV has one row per country with columns:
+        country, iso3, is_final_alert,
+        pop_exposed_34kt, pop_exposed_50kt, pop_exposed_64kt
+    where pop_exposed = fcastonly + obsv (deterministic only).
+    """
+    import pandas as _pd
+
+    fcast_df = fetch_fcast_exposure(engine, issued_time_dt)
+    all_atcf_ids = fcast_df["atcf_id"].unique().tolist()
+
+    prev_any_rows = fetch_prev_any_pairs(engine, issued_time_dt)
+    prev_any_pairs = {(r["atcf_id"], r["iso3"]) for r in prev_any_rows}
+    prev_atcf_ids = sorted({r["atcf_id"] for r in prev_any_rows})
+
+    current_any_pairs = {(r.atcf_id, r.iso3) for r in fcast_df.itertuples()}
+    final_update_pairs: set[tuple[str, str]] = prev_any_pairs - current_any_pairs
+
+    all_fetch_ids = sorted(set(all_atcf_ids) | {aid for aid, _ in final_update_pairs})
+    if not all_fetch_ids:
+        return []
+
+    obsv_df = fetch_current_obsv_exposure(engine, all_fetch_ids, issued_time_dt)
+    obsv_pairs = {
+        (r.atcf_id, r.iso3) for r in obsv_df.itertuples() if r.pop_exposed > 0
+    }
+    final_update_pairs = {p for p in final_update_pairs if p in obsv_pairs}
+
+    # Storm metadata (name, season) for filenames
+    meta: dict[str, tuple] = {}
+    for _, row in fcast_df.drop_duplicates("atcf_id").iterrows():
+        meta[row["atcf_id"]] = (row["name"], row["season"])
+    for r in prev_any_rows:
+        if r["atcf_id"] not in meta:
+            meta[r["atcf_id"]] = (r["name"], r["season"])
+
+    # Group pairs by storm
+    storm_to_pairs: dict[str, list[tuple[str, str]]] = {}
+    for aid, iso3 in current_any_pairs | final_update_pairs:
+        storm_to_pairs.setdefault(aid, []).append((aid, iso3))
+
+    # Country name lookup
+    all_iso3s = sorted({iso3 for pairs in storm_to_pairs.values() for _, iso3 in pairs})
+    adm1 = load_adm1_boundaries(all_iso3s)
+    iso3_to_name = (
+        adm1.drop_duplicates("iso_3").set_index("iso_3")["adm0_name"].to_dict()
+    )
+
+    def _obsv(aid: str, iso3: str, wsp: int) -> int:
+        sub = obsv_df[
+            (obsv_df["atcf_id"] == aid)
+            & (obsv_df["iso3"] == iso3)
+            & (obsv_df["wind_speed_kt"] == wsp)
+        ]
+        return int(sub["pop_exposed"].sum()) if not sub.empty else 0
+
+    results: list[tuple[str, bytes]] = []
+    for aid in sorted(storm_to_pairs.keys()):
+        nm, ssn = meta.get(aid, (None, None))
+        storm_slug = _storm_label(nm, ssn).lower().replace(" ", "_")
+        filename = f"{storm_slug}_{aid}_issued_{issued_time_dt.strftime('%Y-%m-%dT%H')}.csv"
+
+        rows = []
+        for _, iso3 in sorted(storm_to_pairs[aid], key=lambda p: p[1]):
+            is_final = (aid, iso3) in final_update_pairs
+            row: dict = {
+                "country": iso3_to_name.get(iso3, iso3),
+                "iso3": iso3,
+                "is_final_alert": is_final,
+            }
+            for wsp in (34, 50, 64):
+                tr = fcast_df[
+                    (fcast_df["atcf_id"] == aid)
+                    & (fcast_df["iso3"] == iso3)
+                    & (fcast_df["wind_speed_kt"] == wsp)
+                ]
+                fcast_val = int(tr["pop_exposed"].iloc[0]) if not tr.empty else 0
+                row[f"pop_exposed_{wsp}kt"] = fcast_val + _obsv(aid, iso3, wsp)
+            rows.append(row)
+
+        buf = io.StringIO()
+        _pd.DataFrame(rows).to_csv(buf, index=False)
+        results.append((filename, buf.getvalue().encode()))
+
+    return results
+
+
 if __name__ == "__main__":
     args = parse_args()
     issued_time = args.issued_time
@@ -691,11 +782,19 @@ if __name__ == "__main__":
         )
         logger.info(f"Uploaded {len(_uploaded)} images.")
 
+        logger.info("Generating and uploading CSV attachments...")
+        csv_files = generate_exposure_csv(engine, issued_time_dt)
+        media_ids: list[int] = []
+        for filename, csv_bytes in csv_files:
+            media_ids.append(client.upload_attachment(csv_bytes, filename))
+            logger.info(f"  Attached {filename}")
+
         cid = client.create_campaign(
             name=campaign_name,
             subject=subject,
             body=body,
             list_ids=list_ids,
+            media_ids=media_ids,
         )
         logger.info(f"Created campaign {cid}: {campaign_name!r}")
         client.send_campaign(cid, skip_confirmation=True)
