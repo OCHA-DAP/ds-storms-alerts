@@ -37,9 +37,11 @@ def fetch_fcast_exposure(engine: Engine, issued_time: datetime) -> pd.DataFrame:
     """
     sql = text("""
         SELECT e.atcf_id, e.iso3, e.wind_speed_kt, e.pop_exposed,
-               s.name, s.season
+               COALESCE(s.name, ib.name) AS name,
+               COALESCE(s.season, ib.season) AS season
         FROM storms.nhc_tracks_fcastonly_exposure e
         LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id
+        LEFT JOIN storms.ibtracs_storms ib ON ib.atcf_id = e.atcf_id
         WHERE e.issued_time = :issued_time
           AND e.admin_level = :admin_level
           AND e.pop_exposed > 0
@@ -436,11 +438,14 @@ def fetch_prev_any_pairs(
             GROUP BY atcf_id
         ),
         track_pairs AS (
-            SELECT e.atcf_id, e.iso3, s.name, s.season
+            SELECT e.atcf_id, e.iso3,
+                   COALESCE(s.name, ib.name) AS name,
+                   COALESCE(s.season, ib.season) AS season
             FROM storms.nhc_tracks_fcastonly_exposure e
             JOIN prev_track_times p
               ON e.atcf_id = p.atcf_id AND e.issued_time = p.prev_time
             LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id
+            LEFT JOIN storms.ibtracs_storms ib ON ib.atcf_id = e.atcf_id
             WHERE e.admin_level = :admin_level AND e.pop_exposed > 0
         ),
         prev_wsp_times AS (
@@ -453,11 +458,14 @@ def fetch_prev_any_pairs(
             GROUP BY atcf_id
         ),
         wsp_pairs AS (
-            SELECT e.atcf_id, e.pcode AS iso3, s.name, s.season
+            SELECT e.atcf_id, e.pcode AS iso3,
+                   COALESCE(s.name, ib.name) AS name,
+                   COALESCE(s.season, ib.season) AS season
             FROM storms.nhc_wsp_fcastonly_exposure e
             JOIN prev_wsp_times p
               ON e.atcf_id = p.atcf_id AND e.issued_time = p.prev_time
             LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id
+            LEFT JOIN storms.ibtracs_storms ib ON ib.atcf_id = e.atcf_id
             WHERE e.admin_level = :admin_level AND e.pop_exposed > 0
         )
         SELECT atcf_id, iso3, name, season FROM track_pairs
