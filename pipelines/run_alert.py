@@ -235,7 +235,9 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
     background_gdf = load_background_countries()
     adm1_gdf = load_adm1_boundaries(all_render_iso3s)
     iso3_to_name: dict[str, str] = (
-        adm1_gdf.drop_duplicates("iso_3").set_index("iso_3")["adm0_name"].to_dict()
+        adm1_gdf.groupby("iso_3")["adm0_name"]
+        .agg(lambda x: x.value_counts().index[0])
+        .to_dict()
     )
 
     def _cname(iso3: str) -> str:
@@ -391,9 +393,8 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
         ]["pop_exposed"].tolist()
         exceedances = sum(1 for v in hist_vals if v >= forecast_val)
         return (
-            f"≈{rp:.0f}-season return period "
-            f"({exceedances} of {n_seasons} seasons 2001–{issued_time_dt.year} "
-            f"had ≥ this exposure)"
+            f"≈{rp:.0f}-year RP "
+            f"({exceedances} storms since 2001 had ≥ this exposure)"
         )
 
     toc_storms: list[dict] = []
@@ -644,7 +645,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
             _c_first = True
             for _w in _c["wsps"]:
                 _rc = _rp_color(_w["rp"])
-                _rp_str = f"≈{_w['rp']:.0f}-season RP" if _w["rp"] else "—"
+                _rp_str = f"≈{_w['rp']:.0f}-year RP" if _w["rp"] else "—"
                 _row = "<tr>"
                 if _st_first:
                     _bg = _st_color or "#fafafa"
