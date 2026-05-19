@@ -1,3 +1,4 @@
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -8,6 +9,10 @@ import geopandas as gpd
 import ocha_stratus as stratus
 import pandas as pd
 from sqlalchemy import Engine, bindparam, text
+
+logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(
+    logging.WARNING
+)
 
 _FIELDMAPS_ADM1_URL = (
     "https://data.fieldmaps.io/edge-matched/humanitarian/intl/adm1_polygons.parquet"
