@@ -364,35 +364,39 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
             return f"{x / 1_000:.0f}K"
         return str(int(x))
 
-    def _best_34kt_total(aid: str, iso3: str) -> float:
-        obsv = _obsv_for(obsv_df, aid, iso3, 34)
-        tr = fcast_df[
-            (fcast_df["atcf_id"] == aid)
-            & (fcast_df["iso3"] == iso3)
-            & (fcast_df["wind_speed_kt"] == 34)
-        ]
-        if not tr.empty and tr["pop_exposed"].iloc[0] > 0:
-            return float(tr["pop_exposed"].iloc[0]) + obsv
-        return float(obsv)
+    def _rp_numeric(forecast_val: float, iso3: str, wsp: int) -> float | None:
+        if forecast_val <= 0:
+            return None
+        hist_vals = hist_df[
+            (hist_df["iso3"] == iso3) & (hist_df["wind_speed_kt"] == wsp)
+        ]["pop_exposed"].tolist()
+        exceedances = sum(1 for v in hist_vals if v >= forecast_val)
+        return (n_seasons + 1) / (exceedances + 1)
+
+    def _rp_color(rp: float | None) -> str:
+        if rp is None or rp <= 3:
+            return ""
+        if rp > 10:
+            return "#ffcccc"
+        if rp > 5:
+            return "#ffe8cc"
+        return "#fff9c4"
 
     def _rp_text(forecast_val: float, iso3: str, wsp: int) -> str:
-        """Weibull return period: RP = (N + 1) / rank, N = seasons 2001–present."""
-        if forecast_val <= 0:
+        rp = _rp_numeric(forecast_val, iso3, wsp)
+        if rp is None:
             return ""
         hist_vals = hist_df[
             (hist_df["iso3"] == iso3) & (hist_df["wind_speed_kt"] == wsp)
         ]["pop_exposed"].tolist()
-        # Rank among all N seasons: seasons with no storm contribute 0 exposure.
         exceedances = sum(1 for v in hist_vals if v >= forecast_val)
-        rank = exceedances + 1
-        rp = (n_seasons + 1) / rank
         return (
             f"≈{rp:.0f}-season return period "
             f"({exceedances} of {n_seasons} seasons 2001–{issued_time_dt.year} "
             f"had ≥ this exposure)"
         )
 
-    toc_rows: list[str] = []
+    toc_storms: list[dict] = []
 
     for aid in sorted(storm_to_iso3s.keys(), key=lambda a: -_storm_exposure_score(a)):
         s_name, s_season = storm_meta.get(aid, (None, None))
@@ -430,7 +434,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                 f"<h3 style='{_H3}'>Forecast-only buffers</h3>{buf_m}"
             )
 
-        toc_country_lines: list[str] = []
+        toc_countries: list[dict] = []
         country_sections: list[str] = []
         for iso3 in sorted(storm_to_iso3s[aid], key=lambda c: -_country_exposure_score(aid, c)):
             # Final update notice for this (storm, country) pair.
@@ -470,22 +474,28 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
             if not active_wsps:
                 continue
 
-            _toc_val = _best_34kt_total(aid, iso3)
-            _toc_rp = _rp_text(_toc_val, iso3, 34)
-            _toc_rp_str = f" ({_toc_rp})" if _toc_rp else ""
-            if (aid, iso3) in final_update_pairs:
-                _toc_suffix = (
-                    f"{_fmt_pop_toc(_toc_val)} observed @ 34 kt "
-                    f"— <em>final update</em>{_toc_rp_str}"
-                )
-            else:
-                _toc_suffix = (
-                    f"{_fmt_pop_toc(_toc_val)} forecast total @ 34 kt "
-                    f"(obsv + fcastonly){_toc_rp_str}"
-                )
-            toc_country_lines.append(
-                f"<li>{_cname(iso3)} — {_toc_suffix}</li>"
-            )
+            _toc_wsps: list[dict] = []
+            for _tw in (34, 50, 64):
+                _tr = fcast_df[
+                    (fcast_df["atcf_id"] == aid)
+                    & (fcast_df["iso3"] == iso3)
+                    & (fcast_df["wind_speed_kt"] == _tw)
+                ]
+                _fv = int(_tr["pop_exposed"].iloc[0]) if not _tr.empty else 0
+                _ov = _obsv_for(obsv_df, aid, iso3, _tw)
+                _tot = _fv + _ov
+                if _tot > 0:
+                    _toc_wsps.append({
+                        "wsp": _tw,
+                        "total": _tot,
+                        "rp": _rp_numeric(float(_tot), iso3, _tw),
+                    })
+            if _toc_wsps:
+                toc_countries.append({
+                    "name": _cname(iso3),
+                    "is_final": (aid, iso3) in final_update_pairs,
+                    "wsps": _toc_wsps,
+                })
 
             ours_blocks: list[str] = []
             gdacs_blocks: list[str] = []
@@ -597,13 +607,8 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                 + f"<h4 style='{_H4}'>GDACS</h4>{''.join(gdacs_blocks)}"
             )
 
-        if toc_country_lines:
-            toc_rows.append(
-                f"<p style='margin:8px 0 3px;font-weight:600'>{storm_h2_label}</p>"
-                f"<ul style='margin:0 0 8px;padding-left:20px;font-size:0.9em'>"
-                + "".join(toc_country_lines)
-                + "</ul>"
-            )
+        if toc_countries:
+            toc_storms.append({"label": storm_h2_label, "countries": toc_countries})
 
         if storm_map_parts or country_sections:
             sections.append(
@@ -612,14 +617,72 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                 + "".join(country_sections)
             )
 
+    _TD = "padding:6px 10px;border:1px solid #ddd;vertical-align:top"
+    _TH = (
+        "padding:6px 10px;border:1px solid #ddd;background:#f0f0f0;"
+        "text-align:left;font-weight:600;white-space:nowrap"
+    )
+    tbl_rows: list[str] = []
+    for _st in toc_storms:
+        _st_total_rows = sum(len(_c["wsps"]) for _c in _st["countries"])
+        _st_max_rp = max(
+            (_w["rp"] for _c in _st["countries"] for _w in _c["wsps"] if _w["rp"]),
+            default=None,
+        )
+        _st_color = _rp_color(_st_max_rp)
+        _st_first = True
+        for _c in _st["countries"]:
+            _c_rows = len(_c["wsps"])
+            _c_max_rp = max((_w["rp"] for _w in _c["wsps"] if _w["rp"]), default=None)
+            _c_color = _rp_color(_c_max_rp)
+            _c_name = _c["name"]
+            if _c["is_final"]:
+                _c_name += (
+                    " <em style='font-weight:normal;color:#888;"
+                    "font-size:0.85em'>(final)</em>"
+                )
+            _c_first = True
+            for _w in _c["wsps"]:
+                _rc = _rp_color(_w["rp"])
+                _rp_str = f"≈{_w['rp']:.0f}-season RP" if _w["rp"] else "—"
+                _row = "<tr>"
+                if _st_first:
+                    _bg = _st_color or "#fafafa"
+                    _row += (
+                        f"<td rowspan='{_st_total_rows}' style='{_TD};"
+                        f"background:{_bg};font-weight:600'>"
+                        f"{_st['label']}</td>"
+                    )
+                    _st_first = False
+                if _c_first:
+                    _bg = _c_color or "#fff"
+                    _row += (
+                        f"<td rowspan='{_c_rows}' style='{_TD};"
+                        f"background:{_bg}'>{_c_name}</td>"
+                    )
+                    _c_first = False
+                _cell_bg = _rc or "#fff"
+                _row += (
+                    f"<td style='{_TD};text-align:center'>{_w['wsp']} kt</td>"
+                    f"<td style='{_TD};background:{_cell_bg};"
+                    f"text-align:right'>{_fmt_pop_toc(_w['total'])}</td>"
+                    f"<td style='{_TD};background:{_cell_bg}'>{_rp_str}</td>"
+                    f"</tr>"
+                )
+                tbl_rows.append(_row)
+
     toc_html = (
-        "<div style='border:1px solid #e0e0e0;border-radius:6px;"
-        "padding:14px 18px;margin:0 0 28px;background:#fafafa'>"
-        "<p style='font-size:0.8em;font-weight:600;margin:0 0 10px;"
-        "text-transform:uppercase;letter-spacing:0.05em;color:#555'>"
-        "This advisory</p>"
-        + "".join(toc_rows)
-        + "</div>"
+        f"<table style='width:100%;border-collapse:collapse;"
+        f"margin:0 0 28px;font-size:0.88em'>"
+        f"<thead><tr>"
+        f"<th style='{_TH}'>Storm</th>"
+        f"<th style='{_TH}'>Country</th>"
+        f"<th style='{_TH}'>Wind</th>"
+        f"<th style='{_TH}'>Exposure</th>"
+        f"<th style='{_TH}'>Return period</th>"
+        f"</tr></thead>"
+        f"<tbody>{''.join(tbl_rows)}</tbody>"
+        f"</table>"
     )
     return toc_html + "\n".join(sections)
 
