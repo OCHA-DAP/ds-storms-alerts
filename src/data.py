@@ -73,9 +73,11 @@ def fetch_current_obsv_exposure(
     sql = text("""
         SELECT DISTINCT ON (e.atcf_id, e.iso3, e.wind_speed_kt)
           e.atcf_id, e.iso3, e.wind_speed_kt, e.pop_exposed,
-          s.name, s.season
+          COALESCE(NULLIF(s.name, 'NaN'), ib.name) AS name,
+          COALESCE(s.season, ib.season) AS season
         FROM storms.nhc_tracks_obsv_exposure e
         LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id
+        LEFT JOIN storms.ibtracs_storms ib ON ib.atcf_id = e.atcf_id
         WHERE e.atcf_id IN :atcf_ids
           AND e.admin_level = :admin_level
           AND e.valid_time <= :issued_time
@@ -106,7 +108,7 @@ def fetch_gdacs_current_exposure(
     sql = text("""
         SELECT DISTINCT ON (lk.atcf_id, g.iso3, g.wind_speed_kt)
             lk.atcf_id, g.iso3, g.wind_speed_kt, g.pop_exposed,
-            s.name, s.season
+            NULLIF(s.name, 'NaN') AS name, s.season
         FROM storms.gdacs_exposure g
         JOIN storms.storm_id_lookup lk ON lk.gdacs_eventid = g.gdacs_eventid
         LEFT JOIN storms.nhc_storms s ON s.atcf_id = lk.atcf_id
@@ -136,7 +138,7 @@ def fetch_adam_current_exposure(
     sql = text("""
         SELECT DISTINCT ON (lk.atcf_id, a.iso3, a.wind_speed_kt)
             lk.atcf_id, a.iso3, a.wind_speed_kt, a.pop_exposed,
-            s.name, s.season
+            NULLIF(s.name, 'NaN') AS name, s.season
         FROM storms.adam_exposure a
         JOIN storms.storm_id_lookup lk ON lk.adam_eventid = a.adam_eventid
         LEFT JOIN storms.nhc_storms s ON s.atcf_id = lk.atcf_id
@@ -559,9 +561,11 @@ def fetch_historical_obsv_exposure(
     sql = text("""
         SELECT DISTINCT ON (e.atcf_id, e.iso3, e.wind_speed_kt)
           e.atcf_id, e.iso3, e.wind_speed_kt, e.pop_exposed,
-          s.name, s.season
+          COALESCE(NULLIF(s.name, 'NaN'), ib.name) AS name,
+          COALESCE(s.season, ib.season) AS season
         FROM storms.nhc_tracks_obsv_exposure e
         LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id
+        LEFT JOIN storms.ibtracs_storms ib ON ib.atcf_id = e.atcf_id
         WHERE e.iso3 IN :iso3s
           AND e.admin_level = :admin_level
         ORDER BY e.atcf_id, e.iso3, e.wind_speed_kt, e.valid_time DESC

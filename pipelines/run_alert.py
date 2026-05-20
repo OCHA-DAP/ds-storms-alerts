@@ -526,7 +526,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                     fcast_total_marks.append(StormMark(
                         value=int(tr_row["pop_exposed"].iloc[0]) + obsv_floor,
                         label=_storm_label(
-                            name_aid, season_aid, "forecast + observed",
+                            name_aid, season_aid, "forecasted total",
                         ),
                         color=wsp_color,
                     ))
