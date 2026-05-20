@@ -6,6 +6,10 @@ app = marimo.App(width="full")
 
 @app.cell
 def _imports():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parents[1]))
+
     import marimo as mo
     import ocha_stratus as stratus
     from datetime import datetime, timedelta
