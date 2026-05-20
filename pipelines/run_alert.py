@@ -42,6 +42,7 @@ from src.plots import (
 )
 
 _HIST_COLOR = "#888888"
+_SRC_LABELS = {"our": "our est.", "ADAM": "ADAM", "GDACS": "GDACS"}
 
 # WSP probability band midpoints (fraction) used to compute expected exposure.
 _WSP_BAND_MIDPOINT = {
@@ -506,46 +507,67 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                     "wsps": _toc_wsps,
                 })
 
-            ours_blocks: list[str] = []
-            gdacs_blocks: list[str] = []
-            adam_blocks: list[str] = []
+            combined_blocks: list[str] = []
 
             for wsp in active_wsps:
                 wsp_color = wind_speed_color(wsp)
                 obsv_floor = _obsv_for(obsv_df, aid, iso3, wsp)
 
-                # Forecast mark: deterministic track fcastonly + observed only.
-                # WSP is shown as the PDF shading only, not as a mark.
-                fcast_total_marks: list[StormMark] = []
+                # Our estimate: deterministic track fcastonly + cumulative observed.
                 tr_row = fcast_df[
                     (fcast_df["atcf_id"] == aid)
                     & (fcast_df["iso3"] == iso3)
                     & (fcast_df["wind_speed_kt"] == wsp)
                 ]
-                if not tr_row.empty and tr_row["pop_exposed"].iloc[0] > 0:
-                    fcast_total_marks.append(StormMark(
-                        value=int(tr_row["pop_exposed"].iloc[0]) + obsv_floor,
-                        label=_storm_label(
-                            name_aid, season_aid, "forecasted total",
-                        ),
-                        color=wsp_color,
-                    ))
+                fcast_val = int(tr_row["pop_exposed"].iloc[0]) if not tr_row.empty else 0
+                our_val = fcast_val + obsv_floor
 
-                obsv_marks_list = _marks(
-                    aid_obsv_df, iso3, wsp, wsp_color, "observed up to present",
-                )
-                ours_current_values = (
-                    [m.value for m in obsv_marks_list]
-                    + [m.value for m in fcast_total_marks]
-                )
+                # GDACS and ADAM current estimates for this country/wind speed.
+                gdacs_row = aid_gdacs_cur[
+                    (aid_gdacs_cur["iso3"] == iso3)
+                    & (aid_gdacs_cur["wind_speed_kt"] == wsp)
+                ]
+                gdacs_val = int(gdacs_row["pop_exposed"].iloc[0]) if not gdacs_row.empty else 0
+
+                adam_row = aid_adam_cur[
+                    (aid_adam_cur["iso3"] == iso3)
+                    & (aid_adam_cur["wind_speed_kt"] == wsp)
+                ]
+                adam_val = int(adam_row["pop_exposed"].iloc[0]) if not adam_row.empty else 0
+
+                active_sources = {
+                    k: v for k, v in
+                    {"our": our_val, "ADAM": adam_val, "GDACS": gdacs_val}.items()
+                    if v > 0
+                }
+
                 hist_marks = _filter_historical(
                     _marks(hist_df, iso3, wsp, _HIST_COLOR, short=True),
                     x_max_per_wsp[wsp],
-                    current_values=ours_current_values,
+                    current_values=list(active_sources.values()),
                 )
-                ours_marks = hist_marks + obsv_marks_list + fcast_total_marks
 
-                # WSP PDF filtered to this storm only.
+                if active_sources:
+                    mean_val = int(round(sum(active_sources.values()) / len(active_sources)))
+                    if len(active_sources) == 1:
+                        src_key = next(iter(active_sources))
+                        suffix = "forecasted total" if src_key == "our" else src_key
+                    else:
+                        suffix = "mean: " + ", ".join(active_sources.keys())
+                    mean_mark = StormMark(
+                        value=mean_val,
+                        label=_storm_label(name_aid, season_aid, suffix),
+                        color=wsp_color,
+                    )
+                    source_ticks = [
+                        StormMark(value=v, label=_SRC_LABELS[k], color=wsp_color, short=True)
+                        for k, v in active_sources.items()
+                    ]
+                    combined_marks = hist_marks + source_ticks + [mean_mark]
+                else:
+                    combined_marks = hist_marks
+
+                # WSP PDF overlay (unchanged).
                 wsp_sub = wsp_exp_df[
                     (wsp_exp_df["atcf_id"] == aid)
                     & (wsp_exp_df["iso3"] == iso3)
@@ -562,58 +584,23 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                         color=wsp_color,
                     )
 
-                ours_img = country_strip_chart(
-                    iso3, wsp, ours_marks, x_max=x_max_per_wsp[wsp], pdf=pdf,
+                combined_img = country_strip_chart(
+                    iso3, wsp, combined_marks, x_max=x_max_per_wsp[wsp], pdf=pdf,
                 )
-                _ft_val = (
-                    fcast_total_marks[0].value
-                    if fcast_total_marks
-                    else float(obsv_floor)
-                )
-                _rp = _rp_text(_ft_val, iso3, wsp)
+                _rp = _rp_text(float(our_val), iso3, wsp)
                 _rp_html = (
                     f"<p style='font-size:0.78em;color:#666;"
                     f"margin:-4px 0 10px;padding-left:2px'>{_rp}</p>"
                     if _rp else ""
                 )
-                ours_blocks.append(
-                    f"<h5 style='{_H5}'>{wsp} kt</h5>{ours_img}{_rp_html}"
+                combined_blocks.append(
+                    f"<h5 style='{_H5}'>{wsp} kt</h5>{combined_img}{_rp_html}"
                 )
-
-                gdacs_cur_marks = _marks(aid_gdacs_cur, iso3, wsp, wsp_color, "GDACS")
-                gdacs_marks = (
-                    _filter_historical(
-                        _marks(gdacs_hist_df, iso3, wsp, _HIST_COLOR, short=True),
-                        x_max_per_wsp[wsp],
-                        current_values=[m.value for m in gdacs_cur_marks],
-                    )
-                    + gdacs_cur_marks
-                )
-                gdacs_img = gdacs_strip_chart(
-                    iso3, wsp, gdacs_marks, x_max=x_max_per_wsp[wsp],
-                )
-                gdacs_blocks.append(f"<h5 style='{_H5}'>{wsp} kt</h5>{gdacs_img}")
-
-                adam_cur_marks = _marks(aid_adam_cur, iso3, wsp, wsp_color, "ADAM")
-                adam_marks = (
-                    _filter_historical(
-                        _marks(adam_hist_df, iso3, wsp, _HIST_COLOR, short=True),
-                        x_max_per_wsp[wsp],
-                        current_values=[m.value for m in adam_cur_marks],
-                    )
-                    + adam_cur_marks
-                )
-                adam_img = adam_strip_chart(
-                    iso3, wsp, adam_marks, x_max=x_max_per_wsp[wsp],
-                )
-                adam_blocks.append(f"<h5 style='{_H5}'>{wsp} kt</h5>{adam_img}")
 
             country_sections.append(
                 f"<h3 style='{_H3}'>{_cname(iso3)}</h3>"
                 + notice_html
-                + f"<h4 style='{_H4}'>Our estimates</h4>{''.join(ours_blocks)}"
-                + f"<h4 style='{_H4}'>ADAM</h4>{''.join(adam_blocks)}"
-                + f"<h4 style='{_H4}'>GDACS</h4>{''.join(gdacs_blocks)}"
+                + "".join(combined_blocks)
             )
 
         if toc_countries:
@@ -703,8 +690,10 @@ def generate_exposure_csv(
 
     Each CSV has one row per country with columns:
         country, iso3, is_final_alert,
-        pop_exposed_34kt, pop_exposed_50kt, pop_exposed_64kt
-    where pop_exposed = fcastonly + obsv (deterministic only).
+        pop_exposed_34kt, pop_exposed_50kt, pop_exposed_64kt,
+        sources_34kt, sources_50kt, sources_64kt
+    where pop_exposed is the mean across available sources (our est., ADAM, GDACS)
+    and sources_* lists which sources contributed (e.g. "our,ADAM,GDACS").
     """
     import pandas as _pd
 
@@ -727,6 +716,9 @@ def generate_exposure_csv(
         (r.atcf_id, r.iso3) for r in obsv_df.itertuples() if r.pop_exposed > 0
     }
     final_update_pairs = {p for p in final_update_pairs if p in obsv_pairs}
+
+    gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_fetch_ids)
+    adam_cur_df = fetch_adam_current_exposure(engine, all_fetch_ids)
 
     # Storm metadata (name, season) for filenames
     meta: dict[str, tuple] = {}
@@ -777,7 +769,31 @@ def generate_exposure_csv(
                     & (fcast_df["wind_speed_kt"] == wsp)
                 ]
                 fcast_val = int(tr["pop_exposed"].iloc[0]) if not tr.empty else 0
-                row[f"pop_exposed_{wsp}kt"] = fcast_val + _obsv(aid, iso3, wsp)
+                our_val = fcast_val + _obsv(aid, iso3, wsp)
+
+                gr = gdacs_cur_df[
+                    (gdacs_cur_df["atcf_id"] == aid)
+                    & (gdacs_cur_df["iso3"] == iso3)
+                    & (gdacs_cur_df["wind_speed_kt"] == wsp)
+                ]
+                gdacs_val = int(gr["pop_exposed"].iloc[0]) if not gr.empty else 0
+
+                ar = adam_cur_df[
+                    (adam_cur_df["atcf_id"] == aid)
+                    & (adam_cur_df["iso3"] == iso3)
+                    & (adam_cur_df["wind_speed_kt"] == wsp)
+                ]
+                adam_val = int(ar["pop_exposed"].iloc[0]) if not ar.empty else 0
+
+                active = {
+                    k: v for k, v in
+                    {"our": our_val, "ADAM": adam_val, "GDACS": gdacs_val}.items()
+                    if v > 0
+                }
+                row[f"pop_exposed_{wsp}kt"] = (
+                    int(round(sum(active.values()) / len(active))) if active else 0
+                )
+                row[f"sources_{wsp}kt"] = ",".join(active.keys()) if active else ""
             rows.append(row)
 
         buf = io.StringIO()
