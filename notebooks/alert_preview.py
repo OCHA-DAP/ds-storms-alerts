@@ -19,10 +19,13 @@ def _db(stratus, text):
     engine = stratus.get_engine(stage="dev")
     with engine.connect() as _conn:
         _rows = _conn.execute(text(
-            "SELECT DISTINCT e.atcf_id, s.name, s.season "
+            "SELECT DISTINCT e.atcf_id, "
+            "  COALESCE(s.name, ib.name) AS name, "
+            "  COALESCE(s.season, ib.season) AS season "
             "FROM storms.nhc_tracks_fcastonly_exposure e "
             "LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id "
-            "ORDER BY s.season DESC NULLS LAST, e.atcf_id DESC"
+            "LEFT JOIN storms.ibtracs_storms ib ON ib.atcf_id = e.atcf_id "
+            "ORDER BY COALESCE(s.season, ib.season) DESC NULLS LAST, e.atcf_id DESC"
         )).fetchall()
     storm_options = {
         (
