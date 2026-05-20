@@ -22,9 +22,11 @@ _NE_BACKGROUND_PATH = Path(__file__).parents[1] / "data" / "ne110m_countries.par
 _ADM1_COLS = ["iso_3", "adm0_name", "adm1_id", "adm1_name", "geometry"]
 _BOUNDARY_SIMPLIFY_TOL = 0.001  # degrees (~100 m); sharp enough for adm1 display
 
-# Shared blob location — same as ds-storms-pipeline (raster container).
-_BLOB_ADM1_CONTAINER = "raster"
+# Shared blob location — same as ds-storms-pipeline. `global` is the
+# team's conventional container for shared vector reference data.
+_BLOB_CONTAINER = "global"
 _BLOB_ADM1_PREFIX = "fieldmaps/adm1/"
+_BLOB_ADM0_PREFIX = "fieldmaps/adm0/"
 
 _ADMIN_LEVEL = 0
 _WIND_SPEEDS_KT = (34, 50, 64)
@@ -281,17 +283,13 @@ def _load_one_adm1(iso3: str) -> gpd.GeoDataFrame:
     """
     local_path = _BOUNDARY_CACHE_DIR / f"{iso3}.parquet"
 
-    # 1. Try blob
+    # 1. Try blob — already simplified at 0.001° by mirror_fieldmaps_to_blob.py
     try:
         raw_bytes = stratus.load_blob_data(
             f"{_BLOB_ADM1_PREFIX}{iso3}.parquet",
-            container_name=_BLOB_ADM1_CONTAINER,
+            container_name=_BLOB_CONTAINER,
         )
         gdf = gpd.read_parquet(BytesIO(raw_bytes))[list(_ADM1_COLS)]
-        gdf = gdf.copy()
-        gdf["geometry"] = gdf.geometry.simplify(
-            _BOUNDARY_SIMPLIFY_TOL, preserve_topology=True
-        )
         return gdf.reset_index(drop=True)
     except Exception:
         pass
@@ -322,18 +320,37 @@ def _load_adm1_from_cache(iso3s: list[str]) -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=parts[0].crs)
 
 
-def load_adm0_boundaries(iso3s: list[str]) -> gpd.GeoDataFrame:
-    """Load adm0 boundaries by dissolving cached adm1 rows.
+def _load_one_adm0(iso3: str) -> gpd.GeoDataFrame:
+    """Load pre-dissolved adm0 for a single country.
 
-    Returns columns: iso_3, adm0_name, geometry.
+    The adm0 blob (fieldmaps/adm0/{iso3}.parquet) contains only iso_3 + geometry,
+    already simplified at 0.001° by the mirror script. Falls back to dissolving
+    from adm1 if the adm0 blob isn't available.
+    """
+    try:
+        raw_bytes = stratus.load_blob_data(
+            f"{_BLOB_ADM0_PREFIX}{iso3}.parquet",
+            container_name=_BLOB_CONTAINER,
+        )
+        return gpd.read_parquet(BytesIO(raw_bytes)).reset_index(drop=True)
+    except Exception:
+        adm1 = _load_one_adm1(iso3)
+        dissolved = adm1.dissolve(by="iso_3", as_index=False, aggfunc="first")
+        return dissolved[["iso_3", "geometry"]].reset_index(drop=True)
+
+
+def load_adm0_boundaries(iso3s: list[str]) -> gpd.GeoDataFrame:
+    """Load adm0 boundaries from the dedicated adm0 blob (pre-dissolved).
+
+    Returns columns: iso_3, geometry (adm0_name not available in adm0 blob).
     """
     if not iso3s:
-        return gpd.GeoDataFrame(
-            columns=["iso_3", "adm0_name", "geometry"], crs="EPSG:4326"
-        )
-    adm1 = _load_adm1_from_cache(iso3s)
-    dissolved = adm1.dissolve(by="iso_3", as_index=False, aggfunc="first")
-    return dissolved[["iso_3", "adm0_name", "geometry"]].reset_index(drop=True)
+        return gpd.GeoDataFrame(columns=["iso_3", "geometry"], crs="EPSG:4326")
+    with ThreadPoolExecutor(max_workers=min(16, len(iso3s))) as ex:
+        parts = list(ex.map(_load_one_adm0, iso3s))
+    return gpd.GeoDataFrame(
+        pd.concat(parts, ignore_index=True), crs=parts[0].crs
+    ).reset_index(drop=True)
 
 
 def load_background_countries() -> gpd.GeoDataFrame:
