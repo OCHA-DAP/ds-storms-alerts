@@ -24,9 +24,12 @@ _BOUNDARY_SIMPLIFY_TOL = 0.001  # degrees (~100 m); sharp enough for adm1 displa
 
 # Shared blob location — same as ds-storms-pipeline. `global` is the
 # team's conventional container for shared vector reference data.
+# Path mirrors the upstream FieldMaps URL structure:
+# https://data.fieldmaps.io/edge-matched/humanitarian/intl/adm1_polygons.parquet
 _BLOB_CONTAINER = "global"
-_BLOB_ADM1_PREFIX = "fieldmaps/adm1/"
-_BLOB_ADM0_PREFIX = "fieldmaps/adm0/"
+_BLOB_BASE = "fieldmaps/edge-matched/humanitarian/intl/"
+_BLOB_ADM1_PREFIX = _BLOB_BASE + "adm1/"
+_BLOB_ADM0_PREFIX = _BLOB_BASE + "adm0/"
 
 _ADMIN_LEVEL = 0
 _WIND_SPEEDS_KT = (34, 50, 64)
