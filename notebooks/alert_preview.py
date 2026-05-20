@@ -20,7 +20,7 @@ def _db(stratus, text):
     with engine.connect() as _conn:
         _rows = _conn.execute(text(
             "SELECT DISTINCT e.atcf_id, "
-            "  COALESCE(s.name, ib.name) AS name, "
+            "  COALESCE(NULLIF(s.name, 'NaN'), ib.name) AS name, "
             "  COALESCE(s.season, ib.season) AS season "
             "FROM storms.nhc_tracks_fcastonly_exposure e "
             "LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id "
@@ -39,7 +39,7 @@ def _db(stratus, text):
 
 @app.cell
 def _storm_selector(mo, storm_options):
-    storm = mo.ui.dropdown(options=storm_options, label="Storm")
+    storm = mo.ui.dropdown(options=storm_options, label="Storm", searchable=True)
     storm
 
 

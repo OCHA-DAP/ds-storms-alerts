@@ -42,7 +42,7 @@ def fetch_fcast_exposure(engine: Engine, issued_time: datetime) -> pd.DataFrame:
     """
     sql = text("""
         SELECT e.atcf_id, e.iso3, e.wind_speed_kt, e.pop_exposed,
-               COALESCE(s.name, ib.name) AS name,
+               COALESCE(NULLIF(s.name, 'NaN'), ib.name) AS name,
                COALESCE(s.season, ib.season) AS season
         FROM storms.nhc_tracks_fcastonly_exposure e
         LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id
@@ -459,7 +459,7 @@ def fetch_prev_any_pairs(
         ),
         track_pairs AS (
             SELECT e.atcf_id, e.iso3,
-                   COALESCE(s.name, ib.name) AS name,
+                   COALESCE(NULLIF(s.name, 'NaN'), ib.name) AS name,
                    COALESCE(s.season, ib.season) AS season
             FROM storms.nhc_tracks_fcastonly_exposure e
             JOIN prev_track_times p
@@ -479,7 +479,7 @@ def fetch_prev_any_pairs(
         ),
         wsp_pairs AS (
             SELECT e.atcf_id, e.pcode AS iso3,
-                   COALESCE(s.name, ib.name) AS name,
+                   COALESCE(NULLIF(s.name, 'NaN'), ib.name) AS name,
                    COALESCE(s.season, ib.season) AS season
             FROM storms.nhc_wsp_fcastonly_exposure e
             JOIN prev_wsp_times p
