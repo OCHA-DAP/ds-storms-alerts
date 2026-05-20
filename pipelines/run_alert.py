@@ -203,6 +203,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
     hist_df = fetch_historical_obsv_exposure(
         engine, all_render_iso3s, exclude_atcf_ids=all_render_atcf_ids
     )
+    hist_df = hist_df[hist_df["season"] >= 2002].reset_index(drop=True)
 
     logger.info("Fetching GDACS current exposure...")
     gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_render_atcf_ids)
@@ -211,6 +212,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
     gdacs_hist_df = fetch_gdacs_historical_exposure(
         engine, all_render_iso3s, exclude_atcf_ids=all_render_atcf_ids
     )
+    gdacs_hist_df = gdacs_hist_df[gdacs_hist_df["season"] >= 2002].reset_index(drop=True)
 
     logger.info("Fetching ADAM current exposure...")
     adam_cur_df = fetch_adam_current_exposure(engine, all_render_atcf_ids)
@@ -219,6 +221,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
     adam_hist_df = fetch_adam_historical_exposure(
         engine, all_render_iso3s, exclude_atcf_ids=all_render_atcf_ids
     )
+    adam_hist_df = adam_hist_df[adam_hist_df["season"] >= 2002].reset_index(drop=True)
 
     logger.info("Fetching track geometries...")
     tracks_gdf = fetch_track_geo(engine, all_fetch_atcf_ids, issued_time_dt)
@@ -362,7 +365,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
             candidates.append(float(sub_obsv["pop_exposed"].max()))
         return max(candidates)
 
-    n_seasons = issued_time_dt.year - 2001 + 1
+    n_seasons = issued_time_dt.year - 2002 + 1
 
     def _fmt_pop_toc(x: float) -> str:
         if x >= 1_000_000:
@@ -399,7 +402,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
         exceedances = sum(1 for v in hist_vals if v >= forecast_val)
         return (
             f"≈{rp:.0f}-year RP "
-            f"({exceedances} storms since 2001 had ≥ this exposure)"
+            f"({exceedances} storms since 2002 had ≥ this exposure)"
         )
 
     toc_storms: list[dict] = []
