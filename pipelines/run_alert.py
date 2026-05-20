@@ -320,7 +320,12 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
         return max(candidates)
 
     # Storm metadata for section headers.
+    # Priority: fcast_df (most current) > prev_any_rows (covers WSP-only storms
+    # that have no track fcast exposure) > final_update_meta.
     storm_meta: dict[str, tuple] = {}
+    for r in prev_any_rows:
+        if r["atcf_id"] not in storm_meta:
+            storm_meta[r["atcf_id"]] = (r["name"], r["season"])
     for _, row in fcast_df.drop_duplicates("atcf_id").iterrows():
         storm_meta[row["atcf_id"]] = (row["name"], row["season"])
     for (aid, _), (nm, ssn) in final_update_meta.items():
