@@ -66,6 +66,7 @@ class StormMark:
     label: str
     color: str
     short: bool = False
+    bold: bool = False
 
 
 # WSP probability band widths (fraction of total probability)
@@ -158,8 +159,8 @@ def _strip_chart(
     if not nonzero and not has_pdf and x_max is None:
         return ""
 
-    fig, ax = plt.subplots(figsize=(9, 3.0))
-    fig.subplots_adjust(left=0.01, right=0.97, top=0.95, bottom=0.20)
+    fig, ax = plt.subplots(figsize=(9, 2.1))
+    fig.subplots_adjust(left=0.01, right=0.97, top=0.95, bottom=0.28)
 
     # PDF as a single contiguous shaded area, scaled to sit under the tall marks.
     # Heights use a compressive ^0.3 so the long flat tail of low-density bands
@@ -202,6 +203,7 @@ def _strip_chart(
             m.value, label_y, m.label,
             rotation=90, ha="center", va="bottom",
             fontsize=fontsize, color=m.color, alpha=alpha, zorder=5,
+            fontweight="bold" if m.bold else "normal",
         )
 
     ax.set_ylim(0, _Y_TOP)

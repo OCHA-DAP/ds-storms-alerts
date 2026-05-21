@@ -211,9 +211,14 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
     iso3_to_total_pop = fetch_admin_population(engine, all_render_iso3s)
 
     all_prior_pairs = fetch_all_prior_country_pairs(engine, all_render_atcf_ids, issued_time_dt)
+    obsv_with_exposure = {
+        (r.atcf_id, r.iso3) for r in obsv_df.itertuples() if r.pop_exposed > 0
+    }
     already_passed_pairs: dict[tuple[str, str], datetime] = {
         k: v for k, v in all_prior_pairs.items()
-        if k not in current_any_pairs and k not in final_update_pairs
+        if k not in current_any_pairs
+        and k not in final_update_pairs
+        and k in obsv_with_exposure
     }
 
     logger.info("Fetching GDACS current exposure...")
@@ -632,10 +637,13 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
 
                 if active_sources:
                     mean_val = int(round(sum(active_sources.values()) / len(active_sources)))
+                    _is_final = (aid, iso3) in final_update_pairs
+                    _mean_suffix = "Estimated\nfinal exposure" if _is_final else "Forecasted\nfinal exposure"
                     mean_mark = StormMark(
                         value=mean_val,
-                        label=_storm_label(name_aid, season_aid, "Forecasted final exposure"),
+                        label=_storm_label(name_aid, season_aid, _mean_suffix),
                         color=wsp_color,
+                        bold=True,
                     )
                     source_ticks = [
                         StormMark(value=v, label=_SRC_LABELS[k], color=wsp_color, short=True)
@@ -643,7 +651,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                     ]
                     obs_ticks = (
                         [StormMark(value=obsv_floor, label="Observed up to present", color=wsp_color, short=False)]
-                        if obsv_floor > 0 else []
+                        if obsv_floor > 0 and not _is_final else []
                     )
                     combined_marks = hist_marks + obs_ticks + source_ticks + [mean_mark]
                 else:
@@ -719,7 +727,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
             _c_first = True
             for _w in _c["wsps"]:
                 _rc = _rp_color(_w["rp"])
-                _rp_str = f"≈{_w['rp']:.0f}-year RP" if _w["rp"] else "—"
+                _rp_str = f"{_w['rp']:.0f}-year" if _w["rp"] else "—"
                 _row = "<tr>"
                 if _st_first:
                     _bg = _st_color or "#fafafa"
