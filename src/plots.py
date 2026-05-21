@@ -149,7 +149,8 @@ def _strip_chart(
     if not nonzero and not has_pdf and x_max is None:
         return ""
 
-    fig, ax = plt.subplots(figsize=(9, 3.0), layout="constrained")
+    fig, ax = plt.subplots(figsize=(9, 3.0))
+    fig.subplots_adjust(left=0.01, right=0.97, top=0.95, bottom=0.20)
 
     # PDF as a single contiguous shaded area, scaled to sit under the tall marks.
     # Heights use a compressive ^0.3 so the long flat tail of low-density bands
@@ -222,7 +223,7 @@ def _strip_chart(
                 "total pop.",
                 xy=(xfrac, 0.0),
                 xycoords="axes fraction",
-                xytext=(xfrac, -0.28),
+                xytext=(xfrac, -0.18),
                 textcoords="axes fraction",
                 ha="center", va="top",
                 fontsize=5.5, color="#333333", fontweight="bold",

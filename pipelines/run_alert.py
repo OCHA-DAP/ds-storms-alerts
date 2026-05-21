@@ -554,9 +554,11 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                     & (wsp_exp_df["wind_threshold_kt"] == wsp)
                 ]
 
-                # x_max = min(total_pop, 2 × wsp_max), extended if any mark exceeds it.
-                _wsp_max = float(wsp_sub["pop_exposed"].max()) if not wsp_sub.empty else 0.0
-                _base = _wsp_max if _wsp_max > 0 else (
+                # x_max = min(total_pop, 2 × wsp_extent), extended if any mark exceeds it.
+                # wsp_extent = right edge of the PDF polygon (obsv_floor + sum of all bands),
+                # which is the "maximum value from the WSP distribution" as seen on the chart.
+                _wsp_extent = obsv_floor + float(wsp_sub["pop_exposed"].sum()) if not wsp_sub.empty else 0.0
+                _base = _wsp_extent if _wsp_extent > 0 else (
                     max(active_sources.values()) if active_sources else x_max_per_wsp[wsp]
                 )
                 _cap = min(_total_pop, 2 * _base) if _total_pop > 0 else 2 * _base
