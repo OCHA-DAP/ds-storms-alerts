@@ -529,13 +529,32 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                 ]
                 _fv = int(_tr["pop_exposed"].iloc[0]) if not _tr.empty else 0
                 _ov = _obsv_for(obsv_df, aid, iso3, _tw)
-                _tot = _fv + _ov
+                _our = _fv + _ov
+                _gdacs_r = aid_gdacs_cur[
+                    (aid_gdacs_cur["iso3"] == iso3)
+                    & (aid_gdacs_cur["wind_speed_kt"] == _tw)
+                ]
+                _gdacs_v = int(_gdacs_r["pop_exposed"].iloc[0]) if not _gdacs_r.empty else 0
+                _adam_r = aid_adam_cur[
+                    (aid_adam_cur["iso3"] == iso3)
+                    & (aid_adam_cur["wind_speed_kt"] == _tw)
+                ]
+                _adam_v = int(_adam_r["pop_exposed"].iloc[0]) if not _adam_r.empty else 0
+                _toc_active = {
+                    k: v for k, v in
+                    {"our": _our, "ADAM": _adam_v, "GDACS": _gdacs_v}.items()
+                    if v > 0
+                }
+                _tot = (
+                    int(round(sum(_toc_active.values()) / len(_toc_active)))
+                    if _toc_active else 0
+                )
                 if _tot > 0:
                     _tp = iso3_to_total_pop.get(iso3, 0)
                     _toc_wsps.append({
                         "wsp": _tw,
                         "total": _tot,
-                        "rp": _rp_numeric(float(_tot), iso3, _tw),
+                        "rp": _rp_numeric(float(_our), iso3, _tw),
                         "pct": _tot / _tp * 100 if _tp > 0 else None,
                     })
             if _toc_wsps:
