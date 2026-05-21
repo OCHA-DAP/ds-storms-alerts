@@ -107,6 +107,15 @@ def _pdf_polygon(pdf: WspPdf) -> tuple[list[float], list[float]]:
     if not bands:
         return [], []
 
+    # Filter artifact bands: if a band has < 0.1% of the largest band's population
+    # its density (bw/pop) is ≥1000× higher, causing it to dominate the y-scale
+    # and compress the real distribution to near-zero height.
+    max_pop = max(n for _, n in bands)
+    min_pop = max(max_pop * 0.001, 50)
+    bands = [(p, n) for p, n in bands if n >= min_pop]
+    if not bands:
+        return [], []
+
     bands.sort(key=lambda b: b[0], reverse=True)
 
     xs: list[float] = []
