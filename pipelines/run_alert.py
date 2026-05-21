@@ -43,7 +43,7 @@ from src.plots import (
 )
 
 _HIST_COLOR = "#888888"
-_SRC_LABELS = {"our": "CHD est.", "ADAM": "ADAM", "GDACS": "GDACS"}
+_SRC_LABELS = {"our": "CHD", "ADAM": "ADAM", "GDACS": "GDACS"}
 
 # WSP probability band midpoints (fraction) used to compute expected exposure.
 _WSP_BAND_MIDPOINT = {
@@ -506,10 +506,37 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                         "pct": _tot / _tp * 100 if _tp > 0 else None,
                     })
             if _toc_wsps:
+                # Find most similar historical storms by relative-difference score
+                # across all three wind speeds (lower score = more similar).
+                _curr_vec = {34: 0, 50: 0, 64: 0}
+                for _tw_d in _toc_wsps:
+                    _curr_vec[_tw_d["wsp"]] = _tw_d["total"]
+
+                _hist_storms_by_id: dict[str, dict] = {}
+                for _, _hr in hist_df[hist_df["iso3"] == iso3].iterrows():
+                    _aid_h = _hr["atcf_id"]
+                    if _aid_h not in _hist_storms_by_id:
+                        _hist_storms_by_id[_aid_h] = {
+                            "name": _hr["name"], "season": _hr["season"],
+                            34: 0, 50: 0, 64: 0,
+                        }
+                    _hist_storms_by_id[_aid_h][int(_hr["wind_speed_kt"])] = int(_hr["pop_exposed"])
+
+                _sim_scores: list[tuple[float, str]] = []
+                for _hd in _hist_storms_by_id.values():
+                    _score = sum(
+                        abs(_curr_vec[_ws] - _hd[_ws]) / max(_curr_vec[_ws], _hd[_ws], 1)
+                        for _ws in (34, 50, 64)
+                    )
+                    _sim_scores.append((_score, _storm_label(_hd["name"], _hd["season"])))
+                _sim_scores.sort()
+                _similar = [_lbl for _, _lbl in _sim_scores[:5]]
+
                 toc_countries.append({
                     "name": _cname(iso3),
                     "is_final": (aid, iso3) in final_update_pairs,
                     "wsps": _toc_wsps,
+                    "similar": _similar,
                 })
 
             combined_blocks: list[str] = []
@@ -587,7 +614,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                         for k, v in active_sources.items()
                     ]
                     obs_ticks = (
-                        [StormMark(value=obsv_floor, label="observed", color=wsp_color, short=True)]
+                        [StormMark(value=obsv_floor, label="observed", color=wsp_color, short=False)]
                         if obsv_floor > 0 else []
                     )
                     combined_marks = hist_marks + obs_ticks + source_ticks + [mean_mark]
@@ -680,15 +707,24 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                         f"<td rowspan='{_c_rows}' style='{_TD};"
                         f"background:{_bg}'>{_c_name}</td>"
                     )
+                    _sim_html = "<br>".join(_c.get("similar", [])) or "—"
+                    _row += (
+                        f"<td rowspan='{_c_rows}' style='{_TD};font-size:0.82em;"
+                        f"color:#555;vertical-align:top'>{_sim_html}</td>"
+                    )
                     _c_first = False
                 _cell_bg = _rc or "#fff"
-                _pct_str = f"{_w['pct']:.1f}%" if _w.get("pct") is not None else "—"
+                _pct_part = ""
+                if _w.get("pct") is not None:
+                    _pct_int = min(int(round(_w["pct"])), 100)
+                    _pct_part = (
+                        f" <span style='color:#aaa;font-size:0.85em'>"
+                        f"({_pct_int}%)</span>"
+                    )
                 _row += (
                     f"<td style='{_TD};text-align:center'>{_w['wsp']} kt</td>"
                     f"<td style='{_TD};background:{_cell_bg};"
-                    f"text-align:right'>{_fmt_pop_toc(_w['total'])}</td>"
-                    f"<td style='{_TD};background:{_cell_bg};"
-                    f"text-align:right'>{_pct_str}</td>"
+                    f"text-align:right'>{_fmt_pop_toc(_w['total'])}{_pct_part}</td>"
                     f"<td style='{_TD};background:{_cell_bg}'>{_rp_str}</td>"
                     f"</tr>"
                 )
@@ -700,9 +736,9 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
         f"<thead><tr>"
         f"<th style='{_TH}'>Storm</th>"
         f"<th style='{_TH}'>Country</th>"
+        f"<th style='{_TH}'>Similar storms</th>"
         f"<th style='{_TH}'>Wind</th>"
-        f"<th style='{_TH}'>Exposure</th>"
-        f"<th style='{_TH}'>% pop.</th>"
+        f"<th style='{_TH}'>Exposure [% pop.]</th>"
         f"<th style='{_TH}'>Return period</th>"
         f"</tr></thead>"
         f"<tbody>{''.join(tbl_rows)}</tbody>"

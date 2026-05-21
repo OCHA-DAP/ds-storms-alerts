@@ -229,7 +229,7 @@ def _strip_chart(
             # annotation_clip=False lets it draw below the axes without
             # affecting figure size (bbox_inches="tight" removed from savefig).
             ax.annotate(
-                "total pop.",
+                "Total est. pop.",
                 xy=(xfrac, 0.0),
                 xycoords="axes fraction",
                 xytext=(xfrac, -0.18),
