@@ -579,6 +579,33 @@ def fetch_historical_obsv_exposure(
     return df[~df["atcf_id"].isin(exclude_atcf_ids)].reset_index(drop=True)
 
 
+def fetch_all_prior_country_pairs(
+    engine: Engine, atcf_ids: list[str], issued_time: datetime
+) -> set[tuple[str, str]]:
+    """Return all (atcf_id, iso3) pairs that had fcast/WSP exposure at any advisory
+    before issued_time for the given storms."""
+    if not atcf_ids:
+        return set()
+    sql = text("""
+        SELECT DISTINCT atcf_id, iso3
+        FROM storms.nhc_tracks_fcastonly_exposure
+        WHERE atcf_id IN :atcf_ids AND admin_level = :admin_level
+          AND issued_time < :issued_time AND pop_exposed > 0
+        UNION
+        SELECT DISTINCT atcf_id, pcode AS iso3
+        FROM storms.nhc_wsp_fcastonly_exposure
+        WHERE atcf_id IN :atcf_ids AND admin_level = :admin_level
+          AND issued_time < :issued_time AND pop_exposed > 0
+    """).bindparams(bindparam("atcf_ids", expanding=True))
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {
+            "atcf_ids": atcf_ids,
+            "admin_level": _ADMIN_LEVEL,
+            "issued_time": issued_time,
+        }).fetchall()
+    return {(r[0], r[1]) for r in rows}
+
+
 def fetch_admin_population(engine: Engine, iso3s: list[str]) -> dict[str, int]:
     """Return {iso3: total_pop} from storms.admin_population at admin_level=0."""
     if not iso3s:

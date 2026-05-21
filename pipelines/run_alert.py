@@ -18,6 +18,7 @@ from src.data import (
     fetch_adam_current_exposure,
     fetch_adam_historical_exposure,
     fetch_admin_population,
+    fetch_all_prior_country_pairs,
     fetch_buffers,
     fetch_current_obsv_exposure,
     fetch_fcast_exposure,
@@ -209,6 +210,9 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
 
     iso3_to_total_pop = fetch_admin_population(engine, all_render_iso3s)
 
+    all_prior_pairs = fetch_all_prior_country_pairs(engine, all_render_atcf_ids, issued_time_dt)
+    already_passed_pairs = all_prior_pairs - current_any_pairs - final_update_pairs
+
     logger.info("Fetching GDACS current exposure...")
     gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_render_atcf_ids)
 
@@ -369,6 +373,24 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
             candidates.append(float(sub_obsv["pop_exposed"].max()))
         return max(candidates)
 
+    def _country_rp_score(aid: str, iso3: str) -> float:
+        """Max RP across all wind speeds for this country/storm (higher = rarer)."""
+        best = 0.0
+        for _tw in (34, 50, 64):
+            _tr = fcast_df[
+                (fcast_df["atcf_id"] == aid)
+                & (fcast_df["iso3"] == iso3)
+                & (fcast_df["wind_speed_kt"] == _tw)
+            ]
+            _fv = int(_tr["pop_exposed"].iloc[0]) if not _tr.empty else 0
+            _ov = _obsv_for(obsv_df, aid, iso3, _tw)
+            _tot = _fv + _ov
+            if _tot > 0:
+                rp = _rp_numeric(float(_tot), iso3, _tw)
+                if rp is not None and rp > best:
+                    best = rp
+        return best
+
     n_seasons = issued_time_dt.year - 2002 + 1
 
     def _fmt_pop_toc(x: float) -> str:
@@ -449,7 +471,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
 
         toc_countries: list[dict] = []
         country_sections: list[str] = []
-        for iso3 in sorted(storm_to_iso3s[aid], key=lambda c: -_country_exposure_score(aid, c)):
+        for iso3 in sorted(storm_to_iso3s[aid], key=lambda c: -_country_rp_score(aid, c)):
             # Final update notice for this (storm, country) pair.
             notice_html = ""
             if (aid, iso3) in final_update_pairs:
@@ -530,7 +552,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                     )
                     _sim_scores.append((_score, _storm_label(_hd["name"], _hd["season"])))
                 _sim_scores.sort()
-                _similar = [_lbl for _, _lbl in _sim_scores[:5]]
+                _similar = [_lbl for _, _lbl in _sim_scores[:3]]
 
                 toc_countries.append({
                     "name": _cname(iso3),
@@ -744,7 +766,24 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
         f"<tbody>{''.join(tbl_rows)}</tbody>"
         f"</table>"
     )
-    return toc_html + "\n".join(sections)
+    already_passed_html = ""
+    if already_passed_pairs:
+        _passed_by_storm: dict[str, list[str]] = {}
+        for _ap_aid, _ap_iso3 in sorted(already_passed_pairs):
+            _passed_by_storm.setdefault(_ap_aid, []).append(_cname(_ap_iso3))
+        _passed_parts = []
+        for _ap_aid, _ap_countries in _passed_by_storm.items():
+            _ap_label = _storm_label(*storm_meta.get(_ap_aid, (None, None)))
+            _passed_parts.append(f"{_ap_label}: {', '.join(sorted(_ap_countries))}")
+        already_passed_html = (
+            "<p style='font-size:0.88em;color:#666;margin:0 0 20px'>"
+            "<strong>Countries already passed</strong> "
+            "(see past emails for final exposure estimate): "
+            + "; ".join(_passed_parts)
+            + "</p>"
+        )
+
+    return toc_html + already_passed_html + "\n".join(sections)
 
 
 def generate_exposure_csv(
