@@ -577,3 +577,16 @@ def fetch_historical_obsv_exposure(
         )
         df = pd.DataFrame(result.fetchall(), columns=list(result.keys()))
     return df[~df["atcf_id"].isin(exclude_atcf_ids)].reset_index(drop=True)
+
+
+def fetch_admin_population(engine: Engine, iso3s: list[str]) -> dict[str, int]:
+    """Return {iso3: total_pop} from storms.admin_population at admin_level=0."""
+    if not iso3s:
+        return {}
+    sql = text("""
+        SELECT iso3, total_pop FROM storms.admin_population
+        WHERE admin_level = 0 AND iso3 IN :iso3s
+    """).bindparams(bindparam("iso3s", expanding=True))
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"iso3s": iso3s}).fetchall()
+    return {r[0]: int(r[1]) for r in rows}

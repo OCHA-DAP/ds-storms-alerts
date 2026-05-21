@@ -137,6 +137,7 @@ def _strip_chart(
     x_max: float | None = None,
     pdf: WspPdf | None = None,
     pdf_fill_color: str = "#888888",
+    total_pop: int | None = None,
 ) -> str:
     nonzero = [m for m in marks if m.value > 0]
     has_pdf = pdf is not None and any(n > 0 for _, n in pdf.bands)
@@ -205,6 +206,14 @@ def _strip_chart(
         xmin, xmax = ax.get_xlim()
         ax.set_xlim(min(xmin, 0), xmax)
 
+    if total_pop is not None and total_pop > 0:
+        ax.axvline(total_pop, color="#bbbbbb", linewidth=0.8, linestyle="--", zorder=3)
+        ax.text(
+            total_pop, _Y_HIST_LABEL, "total pop.",
+            ha="right", va="bottom", fontsize=5.5, color="#999999",
+            rotation=90, zorder=5,
+        )
+
     return _fig_to_img_tag(fig)
 
 
@@ -219,6 +228,7 @@ def country_strip_chart(
     marks: list[StormMark],
     x_max: float | None = None,
     pdf: WspPdf | None = None,
+    total_pop: int | None = None,
 ) -> str:
     # Title omitted — surrounding HTML headings carry country / source.
     return _strip_chart(
@@ -228,6 +238,7 @@ def country_strip_chart(
         x_max=x_max,
         pdf=pdf,
         pdf_fill_color=wind_speed_color(wind_speed_kt),
+        total_pop=total_pop,
     )
 
 

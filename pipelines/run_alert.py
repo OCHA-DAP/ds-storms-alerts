@@ -17,6 +17,7 @@ from src.constants import PROD_LIST_IDS, TEST_LIST_IDS
 from src.data import (
     fetch_adam_current_exposure,
     fetch_adam_historical_exposure,
+    fetch_admin_population,
     fetch_buffers,
     fetch_current_obsv_exposure,
     fetch_fcast_exposure,
@@ -43,6 +44,7 @@ from src.plots import (
 
 _HIST_COLOR = "#888888"
 _SRC_LABELS = {"our": "our est.", "ADAM": "ADAM", "GDACS": "GDACS"}
+_HIGH_EXPOSURE_THRESHOLD = 0.15  # fraction of total pop; triggers pop-scale x axis
 
 # WSP probability band midpoints (fraction) used to compute expected exposure.
 _WSP_BAND_MIDPOINT = {
@@ -205,6 +207,8 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
         engine, all_render_iso3s, exclude_atcf_ids=all_render_atcf_ids
     )
     hist_df = hist_df[hist_df["season"] >= 2002].reset_index(drop=True)
+
+    iso3_to_total_pop = fetch_admin_population(engine, all_render_iso3s)
 
     logger.info("Fetching GDACS current exposure...")
     gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_render_atcf_ids)
@@ -495,10 +499,12 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                 _ov = _obsv_for(obsv_df, aid, iso3, _tw)
                 _tot = _fv + _ov
                 if _tot > 0:
+                    _tp = iso3_to_total_pop.get(iso3, 0)
                     _toc_wsps.append({
                         "wsp": _tw,
                         "total": _tot,
                         "rp": _rp_numeric(float(_tot), iso3, _tw),
+                        "pct": _tot / _tp * 100 if _tp > 0 else None,
                     })
             if _toc_wsps:
                 toc_countries.append({
@@ -584,8 +590,17 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                         color=wsp_color,
                     )
 
+                _total_pop = iso3_to_total_pop.get(iso3, 0)
+                _use_pop_scale = (
+                    _total_pop > 0
+                    and bool(active_sources)
+                    and max(active_sources.values()) >= _HIGH_EXPOSURE_THRESHOLD * _total_pop
+                )
                 combined_img = country_strip_chart(
-                    iso3, wsp, combined_marks, x_max=x_max_per_wsp[wsp], pdf=pdf,
+                    iso3, wsp, combined_marks,
+                    x_max=_total_pop if _use_pop_scale else x_max_per_wsp[wsp],
+                    pdf=pdf,
+                    total_pop=_total_pop if _use_pop_scale else None,
                 )
                 _rp = _rp_text(float(our_val), iso3, wsp)
                 _rp_html = (
@@ -658,10 +673,13 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                     )
                     _c_first = False
                 _cell_bg = _rc or "#fff"
+                _pct_str = f"{_w['pct']:.1f}%" if _w.get("pct") is not None else "—"
                 _row += (
                     f"<td style='{_TD};text-align:center'>{_w['wsp']} kt</td>"
                     f"<td style='{_TD};background:{_cell_bg};"
                     f"text-align:right'>{_fmt_pop_toc(_w['total'])}</td>"
+                    f"<td style='{_TD};background:{_cell_bg};"
+                    f"text-align:right'>{_pct_str}</td>"
                     f"<td style='{_TD};background:{_cell_bg}'>{_rp_str}</td>"
                     f"</tr>"
                 )
@@ -675,6 +693,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
         f"<th style='{_TH}'>Country</th>"
         f"<th style='{_TH}'>Wind</th>"
         f"<th style='{_TH}'>Exposure</th>"
+        f"<th style='{_TH}'>% pop.</th>"
         f"<th style='{_TH}'>Return period</th>"
         f"</tr></thead>"
         f"<tbody>{''.join(tbl_rows)}</tbody>"
