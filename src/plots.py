@@ -139,7 +139,12 @@ def _strip_chart(
     pdf_fill_color: str = "#888888",
     total_pop: int | None = None,
 ) -> str:
-    nonzero = [m for m in marks if m.value > 0]
+    # Drop marks that would be outside the chart's x range — their ax.text objects
+    # at large data coordinates expand bbox_inches="tight" to data scale.
+    nonzero = [
+        m for m in marks
+        if m.value > 0 and (x_max is None or x_max <= 0 or m.value <= x_max * 1.05)
+    ]
     has_pdf = pdf is not None and any(n > 0 for _, n in pdf.bands)
     if not nonzero and not has_pdf and x_max is None:
         return ""
@@ -207,12 +212,28 @@ def _strip_chart(
         ax.set_xlim(min(xmin, 0), xmax)
 
     if total_pop is not None and total_pop > 0:
-        ax.axvline(total_pop, color="#bbbbbb", linewidth=0.8, linestyle="--", zorder=3)
-        ax.text(
-            total_pop, _Y_HIST_LABEL, "total pop.",
-            ha="right", va="bottom", fontsize=5.5, color="#999999",
-            rotation=90, zorder=5,
-        )
+        xlim = ax.get_xlim()
+        xfrac = (total_pop - xlim[0]) / (xlim[1] - xlim[0])
+        if 0.0 <= xfrac <= 1.0:
+            # Heavy tick + "total pop." label using axes-fraction coordinates.
+            # annotation_clip=False lets it draw below the axes without
+            # affecting figure size (bbox_inches="tight" removed from savefig).
+            ax.annotate(
+                "total pop.",
+                xy=(xfrac, 0.0),
+                xycoords="axes fraction",
+                xytext=(xfrac, -0.28),
+                textcoords="axes fraction",
+                ha="center", va="top",
+                fontsize=5.5, color="#333333", fontweight="bold",
+                arrowprops=dict(
+                    arrowstyle="-",
+                    color="#333333",
+                    lw=2.0,
+                    shrinkA=0, shrinkB=0,
+                ),
+                annotation_clip=False,
+            )
 
     return _fig_to_img_tag(fig)
 

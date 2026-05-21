@@ -44,7 +44,6 @@ from src.plots import (
 
 _HIST_COLOR = "#888888"
 _SRC_LABELS = {"our": "our est.", "ADAM": "ADAM", "GDACS": "GDACS"}
-_HIGH_EXPOSURE_THRESHOLD = 0.15  # fraction of total pop; triggers pop-scale x axis
 
 # WSP probability band midpoints (fraction) used to compute expected exposure.
 _WSP_BAND_MIDPOINT = {
@@ -514,6 +513,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                 })
 
             combined_blocks: list[str] = []
+            _total_pop = iso3_to_total_pop.get(iso3, 0)
 
             for wsp in active_wsps:
                 wsp_color = wind_speed_color(wsp)
@@ -547,9 +547,29 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                     if v > 0
                 }
 
+                # WSP data for this country/storm/wsp — needed for x_max and PDF.
+                wsp_sub = wsp_exp_df[
+                    (wsp_exp_df["atcf_id"] == aid)
+                    & (wsp_exp_df["iso3"] == iso3)
+                    & (wsp_exp_df["wind_threshold_kt"] == wsp)
+                ]
+
+                # x_max = min(total_pop, 2 × wsp_max), extended if any mark exceeds it.
+                _wsp_max = float(wsp_sub["pop_exposed"].max()) if not wsp_sub.empty else 0.0
+                _base = _wsp_max if _wsp_max > 0 else (
+                    max(active_sources.values()) if active_sources else x_max_per_wsp[wsp]
+                )
+                _cap = min(_total_pop, 2 * _base) if _total_pop > 0 else 2 * _base
+                _max_active = max(active_sources.values()) if active_sources else 0
+                _chart_xmax = max(_cap, _max_active)
+                # show "total pop." tick only when total_pop is visible on this chart
+                _chart_total_pop = (
+                    _total_pop if (_total_pop > 0 and _total_pop <= _chart_xmax) else None
+                )
+
                 hist_marks = _filter_historical(
                     _marks(hist_df, iso3, wsp, _HIST_COLOR, short=True),
-                    x_max_per_wsp[wsp],
+                    _chart_xmax,
                     current_values=list(active_sources.values()),
                 )
 
@@ -573,12 +593,6 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                 else:
                     combined_marks = hist_marks
 
-                # WSP PDF overlay (unchanged).
-                wsp_sub = wsp_exp_df[
-                    (wsp_exp_df["atcf_id"] == aid)
-                    & (wsp_exp_df["iso3"] == iso3)
-                    & (wsp_exp_df["wind_threshold_kt"] == wsp)
-                ]
                 pdf = None
                 if not wsp_sub.empty:
                     pdf = WspPdf(
@@ -590,17 +604,11 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                         color=wsp_color,
                     )
 
-                _total_pop = iso3_to_total_pop.get(iso3, 0)
-                _use_pop_scale = (
-                    _total_pop > 0
-                    and bool(active_sources)
-                    and max(active_sources.values()) >= _HIGH_EXPOSURE_THRESHOLD * _total_pop
-                )
                 combined_img = country_strip_chart(
                     iso3, wsp, combined_marks,
-                    x_max=_total_pop if _use_pop_scale else x_max_per_wsp[wsp],
+                    x_max=_chart_xmax,
                     pdf=pdf,
-                    total_pop=_total_pop if _use_pop_scale else None,
+                    total_pop=_chart_total_pop,
                 )
                 _rp = _rp_text(float(our_val), iso3, wsp)
                 _rp_html = (
