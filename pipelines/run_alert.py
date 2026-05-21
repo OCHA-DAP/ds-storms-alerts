@@ -43,7 +43,7 @@ from src.plots import (
 )
 
 _HIST_COLOR = "#888888"
-_SRC_LABELS = {"our": "our est.", "ADAM": "ADAM", "GDACS": "GDACS"}
+_SRC_LABELS = {"our": "CHD est.", "ADAM": "ADAM", "GDACS": "GDACS"}
 
 # WSP probability band midpoints (fraction) used to compute expected exposure.
 _WSP_BAND_MIDPOINT = {
@@ -577,21 +577,20 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
 
                 if active_sources:
                     mean_val = int(round(sum(active_sources.values()) / len(active_sources)))
-                    if len(active_sources) == 1:
-                        src_key = next(iter(active_sources))
-                        suffix = "forecasted total" if src_key == "our" else src_key
-                    else:
-                        suffix = "mean: " + ", ".join(active_sources.keys())
                     mean_mark = StormMark(
                         value=mean_val,
-                        label=_storm_label(name_aid, season_aid, suffix),
+                        label=_storm_label(name_aid, season_aid, "Forecasted final exposure"),
                         color=wsp_color,
                     )
                     source_ticks = [
                         StormMark(value=v, label=_SRC_LABELS[k], color=wsp_color, short=True)
                         for k, v in active_sources.items()
                     ]
-                    combined_marks = hist_marks + source_ticks + [mean_mark]
+                    obs_ticks = (
+                        [StormMark(value=obsv_floor, label="observed", color=wsp_color, short=True)]
+                        if obsv_floor > 0 else []
+                    )
+                    combined_marks = hist_marks + obs_ticks + source_ticks + [mean_mark]
                 else:
                     combined_marks = hist_marks
 
