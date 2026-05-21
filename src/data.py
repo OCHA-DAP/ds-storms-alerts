@@ -581,21 +581,26 @@ def fetch_historical_obsv_exposure(
 
 def fetch_all_prior_country_pairs(
     engine: Engine, atcf_ids: list[str], issued_time: datetime
-) -> set[tuple[str, str]]:
-    """Return all (atcf_id, iso3) pairs that had fcast/WSP exposure at any advisory
-    before issued_time for the given storms."""
+) -> dict[tuple[str, str], datetime]:
+    """Return {(atcf_id, iso3): last_issued_time} for all storm-country pairs that
+    had fcast/WSP exposure at any advisory before issued_time."""
     if not atcf_ids:
-        return set()
+        return {}
     sql = text("""
-        SELECT DISTINCT atcf_id, iso3
-        FROM storms.nhc_tracks_fcastonly_exposure
-        WHERE atcf_id IN :atcf_ids AND admin_level = :admin_level
-          AND issued_time < :issued_time AND pop_exposed > 0
-        UNION
-        SELECT DISTINCT atcf_id, pcode AS iso3
-        FROM storms.nhc_wsp_fcastonly_exposure
-        WHERE atcf_id IN :atcf_ids AND admin_level = :admin_level
-          AND issued_time < :issued_time AND pop_exposed > 0
+        SELECT atcf_id, iso3, MAX(last_time) AS last_issued_time FROM (
+            SELECT atcf_id, iso3, MAX(issued_time) AS last_time
+            FROM storms.nhc_tracks_fcastonly_exposure
+            WHERE atcf_id IN :atcf_ids AND admin_level = :admin_level
+              AND issued_time < :issued_time AND pop_exposed > 0
+            GROUP BY atcf_id, iso3
+            UNION ALL
+            SELECT atcf_id, pcode AS iso3, MAX(issued_time) AS last_time
+            FROM storms.nhc_wsp_fcastonly_exposure
+            WHERE atcf_id IN :atcf_ids AND admin_level = :admin_level
+              AND issued_time < :issued_time AND pop_exposed > 0
+            GROUP BY atcf_id, pcode
+        ) sub
+        GROUP BY atcf_id, iso3
     """).bindparams(bindparam("atcf_ids", expanding=True))
     with engine.connect() as conn:
         rows = conn.execute(sql, {
@@ -603,7 +608,7 @@ def fetch_all_prior_country_pairs(
             "admin_level": _ADMIN_LEVEL,
             "issued_time": issued_time,
         }).fetchall()
-    return {(r[0], r[1]) for r in rows}
+    return {(r[0], r[1]): r[2] for r in rows}
 
 
 def fetch_admin_population(engine: Engine, iso3s: list[str]) -> dict[str, int]:

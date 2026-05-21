@@ -211,7 +211,10 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
     iso3_to_total_pop = fetch_admin_population(engine, all_render_iso3s)
 
     all_prior_pairs = fetch_all_prior_country_pairs(engine, all_render_atcf_ids, issued_time_dt)
-    already_passed_pairs = all_prior_pairs - current_any_pairs - final_update_pairs
+    already_passed_pairs: dict[tuple[str, str], datetime] = {
+        k: v for k, v in all_prior_pairs.items()
+        if k not in current_any_pairs and k not in final_update_pairs
+    }
 
     logger.info("Fetching GDACS current exposure...")
     gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_render_atcf_ids)
@@ -244,7 +247,10 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
 
     logger.info("Loading country boundaries...")
     background_gdf = load_background_countries()
-    adm1_gdf = load_adm1_boundaries(all_render_iso3s)
+    _all_name_iso3s = sorted(
+        set(all_render_iso3s) | {iso3 for _, iso3 in already_passed_pairs}
+    )
+    adm1_gdf = load_adm1_boundaries(_all_name_iso3s)
     iso3_to_name: dict[str, str] = (
         adm1_gdf.groupby("iso_3")["adm0_name"]
         .agg(lambda x: x.value_counts().index[0])
@@ -636,7 +642,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                         for k, v in active_sources.items()
                     ]
                     obs_ticks = (
-                        [StormMark(value=obsv_floor, label="observed", color=wsp_color, short=False)]
+                        [StormMark(value=obsv_floor, label="Observed up to present", color=wsp_color, short=False)]
                         if obsv_floor > 0 else []
                     )
                     combined_marks = hist_marks + obs_ticks + source_ticks + [mean_mark]
@@ -769,12 +775,15 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
     already_passed_html = ""
     if already_passed_pairs:
         _passed_by_storm: dict[str, list[str]] = {}
-        for _ap_aid, _ap_iso3 in sorted(already_passed_pairs):
-            _passed_by_storm.setdefault(_ap_aid, []).append(_cname(_ap_iso3))
+        for (_ap_aid, _ap_iso3), _ap_last_t in sorted(already_passed_pairs.items()):
+            _ap_t_str = _ap_last_t.strftime("%d %b %HZ")
+            _passed_by_storm.setdefault(_ap_aid, []).append(
+                f"{_cname(_ap_iso3)} ({_ap_t_str})"
+            )
         _passed_parts = []
-        for _ap_aid, _ap_countries in _passed_by_storm.items():
+        for _ap_aid, _ap_entries in _passed_by_storm.items():
             _ap_label = _storm_label(*storm_meta.get(_ap_aid, (None, None)))
-            _passed_parts.append(f"{_ap_label}: {', '.join(sorted(_ap_countries))}")
+            _passed_parts.append(f"{_ap_label}: {', '.join(sorted(_ap_entries))}")
         already_passed_html = (
             "<p style='font-size:0.88em;color:#666;margin:0 0 20px'>"
             "<strong>Countries already passed</strong> "
