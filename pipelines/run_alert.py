@@ -942,6 +942,53 @@ def generate_exposure_csv(
     return results
 
 
+def send_test_alert(engine, issued_time_dt: datetime) -> str:
+    """Generate and send a test email for the given issued time.
+
+    Uses TEST_LIST_IDS. Returns a human-readable status string.
+    Raises on failure (caller should catch for UI display).
+    """
+    import base64
+    import re as _re
+
+    from ocha_relay.listmonk import ListmonkClient
+
+    body = generate_alert_html(engine, issued_time_dt)
+    if body is None:
+        return "No storms with forecasted exposure for this issued time — nothing to send."
+
+    issued_time = issued_time_dt.strftime("%Y-%m-%dT%H")
+    subject = f"[TEST] Storm alert: {issued_time}"
+    campaign_name = f"[TEST] ds-storms-alerts_{issued_time}"
+
+    client = ListmonkClient.from_env()
+
+    _uploaded: dict[str, str] = {}
+
+    def _upload_image(m: _re.Match) -> str:
+        b64 = m.group(1)
+        if b64 not in _uploaded:
+            _uploaded[b64] = client.upload_media(base64.b64decode(b64), "chart.png")
+        return _uploaded[b64]
+
+    body = _re.sub(r'data:image/png;base64,([A-Za-z0-9+/=]+)', _upload_image, body)
+
+    csv_files = generate_exposure_csv(engine, issued_time_dt)
+    media_ids: list[int] = []
+    for filename, csv_bytes in csv_files:
+        media_ids.append(client.upload_attachment(csv_bytes, filename))
+
+    cid = client.create_campaign(
+        name=campaign_name,
+        subject=subject,
+        body=body,
+        list_ids=TEST_LIST_IDS,
+        media_ids=media_ids,
+    )
+    client.send_campaign(cid, skip_confirmation=True)
+    return f"Sent campaign {cid}: {campaign_name!r}"
+
+
 if __name__ == "__main__":
     args = parse_args()
     issued_time = args.issued_time

@@ -14,8 +14,8 @@ def _imports():
     import ocha_stratus as stratus
     from datetime import datetime, timedelta
     from sqlalchemy import text
-    from pipelines.run_alert import generate_alert_html
-    return datetime, generate_alert_html, mo, stratus, text, timedelta
+    from pipelines.run_alert import generate_alert_html, send_test_alert
+    return datetime, generate_alert_html, mo, send_test_alert, stratus, text, timedelta
 
 
 @app.cell
@@ -73,7 +73,8 @@ def _time_selector(mo, storm, engine, text, timedelta):
             _options = {f"{_final_key} (final advisory)": _final_key, **_options}
     issued_time = mo.ui.dropdown(options=_options, label="Issued time")
     generate_btn = mo.ui.run_button(label="Generate")
-    mo.hstack([issued_time, generate_btn], gap=2)
+    send_btn = mo.ui.run_button(label="Send test email")
+    mo.hstack([issued_time, generate_btn, send_btn], gap=2)
 
 
 @app.cell
@@ -87,6 +88,18 @@ def _preview(mo, generate_btn, issued_time, engine, generate_alert_html, datetim
         if _body is None
         else mo.Html(f"<div style='font-family:sans-serif;max-width:900px;margin:auto'>{_body}</div>")
     )
+
+
+@app.cell
+def _send(mo, send_btn, issued_time, engine, send_test_alert, datetime):
+    mo.stop(not send_btn.value)
+    mo.stop(issued_time.value is None)
+    _issued_time_dt = datetime.strptime(issued_time.value, "%Y-%m-%dT%H")
+    try:
+        _status = send_test_alert(engine, _issued_time_dt)
+        mo.callout(mo.md(f"**Sent.** {_status}"), kind="success")
+    except Exception as _e:
+        mo.callout(mo.md(f"**Error:** {_e}"), kind="danger")
 
 
 if __name__ == "__main__":
