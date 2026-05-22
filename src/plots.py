@@ -135,7 +135,8 @@ def _pdf_polygon(pdf: WspPdf) -> tuple[list[float], list[float]]:
 _Y_HIST_TOP = 0.06        # short historical lines stop here
 _Y_HIST_LABEL = 0.08      # historical labels start here
 _Y_PDF_TOP = 0.92         # PDF shaded area scaled to fit below this
-_Y_TALL_TOP = 0.95        # current/forecast lines stop here
+_Y_SHIFT_TOP = 0.28       # tick height when a label is shifted (diagonal leader)
+_Y_TALL_TOP = 0.95        # current/forecast lines stop here (no shift)
 _Y_TALL_LABEL = 0.98      # current/forecast labels start here
 _Y_TOP = 2.05             # ylim upper bound (headroom for two-line labels)
 
@@ -155,21 +156,31 @@ def _place_tall_labels(
 ) -> list[tuple[StormMark, float]]:
     """Assign non-overlapping label x positions for tall marks.
 
-    Marks are sorted by value. If a label would collide with its left
-    neighbour, it is pushed right; a diagonal leader line is drawn later.
+    Uses a centroid-preserving iterative algorithm: when an adjacent pair
+    overlaps, both are pushed equally in opposite directions so the group
+    centroid stays at the marks' mean value. This produces symmetric
+    placement — e.g. three clustered marks land at [mean-s, mean, mean+s].
     """
+    if not marks:
+        return []
     sorted_m = sorted(marks, key=lambda m: float(m.value))
-    placed: list[tuple[StormMark, float, float]] = []  # (mark, center_x, half_w)
-    for m in sorted_m:
-        x = float(m.value)
-        hw = _label_half_width(m.label, x_max)
-        if placed:
-            _, prev_x, prev_hw = placed[-1]
-            min_x = prev_x + prev_hw + hw + x_max * 0.002
-            if x < min_x:
-                x = min_x
-        placed.append((m, x, hw))
-    return [(m, cx) for m, cx, _ in placed]
+    n = len(sorted_m)
+    hw = [_label_half_width(m.label, x_max) for m in sorted_m]
+    pad = x_max * 0.002
+    pos = [float(m.value) for m in sorted_m]
+    for _ in range(200):
+        changed = False
+        for i in range(n - 1):
+            needed = hw[i] + hw[i + 1] + pad
+            gap = pos[i + 1] - pos[i]
+            if gap < needed:
+                push = (needed - gap) / 2
+                pos[i] -= push
+                pos[i + 1] += push
+                changed = True
+        if not changed:
+            break
+    return list(zip(sorted_m, pos))
 
 
 def _strip_chart(
@@ -241,24 +252,32 @@ def _strip_chart(
         _placed = _place_tall_labels(tall_marks, _eff_xmax)
         for m, placed_x in _placed:
             actual_x = float(m.value)
+            _shifted = abs(placed_x - actual_x) > _eff_xmax * 0.005
+            # Shorten the position tick when the label is shifted so diagonal
+            # leader lines don't collide with full-height ticks of other marks.
+            tick_top = _Y_SHIFT_TOP if _shifted else _Y_TALL_TOP
             ax.plot(
-                [actual_x, actual_x], [0, _Y_TALL_TOP],
+                [actual_x, actual_x], [0, tick_top],
                 color=m.color, linewidth=1.6, alpha=1.0,
                 zorder=4, solid_capstyle="butt",
             )
-            _shifted = abs(placed_x - actual_x) > _eff_xmax * 0.005
+            arrowkw: dict = {}
+            if _shifted:
+                # shrinkA=0: leader line starts right at the bottom of the label;
+                # shrinkB=2: small gap before touching the tick tip.
+                arrowkw["arrowprops"] = dict(
+                    arrowstyle="-", color=m.color, lw=0.7,
+                    shrinkA=0, shrinkB=2,
+                )
             ax.annotate(
                 m.label,
-                xy=(actual_x, _Y_TALL_TOP),
+                xy=(actual_x, tick_top),
                 xytext=(placed_x, _Y_TALL_LABEL),
                 ha="center", va="bottom", rotation=90,
                 fontsize=7.5, color=m.color,
                 fontweight="bold" if m.bold else "normal",
                 zorder=5, annotation_clip=False,
-                arrowprops=dict(
-                    arrowstyle="-", color=m.color, lw=0.7,
-                    shrinkA=2, shrinkB=0,
-                ) if _shifted else None,
+                **arrowkw,
             )
 
     ax.set_ylim(0, _Y_TOP)
