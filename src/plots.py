@@ -10,7 +10,7 @@ matplotlib.use("Agg")  # must be before pyplot import
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
-_HIST_COLOR = "#888888"
+_HIST_COLOR = "#444444"
 _OBSV_COLOR = "#1e8449"
 _FCAST_COLOR = "#b9651b"
 
@@ -140,6 +140,38 @@ _Y_TALL_LABEL = 0.98      # current/forecast labels start here
 _Y_TOP = 2.05             # ylim upper bound (headroom for two-line labels)
 
 
+def _label_half_width(label: str, x_max: float) -> float:
+    """Estimate half the horizontal footprint of a 90°-rotated label in data units.
+
+    With fontsize 7.5pt and axes 8.64 in wide spanning x_max*1.05 data units,
+    each line of text is ~13 px tall → ~0.009 * x_max data units per line.
+    """
+    n_lines = label.count("\n") + 1
+    return n_lines * x_max * 0.009
+
+
+def _place_tall_labels(
+    marks: list[StormMark], x_max: float
+) -> list[tuple[StormMark, float]]:
+    """Assign non-overlapping label x positions for tall marks.
+
+    Marks are sorted by value. If a label would collide with its left
+    neighbour, it is pushed right; a diagonal leader line is drawn later.
+    """
+    sorted_m = sorted(marks, key=lambda m: float(m.value))
+    placed: list[tuple[StormMark, float, float]] = []  # (mark, center_x, half_w)
+    for m in sorted_m:
+        x = float(m.value)
+        hw = _label_half_width(m.label, x_max)
+        if placed:
+            _, prev_x, prev_hw = placed[-1]
+            min_x = prev_x + prev_hw + hw + x_max * 0.002
+            if x < min_x:
+                x = min_x
+        placed.append((m, x, hw))
+    return [(m, cx) for m, cx, _ in placed]
+
+
 def _strip_chart(
     title: str,
     x_label: str,
@@ -181,30 +213,53 @@ def _strip_chart(
                     zorder=2,
                 )
 
-    for m in nonzero:
-        if m.short:
-            line_top = _Y_HIST_TOP
-            label_y = _Y_HIST_LABEL
-            fontsize = 6.0
-            alpha = 0.85
-            linewidth = 0.9
-        else:
-            line_top = _Y_TALL_TOP
-            label_y = _Y_TALL_LABEL
-            fontsize = 7.5
-            alpha = 1.0
-            linewidth = 1.6
+    short_marks = [m for m in nonzero if m.short]
+    tall_marks = [m for m in nonzero if not m.short]
+
+    # Short marks (historical): thin line + small label inside the chart.
+    for m in short_marks:
         ax.plot(
-            [m.value, m.value], [0, line_top],
-            color=m.color, linewidth=linewidth, alpha=alpha,
+            [m.value, m.value], [0, _Y_HIST_TOP],
+            color=m.color, linewidth=0.9, alpha=0.85,
             zorder=4, solid_capstyle="butt",
         )
         ax.text(
-            m.value, label_y, m.label,
+            m.value, _Y_HIST_LABEL, m.label,
             rotation=90, ha="center", va="bottom",
-            fontsize=fontsize, color=m.color, alpha=alpha, zorder=5,
-            fontweight="bold" if m.bold else "normal",
+            fontsize=6.0, color=m.color, alpha=0.85,
+            fontweight="normal", zorder=5,
         )
+
+    # Tall marks (current storm name, CHD/ADAM/GDACS ticks, observed):
+    # tall vertical line at the actual value, label placed above the PDF area
+    # with anti-overlap shifting and a diagonal leader line when shifted.
+    if tall_marks:
+        _eff_xmax = (
+            x_max if (x_max is not None and x_max > 0)
+            else max(float(m.value) for m in tall_marks)
+        )
+        _placed = _place_tall_labels(tall_marks, _eff_xmax)
+        for m, placed_x in _placed:
+            actual_x = float(m.value)
+            ax.plot(
+                [actual_x, actual_x], [0, _Y_TALL_TOP],
+                color=m.color, linewidth=1.6, alpha=1.0,
+                zorder=4, solid_capstyle="butt",
+            )
+            _shifted = abs(placed_x - actual_x) > _eff_xmax * 0.005
+            ax.annotate(
+                m.label,
+                xy=(actual_x, _Y_TALL_TOP),
+                xytext=(placed_x, _Y_TALL_LABEL),
+                ha="center", va="bottom", rotation=90,
+                fontsize=7.5, color=m.color,
+                fontweight="bold" if m.bold else "normal",
+                zorder=5, annotation_clip=False,
+                arrowprops=dict(
+                    arrowstyle="-", color=m.color, lw=0.7,
+                    shrinkA=2, shrinkB=0,
+                ) if _shifted else None,
+            )
 
     ax.set_ylim(0, _Y_TOP)
     ax.set_yticks([])

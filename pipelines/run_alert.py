@@ -665,7 +665,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                         bold=True,
                     )
                     source_ticks = [
-                        StormMark(value=v, label=_SRC_LABELS[k], color=wsp_color, short=True)
+                        StormMark(value=v, label=_SRC_LABELS[k], color=wsp_color, short=False)
                         for k, v in active_sources.items()
                     ]
                     obs_ticks = (
