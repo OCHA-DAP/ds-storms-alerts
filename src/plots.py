@@ -136,7 +136,8 @@ _Y_HIST_TOP = 0.06        # short historical lines stop here
 _Y_HIST_LABEL = 0.08      # historical labels start here
 _Y_PDF_TOP = 0.92         # PDF shaded area scaled to fit below this
 _Y_SHIFT_TOP = 0.28       # tick height when a label is shifted (diagonal leader)
-_Y_TALL_TOP = 0.95        # current/forecast lines stop here (no shift)
+_Y_TALL_TOP = 0.95        # source/observed lines stop here (no shift)
+_Y_BOLD_TOP = 1.05        # mean-mark (bold) line stops here (no shift)
 _Y_TALL_LABEL = 0.98      # current/forecast labels start here
 _Y_TOP = 2.05             # ylim upper bound (headroom for two-line labels)
 
@@ -253,12 +254,17 @@ def _strip_chart(
         for m, placed_x in _placed:
             actual_x = float(m.value)
             _shifted = abs(placed_x - actual_x) > _eff_xmax * 0.005
-            # Shorten the position tick when the label is shifted so diagonal
-            # leader lines don't collide with full-height ticks of other marks.
-            tick_top = _Y_SHIFT_TOP if _shifted else _Y_TALL_TOP
+            # Bold (mean) mark is taller and heavier; shortened when shifted.
+            if _shifted:
+                tick_top = _Y_SHIFT_TOP
+            elif m.bold:
+                tick_top = _Y_BOLD_TOP
+            else:
+                tick_top = _Y_TALL_TOP
+            linewidth = 2.5 if m.bold else 1.6
             ax.plot(
                 [actual_x, actual_x], [0, tick_top],
-                color=m.color, linewidth=1.6, alpha=1.0,
+                color=m.color, linewidth=linewidth, alpha=1.0,
                 zorder=4, solid_capstyle="butt",
             )
             arrowkw: dict = {}
