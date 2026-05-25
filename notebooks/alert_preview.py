@@ -226,8 +226,14 @@ def _matching_demo(mo, mode, cmp_storm, engine, pd, text):
         "    admin_level, iso3, gdacs_admin_code, "
         "    admin_name AS gdacs_admin_name, "
         "    wind_speed_kt, pop_exposed "
-        "  FROM storms.gdacs_exposure "
+        "  FROM storms.gdacs_exposure ge "
         "  WHERE gdacs_eventid = :eid "
+        "    AND NOT EXISTS ("
+        "      SELECT 1 FROM storms.gdacs_fm_lookup x "
+        "      WHERE x.iso3 = ge.iso3 "
+        "        AND x.admin_level = ge.admin_level "
+        "        AND x.gmi_admin IS NULL"
+        "    )"
         "  ORDER BY admin_level, gdacs_admin_code, wind_speed_kt, "
         "           valid_time DESC"
         "), event_atcf AS ("
@@ -385,7 +391,11 @@ def _matching_demo(mo, mode, cmp_storm, engine, pd, text):
             ])
 
         # Orphans: keep one row per (gdacs_admin_code, wind_speed_kt).
-        # No FM match → no NHC join possible.
+        # No FM match → no NHC join possible. (Note: GDACS rows for
+        # fm_adm1_only countries at adm1 are filtered out in the SQL
+        # itself — the policy says "don't show GDACS at adm1", so we
+        # don't surface them here at all. Any orphan that reaches this
+        # block is a genuine data gap.)
         if not _orphan.empty:
             _orphan = _orphan.assign(
                 fm_pcode=pd.NA,
@@ -439,10 +449,12 @@ def _matching_demo(mo, mode, cmp_storm, engine, pd, text):
             ).reset_index(drop=True)
         )
 
-        # Summary: count each status bucket (per unique FM unit).
-        _matched_units = _df[~_df["status"].str.startswith("❌")][
-            ["admin_level", "iso3", "fm_pcode", "status"]
-        ].drop_duplicates()
+        # Summary: count each status bucket. Orphans (❌) are counted
+        # by row; caveat (⚠️) and clean (✅) are counted per unique FM
+        # unit (each FM unit can have multiple wind-speed rows).
+        _matched_units = _df[
+            _df["status"].str.startswith(("⚠️", "✅"))
+        ][["admin_level", "iso3", "fm_pcode", "status"]].drop_duplicates()
         _n_o = int(_df["status"].str.startswith("❌").sum())
         _n_c = int(
             _matched_units["status"].str.startswith("⚠️").sum()
