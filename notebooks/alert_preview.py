@@ -192,16 +192,19 @@ def _matching_demo(mo, mode, cmp_storm, engine, pd, text):
     #     events.
     #  2. event_atcf     — the ATCF id(s) this GDACS event resolves
     #     to via storm_id_lookup. Used to pull NHC numbers.
-    #  3. latest_advisory — per (atcf_id, iso3, wind_speed_kt), the
-    #     LAST issued_time on file. Mirrors GDACS's own convention
-    #     (gdacs_pop comes from the latest episode per event), so the
-    #     comparison is apples-to-apples — both sides show the source's
-    #     final/latest snapshot. Snapping to ONE advisory per
+    #  3. latest_obsv     — per (atcf_id, iso3, wind_speed_kt), the
+    #     LAST valid_time on file in storms.nhc_tracks_obsv_exposure.
+    #     We use the observed (post-landfall) track here rather than
+    #     forecasts because for landfalled storms the observed buffer
+    #     reflects what actually happened — the "what was exposed"
+    #     answer most directly comparable to GDACS's cumulative
+    #     post-event report. Snapping to ONE valid_time per
     #     storm-country-windkt also keeps adm0 + adm1 NHC numbers
-    #     temporally coherent (within a single advisory adm0 =
-    #     sum(adm1)).
-    #  4. nhc_snap        — NHC rows pulled from those latest advisories,
-    #     keyed by (pcode, admin_level, wind_speed_kt) for join.
+    #     temporally coherent (within a single observed track
+    #     position adm0 = sum(adm1)).
+    #  4. nhc_snap        — NHC rows pulled from those latest obsv
+    #     valid_times, keyed by (pcode, admin_level, wind_speed_kt) for
+    #     join.
     #  5. adam_event_rows — latest ADAM snapshot per
     #     (admin_level, iso3, lower(admin_name), wind_speed_kt) for the
     #     adam_eventid linked to this GDACS event (via
@@ -254,23 +257,23 @@ def _matching_demo(mo, mode, cmp_storm, engine, pd, text):
         "), event_atcf AS ("
         "  SELECT atcf_id FROM storms.storm_id_lookup "
         "  WHERE gdacs_eventid = :eid AND atcf_id IS NOT NULL"
-        "), latest_advisory AS ("
+        "), latest_obsv AS ("
         "  SELECT DISTINCT ON (n.atcf_id, n.iso3, n.wind_speed_kt) "
-        "    n.atcf_id, n.iso3, n.wind_speed_kt, n.issued_time "
-        "  FROM storms.nhc_tracks_fcast_exposure n "
+        "    n.atcf_id, n.iso3, n.wind_speed_kt, n.valid_time "
+        "  FROM storms.nhc_tracks_obsv_exposure n "
         "  JOIN event_atcf ea ON ea.atcf_id = n.atcf_id "
         "  WHERE n.admin_level = 0 "
         "  ORDER BY n.atcf_id, n.iso3, n.wind_speed_kt, "
-        "           n.issued_time DESC"
+        "           n.valid_time DESC"
         "), nhc_snap AS ("
         "  SELECT n.iso3, n.pcode, n.admin_level, n.wind_speed_kt, "
         "    MAX(n.pop_exposed) AS nhc_pop "
-        "  FROM storms.nhc_tracks_fcast_exposure n "
-        "  JOIN latest_advisory p "
+        "  FROM storms.nhc_tracks_obsv_exposure n "
+        "  JOIN latest_obsv p "
         "    ON p.atcf_id = n.atcf_id "
         "    AND p.iso3 = n.iso3 "
         "    AND p.wind_speed_kt = n.wind_speed_kt "
-        "    AND p.issued_time = n.issued_time "
+        "    AND p.valid_time = n.valid_time "
         "  GROUP BY n.iso3, n.pcode, n.admin_level, n.wind_speed_kt"
         "), adam_event_rows AS ("
         "  SELECT DISTINCT ON "
