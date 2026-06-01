@@ -229,12 +229,14 @@ def generate(listmonk_url: str, all_lists: list[dict]) -> str:
 
 def main() -> None:
     import os
-    base_url = os.environ["DSCI_LISTMONK_BASE_URL"].rstrip("/")
+    api_url = os.environ["DSCI_LISTMONK_BASE_URL"].rstrip("/")
+    # Subscription form is at the listmonk root, not under /api
+    root_url = api_url[:-4] if api_url.endswith("/api") else api_url
     client = ListmonkClient.from_env()
     all_lists = client.fetch_all_lists(tag=COUNTRY_LIST_TAG)
     print(f"Fetched {len(all_lists)} lists tagged '{COUNTRY_LIST_TAG}'")
 
-    html = generate(base_url, all_lists)
+    html = generate(root_url, all_lists)
 
     out = Path(__file__).parents[1] / "docs" / "index.html"
     out.parent.mkdir(exist_ok=True)
