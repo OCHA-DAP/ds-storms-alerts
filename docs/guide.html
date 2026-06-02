@@ -90,21 +90,23 @@
 
   <h1>About the storm alerts</h1>
   <p class="lead">
-    These alerts are produced by the
-    <a href="https://centre.humdata.org">OCHA Centre for Humanitarian Data</a>
-    to help humanitarian organisations monitor tropical cyclones and their potential
-    impact on populations. Alerts are based on official forecasts from the
-    US National Hurricane Center (NHC) and are sent automatically when a storm
-    is forecast to affect a subscribed country.
+    These alerts help humanitarian organisations monitor tropical cyclones and their
+    potential impact on populations. All forecast data originates from the
+    <a href="https://www.nhc.noaa.gov">US National Hurricane Center (NOAA NHC)</a>.
+    Population exposure estimates are derived from NHC forecasts by
+    <a href="https://www.wfp.org/adam">WFP ADAM</a>,
+    <a href="https://www.gdacs.org">GDACS</a>, and the
+    <a href="https://centre.humdata.org">OCHA Centre for Humanitarian Data</a>.
+    Alerts are sent automatically when a storm is forecast to affect a subscribed country.
   </p>
 
   <h2>When will I receive an email?</h2>
 
   <p>
-    The pipeline checks for new NHC advisories four times a day at
-    <strong>00:00, 06:00, 12:00, and 18:00 UTC</strong> — the standard NHC advisory
-    schedule. An email is sent for a given advisory if at least one storm has
-    non-zero forecasted wind exposure in any monitored country.
+    NHC issues tropical cyclone advisories four times a day at
+    <strong>03:00, 09:00, 15:00, and 21:00 UTC</strong>. The pipeline processes
+    each advisory shortly after it is released and sends an email if at least one
+    storm has non-zero forecasted wind exposure in any monitored country.
   </p>
 
   <p>You will only receive an email for the country lists you are subscribed to.
@@ -231,20 +233,25 @@
   </ul>
 
   <h3>Data sources</h3>
+  <p>All exposure estimates are derived from <a href="https://www.nhc.noaa.gov">NOAA NHC</a>
+  track and wind-speed-probability forecasts, processed independently by three organisations:</p>
   <table>
     <thead><tr><th>Label</th><th>Source</th></tr></thead>
     <tbody>
       <tr>
-        <td><strong>CHD</strong></td>
-        <td>OCHA Centre for Humanitarian Data — derived from NHC track forecasts and the probabilistic Wind Speed Probability (WSP) model.</td>
-      </tr>
-      <tr>
         <td><strong>ADAM</strong></td>
-        <td><a href="https://www.undrr.org/adam">UNDRR Anticipatory Action Data Management</a> platform.</td>
+        <td><a href="https://www.wfp.org/adam">WFP ADAM</a> — the World Food Programme's
+        Anticipatory Action Data Management platform.</td>
       </tr>
       <tr>
         <td><strong>GDACS</strong></td>
-        <td><a href="https://www.gdacs.org">Global Disaster Alert and Coordination System</a>.</td>
+        <td><a href="https://www.gdacs.org">GDACS</a> — the Global Disaster Alert and
+        Coordination System (European Commission / UN).</td>
+      </tr>
+      <tr>
+        <td><strong>CHD</strong></td>
+        <td><a href="https://centre.humdata.org">OCHA Centre for Humanitarian Data</a>
+        — derived from NHC track forecasts and the probabilistic WSP model.</td>
       </tr>
     </tbody>
   </table>
