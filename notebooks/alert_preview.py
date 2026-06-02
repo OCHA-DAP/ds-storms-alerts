@@ -181,7 +181,51 @@ def _cmp_storm_selector(mo, mode, cmp_storm_options):
 
 
 @app.cell
-def _matching_demo(mo, mode, cmp_storm, engine, pd, text):
+def _adam_lookup_source(mo, mode):
+    """TEMPORARY: lets us point at a local CSV for the adam_fm_lookup
+    instead of the production `storms.adam_fm_lookup` table. Leave
+    empty to use the DB. When the humrev-driven lookup is pushed to
+    DB, this cell + the dependent table swap below can be deleted.
+    """
+    mo.stop(mode.value != "Admin 1 comparison")
+    adam_csv_path = mo.ui.text(
+        label="ADAM lookup CSV (leave empty → use storms.adam_fm_lookup)",
+        full_width=True,
+    )
+    adam_csv_path
+    return (adam_csv_path,)
+
+
+@app.cell
+def _adam_lookup_table(mo, mode, adam_csv_path, engine, pd):
+    """TEMPORARY: if a CSV path is supplied, load it and push to a
+    test table so the downstream SQL can JOIN against it. Returns the
+    fully-qualified table name to use in the SQL.
+    """
+    mo.stop(mode.value != "Admin 1 comparison")
+    path = (adam_csv_path.value or "").strip()
+    if path:
+        _df = pd.read_csv(path)
+        _df.to_sql(
+            "adam_fm_lookup_test", engine,
+            schema="storms", if_exists="replace", index=False,
+        )
+        adam_lookup_table = "storms.adam_fm_lookup_test"
+        _status = mo.md(
+            f"**Using local CSV** — `{path}` → "
+            f"`storms.adam_fm_lookup_test` ({len(_df)} rows)"
+        )
+    else:
+        adam_lookup_table = "storms.adam_fm_lookup"
+        _status = mo.md(
+            "Using **production** `storms.adam_fm_lookup`."
+        )
+    _status
+    return (adam_lookup_table,)
+
+
+@app.cell
+def _matching_demo(mo, mode, cmp_storm, engine, pd, text, adam_lookup_table):
     mo.stop(mode.value != "Admin 1 comparison")
     mo.stop(cmp_storm.value is None)
 
@@ -296,7 +340,7 @@ def _matching_demo(mo, mode, cmp_storm, engine, pd, text):
         "      AS adam_admins, "
         "    COUNT(DISTINCT aer.admin_name) AS n_adam_admins "
         "  FROM adam_event_rows aer "
-        "  JOIN storms.adam_fm_lookup lk "
+        f"  JOIN {adam_lookup_table} lk "
         "    ON lk.iso3 = aer.iso3 "
         "    AND lk.admin_level = aer.admin_level "
         "    AND lower(lk.adam_admin_name) = aer.admin_name_lc "
