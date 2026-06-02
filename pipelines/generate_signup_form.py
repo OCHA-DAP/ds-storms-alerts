@@ -30,6 +30,27 @@ REGIONS: list[tuple[str, list[str]]] = [
     ]),
 ]
 
+_NAV_LINKS = [("index.html", "Subscribe"), ("guide.html", "About the alerts")]
+
+
+def _nav_html(active: str) -> str:
+    links = []
+    for href, label in _NAV_LINKS:
+        style = "color:#fff;text-decoration:none;"
+        if label == active:
+            style += "font-weight:700;border-bottom:2px solid #fff;padding-bottom:1px"
+        else:
+            style += "font-weight:400;opacity:0.85"
+        links.append(f'<a href="{href}" style="{style}">{label}</a>')
+    return (
+        '<nav style="background:#007eb5;padding:11px 20px;display:flex;'
+        'align-items:center;gap:24px;font-family:system-ui,sans-serif;font-size:0.95em">'
+        '<span style="color:#fff;font-weight:700;margin-right:auto">Storm Alerts</span>'
+        + "".join(links)
+        + "</nav>"
+    )
+
+
 # Strip the "Storm Alerts - " prefix for display inside region fieldsets
 _PREFIX = "Storm Alerts - "
 
@@ -106,6 +127,7 @@ def generate(listmonk_url: str, all_lists: list[dict]) -> str:
         _region_fieldset(name, iso3s, by_iso3) for name, iso3s in REGIONS
     )
 
+    nav = _nav_html("Subscribe")
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -181,6 +203,7 @@ def generate(listmonk_url: str, all_lists: list[dict]) -> str:
 </style>
 </head>
 <body>
+{nav}
 <div class="wrap">
   <h1>Storm Alerts</h1>
   <p class="lead">

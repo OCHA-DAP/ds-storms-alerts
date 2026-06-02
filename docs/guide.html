@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storm Alerts — About</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 15px;
+    color: #222;
+    background: #f5f6f7;
+    padding-bottom: 60px;
+  }
+  nav {
+    background: #007eb5;
+    padding: 11px 20px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    font-size: 0.95em;
+  }
+  .nav-brand { color: #fff; font-weight: 700; margin-right: auto; }
+  nav a {
+    color: #fff;
+    text-decoration: none;
+    opacity: 0.85;
+  }
+  nav a.active {
+    font-weight: 700;
+    opacity: 1;
+    border-bottom: 2px solid #fff;
+    padding-bottom: 1px;
+  }
+  .wrap {
+    max-width: 760px;
+    margin: 28px auto;
+    background: #fff;
+    border-radius: 8px;
+    padding: 32px 36px;
+    box-shadow: 0 1px 4px rgba(0,0,0,.10);
+  }
+  h1 { font-size: 1.5em; color: #007eb5; margin-bottom: 8px; }
+  h2 {
+    font-size: 1.1em; color: #007eb5;
+    margin: 32px 0 10px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid #dde;
+  }
+  h3 { font-size: 0.95em; color: #333; margin: 18px 0 6px; font-weight: 600; }
+  p { line-height: 1.6; color: #333; margin-bottom: 10px; }
+  ul, ol { padding-left: 20px; margin-bottom: 10px; }
+  li { line-height: 1.6; margin-bottom: 4px; }
+  table {
+    width: 100%; border-collapse: collapse;
+    font-size: 0.88em; margin: 12px 0 18px;
+  }
+  th {
+    text-align: left; padding: 7px 10px;
+    background: #f0f0f0; border: 1px solid #dde;
+    font-weight: 600;
+  }
+  td { padding: 7px 10px; border: 1px solid #dde; vertical-align: top; }
+  tr:nth-child(even) td { background: #fafafa; }
+  .callout {
+    background: #f0f7fb; border-left: 4px solid #007eb5;
+    padding: 12px 16px; border-radius: 0 4px 4px 0;
+    margin: 14px 0; font-size: 0.92em;
+  }
+  .callout p { margin-bottom: 0; }
+  .rp-legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 8px 0 14px; font-size: 0.85em; }
+  .rp-swatch {
+    display: inline-block; width: 14px; height: 14px;
+    border-radius: 2px; vertical-align: middle; margin-right: 4px;
+  }
+  a { color: #007eb5; }
+  .lead { color: #555; margin-bottom: 24px; line-height: 1.6; font-size: 1.02em; }
+</style>
+</head>
+<body>
+
+<nav>
+  <span class="nav-brand">Storm Alerts</span>
+  <a href="index.html">Subscribe</a>
+  <a href="guide.html" class="active">About the alerts</a>
+</nav>
+
+<div class="wrap">
+
+  <h1>About the storm alerts</h1>
+  <p class="lead">
+    These alerts are produced by the
+    <a href="https://centre.humdata.org">OCHA Centre for Humanitarian Data</a>
+    to help humanitarian organisations monitor tropical cyclones and their potential
+    impact on populations. Alerts are based on official forecasts from the
+    US National Hurricane Center (NHC) and are sent automatically when a storm
+    is forecast to affect a subscribed country.
+  </p>
+
+  <h2>When will I receive an email?</h2>
+
+  <p>
+    The pipeline checks for new NHC advisories four times a day at
+    <strong>00:00, 06:00, 12:00, and 18:00 UTC</strong> — the standard NHC advisory
+    schedule. An email is sent for a given advisory if at least one storm has
+    non-zero forecasted wind exposure in any monitored country.
+  </p>
+
+  <p>You will only receive an email for the country lists you are subscribed to.
+  If a storm affects Cuba and Haiti but not Jamaica, only the Cuba and Haiti lists
+  (and any applicable bundled lists) will receive that alert.</p>
+
+  <h3>Final update emails</h3>
+  <p>
+    When a storm that previously had forecasted exposure in a country no longer does,
+    one final email is sent for that country. It is marked <strong>(final)</strong>
+    in the summary table. The figures in a final update reflect only observed exposure —
+    they will not change unless the storm track reverses and approaches the country again,
+    in which case a new alert would be issued.
+  </p>
+
+  <h3>Already passed notice</h3>
+  <p>
+    If a storm has already moved through a country in an earlier advisory but is still
+    active elsewhere, that country appears in a small footnote at the top of the email
+    labelled <em>"Countries already passed."</em> This is a reference note, not a
+    separate email — it points you to earlier alerts for the final exposure figures
+    for those countries.
+  </p>
+
+  <h2>Which subscription list is right for me?</h2>
+
+  <table>
+    <thead>
+      <tr>
+        <th>List</th>
+        <th>You receive an email when…</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Storm Alerts – All Countries</strong></td>
+        <td>Any storm alert is issued, anywhere in the world.</td>
+      </tr>
+      <tr>
+        <td><strong>Storm Alerts – LAC</strong></td>
+        <td>An alert includes at least one Caribbean, Central American, or South/North American country (excluding USA and Canada).</td>
+      </tr>
+      <tr>
+        <td><strong>Storm Alerts – [Country]</strong></td>
+        <td>An alert specifically includes that country.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <p>You can subscribe to multiple lists. Listmonk deduplicates deliveries —
+    being on several matching lists will not result in duplicate emails for the
+    same advisory.</p>
+  </div>
+
+  <h2>Understanding the email</h2>
+
+  <h3>Summary table</h3>
+  <p>Every email opens with a summary table. Each row covers one wind speed
+  threshold for one affected country:</p>
+  <table>
+    <thead><tr><th>Column</th><th>What it shows</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Storm</strong></td><td>Storm name and season year.</td></tr>
+      <tr><td><strong>Country</strong></td><td>Affected country. Rows marked <em>(final)</em> are final-update advisories.</td></tr>
+      <tr><td><strong>Similar storms</strong></td><td>The 3 historical storms (since 2002) with the most similar population-exposure profile across all wind thresholds.</td></tr>
+      <tr><td><strong>Wind</strong></td><td>Wind speed threshold: 34 kt, 50 kt, or 64 kt (see below).</td></tr>
+      <tr><td><strong>Exposure [% pop.]</strong></td><td>Estimated population within the wind radius — the mean of available data sources — with the percentage of that country's total population in parentheses.</td></tr>
+      <tr><td><strong>Return period</strong></td><td>How historically rare this level of exposure is (see below).</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Wind speed thresholds</h3>
+  <table>
+    <thead><tr><th>Threshold</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><strong>34 kt</strong> (~63 km/h, ~39 mph)</td><td>Tropical storm force winds — the minimum monitoring threshold.</td></tr>
+      <tr><td><strong>50 kt</strong> (~93 km/h, ~58 mph)</td><td>Strong tropical cyclone force winds.</td></tr>
+      <tr><td><strong>64 kt</strong> (~119 km/h, ~74 mph)</td><td>Hurricane / typhoon force winds (Category 1 minimum).</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Return period</h3>
+  <p>
+    The return period (RP) estimates how rare the current exposure level is compared
+    to all storms since 2002. A <strong>10-year RP</strong> means that roughly one
+    storm per decade has caused this level of exposure in that country at that wind
+    threshold. The formula is:
+  </p>
+  <p style="margin-left:16px;font-style:italic">
+    RP = (number of seasons since 2002 + 1) ÷ (number of past storms with equal or
+    greater exposure + 1)
+  </p>
+  <p>Return periods above 3 years are colour-coded in the summary table:</p>
+  <div class="rp-legend">
+    <span><span class="rp-swatch" style="background:#fff9c4"></span> &gt;3-year RP</span>
+    <span><span class="rp-swatch" style="background:#ffe8cc"></span> &gt;5-year RP</span>
+    <span><span class="rp-swatch" style="background:#ffcccc"></span> &gt;10-year RP</span>
+  </div>
+
+  <h3>Strip charts</h3>
+  <p>
+    Below the summary table, each storm and country has a set of horizontal strip charts —
+    one per active wind speed. The x-axis shows population exposed.
+  </p>
+  <ul>
+    <li><strong>Grey marks</strong> — comparable historical storms since 2002, for scale.</li>
+    <li><strong>Observed up to present</strong> — cumulative population already within the
+      wind radius based on the observed (post-landfall) track.</li>
+    <li><strong>CHD / ADAM / GDACS</strong> — individual source estimates (forecast plus observed combined). See data sources below.</li>
+    <li><strong>Forecasted final exposure</strong> (bold mark) — the mean across available sources; the headline figure for this advisory.</li>
+    <li><strong>Estimated final exposure</strong> (bold mark, final updates only) — same as above but for final-update advisories where all exposure is observed.</li>
+    <li><strong>Shaded area</strong> — when present, shows the probabilistic WSP forecast distribution: the spread of possible outcomes rather than a single deterministic value.</li>
+  </ul>
+
+  <h3>Maps</h3>
+  <p>Two maps are included per storm when the relevant data is available:</p>
+  <ul>
+    <li><strong>WSP 34 kt forecast</strong> — the footprint of the probabilistic
+      wind-speed-probability (WSP) model at the 34 kt threshold, showing where
+      there is some probability of tropical-storm-force winds.</li>
+    <li><strong>Forecast-only buffers</strong> — deterministic wind-radius buffer
+      zones along the forecast portion of the track.</li>
+  </ul>
+
+  <h3>Data sources</h3>
+  <table>
+    <thead><tr><th>Label</th><th>Source</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>CHD</strong></td>
+        <td>OCHA Centre for Humanitarian Data — derived from NHC track forecasts and the probabilistic Wind Speed Probability (WSP) model.</td>
+      </tr>
+      <tr>
+        <td><strong>ADAM</strong></td>
+        <td><a href="https://www.undrr.org/adam">UNDRR Anticipatory Action Data Management</a> platform.</td>
+      </tr>
+      <tr>
+        <td><strong>GDACS</strong></td>
+        <td><a href="https://www.gdacs.org">Global Disaster Alert and Coordination System</a>.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Questions and feedback</h2>
+  <p>
+    These alerts are experimental. For questions or feedback, please open an issue on the
+    <a href="https://github.com/OCHA-DAP/ds-storms-alerts">ds-storms-alerts GitHub repository</a>
+    or contact the
+    <a href="https://centre.humdata.org">OCHA Centre for Humanitarian Data</a>.
+  </p>
+
+</div>
+</body>
+</html>
