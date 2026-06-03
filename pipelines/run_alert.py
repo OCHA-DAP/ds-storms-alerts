@@ -13,11 +13,13 @@ from pathlib import Path
 
 import ocha_stratus as stratus
 
-from src.constants import PROD_LIST_IDS, TEST_LIST_IDS
+from src.constants import COUNTRY_LIST_TAG, LAC_ISO3S, TEST_LIST_IDS
 from src.data import (
+    fetch_active_storm_meta,
     fetch_adam_current_exposure,
     fetch_adam_historical_exposure,
     fetch_admin_population,
+    fetch_all_monitored_countries,
     fetch_all_prior_country_pairs,
     fetch_buffers,
     fetch_current_obsv_exposure,
@@ -131,8 +133,78 @@ TEST_EMAIL = _parse_bool_env("TEST_EMAIL", default=True)
 DRY_RUN = _parse_bool_env("DRY_RUN", default=True)
 
 
-def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
-    """Run the full pipeline and return the email body HTML.
+def resolve_country_list_ids(client, iso3s: list[str]) -> list[int]:
+    """Return listmonk list IDs for the given iso3s plus applicable aggregate lists.
+
+    Fetches all lists tagged COUNTRY_LIST_TAG and builds:
+    - iso3→list_id from iso3:* tags (one per country)
+    - aggregate:all list ID (always included)
+    - aggregate:lac list ID (included if any iso3 is in LAC_ISO3S)
+
+    Raises RuntimeError if any per-country iso3 has no list.
+    """
+    all_lists = client.fetch_all_lists(tag=COUNTRY_LIST_TAG)
+    iso3_to_list: dict[str, int] = {}
+    aggregate_all_id: int | None = None
+    aggregate_lac_id: int | None = None
+    monitoring_ids: list[int] = []
+    for lst in all_lists:
+        for tag in lst.get("tags", []):
+            if tag.startswith("iso3:"):
+                iso3_to_list[tag[5:]] = lst["id"]
+            elif tag == "aggregate:all":
+                aggregate_all_id = lst["id"]
+            elif tag == "aggregate:lac":
+                aggregate_lac_id = lst["id"]
+            elif tag == "aggregate:monitoring":
+                monitoring_ids.append(lst["id"])
+
+    missing = [iso3 for iso3 in iso3s if iso3 not in iso3_to_list]
+    if missing:
+        raise RuntimeError(
+            f"No listmonk list found for iso3(s): {missing}. "
+            f"Run pipelines/setup_country_lists.py first."
+        )
+
+    result = [iso3_to_list[iso3] for iso3 in iso3s]
+    if aggregate_all_id is not None:
+        result.append(aggregate_all_id)
+    if aggregate_lac_id is not None and any(iso3 in LAC_ISO3S for iso3 in iso3s):
+        result.append(aggregate_lac_id)
+    result.extend(monitoring_ids)
+    return result
+
+
+def _fetch_monitoring_list_ids(client) -> list[int]:
+    """Return IDs of all aggregate:monitoring lists."""
+    all_lists = client.fetch_all_lists(tag=COUNTRY_LIST_TAG)
+    return [
+        lst["id"]
+        for lst in all_lists
+        for tag in lst.get("tags", [])
+        if tag == "aggregate:monitoring"
+    ]
+
+
+def _monitoring_only_html(issued_time: str, active_meta: list[dict]) -> str:
+    """Minimal email body for advisories with active storms but no exposure."""
+    storm_labels = ", ".join(
+        _storm_label(m["name"], m["season"]) for m in active_meta
+    )
+    return (
+        f"<p style='font-family:sans-serif;color:#333;margin:0 0 12px'>"
+        f"<strong>Storm monitoring — {issued_time} UTC</strong></p>"
+        f"<p style='font-family:sans-serif;color:#555;margin:0 0 8px'>"
+        f"Active storms this advisory: {storm_labels}.</p>"
+        f"<p style='font-family:sans-serif;color:#555;margin:0'>"
+        f"No countries have forecasted wind exposure.</p>"
+    )
+
+
+def generate_alert_html(
+    engine, issued_time_dt: datetime
+) -> tuple[str, list[str]] | None:
+    """Run the full pipeline and return (html_body, iso3s).
 
     Returns None if there are no countries with any forecasted exposure and no
     storm-country pairs eligible for a final update notice.
@@ -176,6 +248,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
 
     if not current_any_pairs and not final_update_pairs:
         return None
+
 
     # Extend fetch lists to cover final-update storms/countries.
     extra_atcf_ids = sorted({aid for aid, _ in final_update_pairs} - set(atcf_ids))
@@ -658,9 +731,11 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                     mean_val = int(round(sum(active_sources.values()) / len(active_sources)))
                     _is_final = (aid, iso3) in final_update_pairs
                     _mean_suffix = "Estimated\nfinal exposure" if _is_final else "Forecasted\nfinal exposure"
+                    _storm_name = _storm_label(name_aid, None)
                     mean_mark = StormMark(
                         value=mean_val,
-                        label=_storm_label(name_aid, season_aid, _mean_suffix),
+                        label=_mean_suffix,
+                        bold_prefix=_storm_name,
                         color=wsp_color,
                         bold=True,
                     )
@@ -669,7 +744,13 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
                         for k, v in active_sources.items()
                     ]
                     obs_ticks = (
-                        [StormMark(value=obsv_floor, label="Observed up to present", color=wsp_color, short=False)]
+                        [StormMark(
+                            value=obsv_floor,
+                            label="Observed\nup to present",
+                            bold_prefix=_storm_name,
+                            color=wsp_color,
+                            short=False,
+                        )]
                         if obsv_floor > 0 and not _is_final else []
                     )
                     combined_marks = hist_marks + obs_ticks + source_ticks + [mean_mark]
@@ -819,7 +900,7 @@ def generate_alert_html(engine, issued_time_dt: datetime) -> str | None:
             + "</p>"
         )
 
-    return toc_html + already_passed_html + "\n".join(sections)
+    return toc_html + already_passed_html + "\n".join(sections), all_render_iso3s
 
 
 def generate_exposure_csv(
@@ -953,9 +1034,10 @@ def send_test_alert(engine, issued_time_dt: datetime) -> str:
 
     from ocha_relay.listmonk import ListmonkClient
 
-    body = generate_alert_html(engine, issued_time_dt)
-    if body is None:
+    result = generate_alert_html(engine, issued_time_dt)
+    if result is None:
         return "No storms with forecasted exposure for this issued time — nothing to send."
+    body, _ = result
 
     issued_time = issued_time_dt.strftime("%Y-%m-%dT%H")
     subject = f"[TEST] Storm alert: {issued_time}"
@@ -999,15 +1081,45 @@ if __name__ == "__main__":
         f"Starting alert pipeline: {issued_time=} {TEST_EMAIL=} {DRY_RUN=} {preview=}"
     )
 
-    list_ids = TEST_LIST_IDS if TEST_EMAIL else PROD_LIST_IDS
-
     engine = stratus.get_engine(stage="dev")
-    body = generate_alert_html(engine, issued_time_dt)
+    result = generate_alert_html(engine, issued_time_dt)
 
-    if body is None:
-        logger.info("No countries with non-zero 64kt exposure — nothing to send.")
+    if result is None:
+        active_meta = fetch_active_storm_meta(engine, issued_time_dt)
+        if not active_meta:
+            logger.info("No active storms this advisory — nothing to send.")
+            sys.exit(0)
+        logger.info(
+            f"Active storms but no exposure: {[m['atcf_id'] for m in active_meta]}"
+        )
+        prefix = "[TEST] " if TEST_EMAIL else ""
+        monitoring_subject = f"{prefix}Storm monitoring: {issued_time} — no exposure"
+        monitoring_campaign = f"{prefix}ds-storms-alerts_monitoring_{issued_time}"
+        if DRY_RUN:
+            logger.info(
+                f"DRY_RUN=True — skipping monitoring email. "
+                f"Would have sent: {monitoring_subject!r}"
+            )
+        else:
+            from ocha_relay.listmonk import ListmonkClient
+            client = ListmonkClient.from_env()
+            monitoring_ids = _fetch_monitoring_list_ids(client)
+            if monitoring_ids:
+                monitoring_body = _monitoring_only_html(issued_time, active_meta)
+                cid = client.create_campaign(
+                    name=monitoring_campaign,
+                    subject=monitoring_subject,
+                    body=monitoring_body,
+                    list_ids=monitoring_ids,
+                )
+                client.send_campaign(cid, skip_confirmation=True)
+                logger.info(f"Sent monitoring campaign {cid}: {monitoring_campaign!r}")
+            else:
+                logger.info("No aggregate:monitoring list found — skipping.")
+        logger.info("Alert pipeline complete.")
         sys.exit(0)
 
+    body, active_iso3s = result
     prefix = "[TEST] " if TEST_EMAIL else ""
     subject = f"{prefix}Storm alert: {issued_time}"
     campaign_name = f"{prefix}ds-storms-alerts_{issued_time}"
@@ -1031,12 +1143,19 @@ if __name__ == "__main__":
     if DRY_RUN:
         logger.info(
             f"DRY_RUN=True — skipping email. "
-            f"Would have sent: {subject!r} to lists {list_ids}"
+            f"Would have sent: {subject!r} to countries {active_iso3s}"
         )
     else:
         from ocha_relay.listmonk import ListmonkClient
 
         client = ListmonkClient.from_env()
+
+        if TEST_EMAIL:
+            list_ids = TEST_LIST_IDS
+        else:
+            logger.info(f"Resolving per-country lists for: {active_iso3s}")
+            list_ids = resolve_country_list_ids(client, active_iso3s)
+            logger.info(f"Targeting list IDs: {list_ids}")
 
         logger.info("Uploading images to listmonk media library...")
         _uploaded: dict[str, str] = {}

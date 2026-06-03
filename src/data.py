@@ -622,3 +622,41 @@ def fetch_admin_population(engine: Engine, iso3s: list[str]) -> dict[str, int]:
     with engine.connect() as conn:
         rows = conn.execute(sql, {"iso3s": iso3s}).fetchall()
     return {r[0]: int(r[1]) for r in rows}
+
+
+def fetch_active_storm_meta(engine: Engine, issued_time: datetime) -> list[dict]:
+    """Return basic metadata for all storms with forecast track data at issued_time.
+
+    Does NOT filter by pop_exposed — use this to detect active storms even when
+    no monitored country has exposure.
+    Returns list of {atcf_id, name, season} dicts.
+    """
+    sql = text("""
+        SELECT DISTINCT e.atcf_id,
+            COALESCE(NULLIF(s.name, 'NaN'), ib.name) AS name,
+            COALESCE(s.season, ib.season) AS season
+        FROM storms.nhc_tracks_fcastonly_exposure e
+        LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id
+        LEFT JOIN storms.ibtracs_storms ib ON ib.atcf_id = e.atcf_id
+        WHERE e.issued_time = :issued_time
+          AND e.admin_level = :admin_level
+        ORDER BY e.atcf_id
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"issued_time": issued_time, "admin_level": _ADMIN_LEVEL}).fetchall()
+    return [{"atcf_id": r[0], "name": r[1], "season": r[2]} for r in rows]
+
+
+def fetch_all_monitored_countries(engine: Engine) -> list[str]:
+    """Return all iso3s that have ever had non-zero exposure in either fcast table."""
+    sql = text("""
+        SELECT DISTINCT iso3 FROM storms.nhc_tracks_fcastonly_exposure
+        WHERE admin_level = :admin_level AND pop_exposed > 0
+        UNION
+        SELECT DISTINCT pcode AS iso3 FROM storms.nhc_wsp_fcastonly_exposure
+        WHERE admin_level = :admin_level AND pop_exposed > 0
+        ORDER BY iso3
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"admin_level": _ADMIN_LEVEL}).fetchall()
+    return [r[0] for r in rows]
