@@ -202,19 +202,57 @@ def _fetch_monitoring_list_ids(client) -> list[int]:
     ]
 
 
-def _monitoring_only_html(issued_time: str, active_meta: list[dict]) -> str:
-    """Minimal email body for advisories with active storms but no exposure."""
-    storm_labels = ", ".join(
-        _storm_label(m["name"], m["season"]) for m in active_meta
+def generate_monitoring_html(
+    engine, issued_time_dt: datetime, active_meta: list[dict]
+) -> str:
+    """Email body for advisories with active storms but no exposure.
+
+    Includes the same per-storm maps as the normal alert (WSP 34 kt + buffers).
+    No ToC, no country sections, no historical comparisons.
+    """
+    atcf_ids = [m["atcf_id"] for m in active_meta]
+
+    logger.info("Fetching track geometries (monitoring)...")
+    tracks_gdf = fetch_track_geo(engine, atcf_ids, issued_time_dt)
+    logger.info("Fetching wind buffers (monitoring)...")
+    buffers_gdf = fetch_buffers(engine, atcf_ids, issued_time_dt)
+    logger.info("Fetching WSP fcastonly polygons (monitoring)...")
+    wsp_gdf = fetch_wsp_fcastonly_polygons(
+        engine, atcf_ids, issued_time_dt, wind_threshold_kt=34,
     )
-    return (
-        f"<p style='font-family:sans-serif;color:#333;margin:0 0 12px'>"
-        f"<strong>Storm monitoring — {issued_time} UTC</strong></p>"
-        f"<p style='font-family:sans-serif;color:#555;margin:0 0 8px'>"
-        f"Active storms this advisory: {storm_labels}.</p>"
-        f"<p style='font-family:sans-serif;color:#555;margin:0'>"
-        f"No countries have forecasted wind exposure.</p>"
+    logger.info("Loading country boundaries (monitoring)...")
+    background_gdf = load_background_countries()
+
+    n = len(active_meta)
+    intro = (
+        f"<p style='font-family:sans-serif;color:#555;"
+        f"margin:0 0 24px;font-size:0.95em;line-height:1.5'>"
+        f"{n} active storm{'s' if n != 1 else ''} at this advisory. "
+        f"None {'are' if n != 1 else 'is'} currently forecast to affect "
+        f"any monitored country.</p>"
     )
+
+    sections: list[str] = [intro]
+    for meta in active_meta:
+        aid = meta["atcf_id"]
+        storm_label = _storm_label(meta["name"], meta["season"])
+        aid_tracks = tracks_gdf[tracks_gdf["atcf_id"] == aid]
+        aid_buffers = buffers_gdf[buffers_gdf["atcf_id"] == aid]
+        aid_wsp_poly = wsp_gdf[wsp_gdf["atcf_id"] == aid]
+
+        parts: list[str] = [f"<h2 style='{_H2}'>{storm_label}</h2>"]
+        wsp_m = track_plot_wsp(
+            aid_tracks, aid_buffers, aid_wsp_poly, background_gdf,
+            wind_threshold_kt=34,
+        )
+        if wsp_m:
+            parts.append(f"<h3 style='{_H3}'>WSP 34 kt forecast</h3>{wsp_m}")
+        buf_m = track_plot_buffers(aid_tracks, aid_buffers, background_gdf)
+        if buf_m:
+            parts.append(f"<h3 style='{_H3}'>Forecast-only buffers</h3>{buf_m}")
+        sections.append("".join(parts))
+
+    return "".join(sections)
 
 
 def generate_alert_html(
@@ -1115,37 +1153,20 @@ if __name__ == "__main__":
         logger.info(
             f"Active storms but no exposure: {[m['atcf_id'] for m in active_meta]}"
         )
-        prefix = "[TEST] " if TEST_EMAIL else ""
-        monitoring_subject = f"{prefix}Storm monitoring: {issued_time} — no exposure"
-        monitoring_campaign = f"{prefix}ds-storms-alerts_monitoring_{issued_time}"
-        if DRY_RUN:
-            logger.info(
-                f"DRY_RUN=True — skipping monitoring email. "
-                f"Would have sent: {monitoring_subject!r}"
-            )
-        else:
-            from ocha_relay.listmonk import ListmonkClient
-            client = ListmonkClient.from_env()
-            monitoring_ids = _fetch_monitoring_list_ids(client)
-            if monitoring_ids:
-                monitoring_body = _monitoring_only_html(issued_time, active_meta)
-                cid = client.create_campaign(
-                    name=monitoring_campaign,
-                    subject=monitoring_subject,
-                    body=monitoring_body,
-                    list_ids=monitoring_ids,
-                )
-                client.send_campaign(cid, skip_confirmation=True)
-                logger.info(f"Sent monitoring campaign {cid}: {monitoring_campaign!r}")
-            else:
-                logger.info("No aggregate:monitoring list found — skipping.")
-        logger.info("Alert pipeline complete.")
-        sys.exit(0)
+        body = generate_monitoring_html(engine, issued_time_dt, active_meta)
+        active_iso3s: list[str] = []
+        is_monitoring = True
+    else:
+        body, active_iso3s = result
+        is_monitoring = False
 
-    body, active_iso3s = result
     prefix = "[TEST] " if TEST_EMAIL else ""
-    subject = f"{prefix}Storm alert: {issued_time}"
-    campaign_name = f"{prefix}ds-storms-alerts_{issued_time}"
+    if is_monitoring:
+        subject = f"{prefix}Storm monitoring: {issued_time} — no exposure"
+        campaign_name = f"{prefix}ds-storms-alerts_monitoring_{issued_time}"
+    else:
+        subject = f"{prefix}Storm alert: {issued_time}"
+        campaign_name = f"{prefix}ds-storms-alerts_{issued_time}"
 
     if preview:
         style = "font-family:sans-serif;max-width:900px;margin:auto"
@@ -1164,21 +1185,30 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if DRY_RUN:
+        target = (
+            "monitoring list only" if is_monitoring
+            else f"countries {active_iso3s}"
+        )
         logger.info(
             f"DRY_RUN=True — skipping email. "
-            f"Would have sent: {subject!r} to countries {active_iso3s}"
+            f"Would have sent: {subject!r} to {target}"
         )
     else:
         from ocha_relay.listmonk import ListmonkClient
 
         client = ListmonkClient.from_env()
 
-        if TEST_EMAIL:
+        if is_monitoring:
+            list_ids = _fetch_monitoring_list_ids(client)
+            if not list_ids:
+                logger.info("No aggregate:monitoring list — skipping send.")
+                sys.exit(0)
+        elif TEST_EMAIL:
             list_ids = TEST_LIST_IDS
         else:
             logger.info(f"Resolving per-country lists for: {active_iso3s}")
             list_ids = resolve_country_list_ids(client, active_iso3s)
-            logger.info(f"Targeting list IDs: {list_ids}")
+        logger.info(f"Targeting list IDs: {list_ids}")
 
         logger.info("Uploading images to listmonk media library...")
         _uploaded: dict[str, str] = {}
@@ -1198,12 +1228,13 @@ if __name__ == "__main__":
         )
         logger.info(f"Uploaded {len(_uploaded)} images.")
 
-        logger.info("Generating and uploading CSV attachments...")
-        csv_files = generate_exposure_csv(engine, issued_time_dt)
         media_ids: list[int] = []
-        for filename, csv_bytes in csv_files:
-            media_ids.append(client.upload_attachment(csv_bytes, filename))
-            logger.info(f"  Attached {filename}")
+        if not is_monitoring:
+            logger.info("Generating and uploading CSV attachments...")
+            csv_files = generate_exposure_csv(engine, issued_time_dt)
+            for filename, csv_bytes in csv_files:
+                media_ids.append(client.upload_attachment(csv_bytes, filename))
+                logger.info(f"  Attached {filename}")
 
         cid = client.create_campaign(
             name=campaign_name,
