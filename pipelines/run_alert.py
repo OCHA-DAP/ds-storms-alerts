@@ -1088,14 +1088,21 @@ def send_test_alert(engine, issued_time_dt: datetime) -> str:
 
     from ocha_relay.listmonk import ListmonkClient
 
+    issued_time = issued_time_dt.strftime("%Y-%m-%dT%H")
     result = generate_alert_html(engine, issued_time_dt)
     if result is None:
-        return "No storms with forecasted exposure for this issued time — nothing to send."
-    body, _ = result
-
-    issued_time = issued_time_dt.strftime("%Y-%m-%dT%H")
-    subject = f"[TEST] Storm alert: {issued_time}"
-    campaign_name = f"[TEST] ds-storms-alerts_{issued_time}"
+        active_meta = fetch_active_storm_meta(engine, issued_time_dt)
+        if not active_meta:
+            return "No active storms for this issued time — nothing to send."
+        body = generate_monitoring_html(engine, issued_time_dt, active_meta)
+        subject = f"[TEST] Storm monitoring: {issued_time} — no exposure"
+        campaign_name = f"[TEST] ds-storms-alerts_monitoring_{issued_time}"
+        is_monitoring = True
+    else:
+        body, _ = result
+        subject = f"[TEST] Storm alert: {issued_time}"
+        campaign_name = f"[TEST] ds-storms-alerts_{issued_time}"
+        is_monitoring = False
 
     client = ListmonkClient.from_env()
 
@@ -1109,10 +1116,11 @@ def send_test_alert(engine, issued_time_dt: datetime) -> str:
 
     body = _re.sub(r'data:image/png;base64,([A-Za-z0-9+/=]+)', _upload_image, body)
 
-    csv_files = generate_exposure_csv(engine, issued_time_dt)
     media_ids: list[int] = []
-    for filename, csv_bytes in csv_files:
-        media_ids.append(client.upload_attachment(csv_bytes, filename))
+    if not is_monitoring:
+        csv_files = generate_exposure_csv(engine, issued_time_dt)
+        for filename, csv_bytes in csv_files:
+            media_ids.append(client.upload_attachment(csv_bytes, filename))
 
     cid = client.create_campaign(
         name=campaign_name,

@@ -14,8 +14,16 @@ def _imports():
     import ocha_stratus as stratus
     from datetime import datetime, timedelta
     from sqlalchemy import text
-    from pipelines.run_alert import generate_alert_html, send_test_alert
-    return datetime, generate_alert_html, mo, send_test_alert, stratus, text, timedelta
+    from pipelines.run_alert import (
+        generate_alert_html,
+        generate_monitoring_html,
+        send_test_alert,
+    )
+    from src.data import fetch_active_storm_meta
+    return (
+        datetime, fetch_active_storm_meta, generate_alert_html,
+        generate_monitoring_html, mo, send_test_alert, stratus, text, timedelta,
+    )
 
 
 @app.cell
@@ -23,13 +31,14 @@ def _db(stratus, text):
     engine = stratus.get_engine(stage="dev")
     with engine.connect() as _conn:
         _rows = _conn.execute(text(
-            "SELECT DISTINCT e.atcf_id, "
+            "SELECT DISTINCT t.atcf_id, "
             "  COALESCE(NULLIF(s.name, 'NaN'), ib.name) AS name, "
             "  COALESCE(s.season, ib.season) AS season "
-            "FROM storms.nhc_tracks_fcastonly_exposure e "
-            "LEFT JOIN storms.nhc_storms s ON s.atcf_id = e.atcf_id "
-            "LEFT JOIN storms.ibtracs_storms ib ON ib.atcf_id = e.atcf_id "
-            "ORDER BY COALESCE(s.season, ib.season) DESC NULLS LAST, e.atcf_id DESC"
+            "FROM storms.nhc_tracks_geo t "
+            "LEFT JOIN storms.nhc_storms s ON s.atcf_id = t.atcf_id "
+            "LEFT JOIN storms.ibtracs_storms ib ON ib.atcf_id = t.atcf_id "
+            "WHERE t.leadtime > 0 "
+            "ORDER BY COALESCE(s.season, ib.season) DESC NULLS LAST, t.atcf_id DESC"
         )).fetchall()
     storm_options = {
         (
@@ -54,12 +63,8 @@ def _time_selector(mo, storm, engine, text, timedelta):
         with engine.connect() as _conn:
             _rows = _conn.execute(text(
                 "SELECT DISTINCT issued_time "
-                "FROM storms.nhc_tracks_fcastonly_exposure "
-                "WHERE atcf_id = :aid "
-                "UNION "
-                "SELECT DISTINCT issued_time "
-                "FROM storms.nhc_wsp_fcastonly_exposure "
-                "WHERE atcf_id = :aid "
+                "FROM storms.nhc_tracks_geo "
+                "WHERE atcf_id = :aid AND leadtime > 0 "
                 "ORDER BY issued_time DESC"
             ), {"aid": storm.value}).fetchall()
     _times = [r[0] for r in _rows]
@@ -78,16 +83,25 @@ def _time_selector(mo, storm, engine, text, timedelta):
 
 
 @app.cell
-def _preview(mo, generate_btn, issued_time, engine, generate_alert_html, datetime):
+def _preview(
+    mo, generate_btn, issued_time, engine, datetime,
+    generate_alert_html, generate_monitoring_html, fetch_active_storm_meta,
+):
     mo.stop(not generate_btn.value)
     mo.stop(issued_time.value is None)
     _issued_time_dt = datetime.strptime(issued_time.value, "%Y-%m-%dT%H")
     _result = generate_alert_html(engine, _issued_time_dt)
-    (
-        mo.md("**No storms with forecasted or final-update exposure for this issued time.**")
-        if _result is None
-        else mo.Html(f"<div style='font-family:sans-serif;max-width:900px;margin:auto'>{_result[0]}</div>")
-    )
+    _style = "font-family:sans-serif;max-width:900px;margin:auto"
+    if _result is not None:
+        _out = mo.Html(f"<div style='{_style}'>{_result[0]}</div>")
+    else:
+        _active = fetch_active_storm_meta(engine, _issued_time_dt)
+        if not _active:
+            _out = mo.md("**No active storms for this issued time.**")
+        else:
+            _body = generate_monitoring_html(engine, _issued_time_dt, _active)
+            _out = mo.Html(f"<div style='{_style}'>{_body}</div>")
+    _out
 
 
 @app.cell
