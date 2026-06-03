@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "matplotlib>=3.9",
     "ocha-stratus>=0.1.7",
-    "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@v0.2.0",
+    "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@2d4870749faa4235e65164b731e0a574a2e209ab",
     "marimo>=0.23.6",
 ]
 

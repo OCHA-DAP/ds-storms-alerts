@@ -82,11 +82,11 @@ def _preview(mo, generate_btn, issued_time, engine, generate_alert_html, datetim
     mo.stop(not generate_btn.value)
     mo.stop(issued_time.value is None)
     _issued_time_dt = datetime.strptime(issued_time.value, "%Y-%m-%dT%H")
-    _body = generate_alert_html(engine, _issued_time_dt)
+    _result = generate_alert_html(engine, _issued_time_dt)
     (
         mo.md("**No storms with forecasted or final-update exposure for this issued time.**")
-        if _body is None
-        else mo.Html(f"<div style='font-family:sans-serif;max-width:900px;margin:auto'>{_body}</div>")
+        if _result is None
+        else mo.Html(f"<div style='font-family:sans-serif;max-width:900px;margin:auto'>{_result[0]}</div>")
     )
 
 

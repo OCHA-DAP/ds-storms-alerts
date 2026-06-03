@@ -61,12 +61,14 @@ class StormMark:
 
     short=True draws a low line with a smaller label (for historical context).
     short=False draws a tall line with a larger label (for current/forecast).
+    bold_prefix renders as a separate bold text element above the main label.
     """
     value: int
     label: str
     color: str
     short: bool = False
     bold: bool = False
+    bold_prefix: str = ""
 
 
 # WSP probability band widths (fraction of total probability)
@@ -135,11 +137,11 @@ def _pdf_polygon(pdf: WspPdf) -> tuple[list[float], list[float]]:
 _Y_HIST_TOP = 0.06        # short historical lines stop here
 _Y_HIST_LABEL = 0.08      # historical labels start here
 _Y_PDF_TOP = 0.92         # PDF shaded area scaled to fit below this
-_Y_SHIFT_TOP = 0.28       # tick height when a label is shifted (diagonal leader)
+_Y_SHIFT_TOP = 0.60       # tick height when a label is shifted (diagonal leader)
 _Y_TALL_TOP = 0.95        # source/observed lines stop here (no shift)
 _Y_BOLD_TOP = 1.05        # mean-mark (bold) line stops here (no shift)
-_Y_TALL_LABEL = 0.98      # current/forecast labels start here
-_Y_TOP = 2.05             # ylim upper bound (headroom for two-line labels)
+_Y_TALL_LABEL = 1.12      # tall labels start here (above _Y_BOLD_TOP + gap)
+_Y_TOP = 2.20             # ylim upper bound (headroom for multi-line labels)
 
 
 def _label_half_width(label: str, x_max: float) -> float:
@@ -166,7 +168,13 @@ def _place_tall_labels(
         return []
     sorted_m = sorted(marks, key=lambda m: float(m.value))
     n = len(sorted_m)
-    hw = [_label_half_width(m.label, x_max) for m in sorted_m]
+    hw = [
+        _label_half_width(
+            f"{m.bold_prefix}\n{m.label}" if m.bold_prefix else m.label,
+            x_max,
+        )
+        for m in sorted_m
+    ]
     pad = x_max * 0.002
     pos = [float(m.value) for m in sorted_m]
     for _ in range(200):
@@ -267,24 +275,54 @@ def _strip_chart(
                 color=m.color, linewidth=linewidth, alpha=1.0,
                 zorder=4, solid_capstyle="butt",
             )
-            arrowkw: dict = {}
-            if _shifted:
-                # shrinkA=0: leader line starts right at the bottom of the label;
-                # shrinkB=2: small gap before touching the tick tip.
-                arrowkw["arrowprops"] = dict(
-                    arrowstyle="-", color=m.color, lw=0.7,
-                    shrinkA=0, shrinkB=2,
+            # Draw text label(s). Text and arrow are always separate so the
+            # arrow can start from the visual bottom of the rotated label rather
+            # than from the anchor point (which lands at the visual centre with
+            # va="bottom" and rotation=90).
+            if m.bold_prefix:
+                # Render as two overlapping same-anchor texts using blank lines as
+                # spacers so they align like a single multi-line label.
+                # ha="left" with rotation=90 means all lines start at _Y_TALL_LABEL
+                # (extending upward), giving true left-alignment.
+                _n_suffix = m.label.count("\n") + 1
+                ax.text(
+                    placed_x, _Y_TALL_LABEL, m.bold_prefix + "\n" * _n_suffix,
+                    ha="left", va="bottom", rotation=90,
+                    fontsize=7.5, color=m.color, fontweight="bold",
+                    zorder=5, clip_on=False,
                 )
-            ax.annotate(
-                m.label,
-                xy=(actual_x, tick_top),
-                xytext=(placed_x, _Y_TALL_LABEL),
-                ha="center", va="bottom", rotation=90,
-                fontsize=7.5, color=m.color,
-                fontweight="bold" if m.bold else "normal",
-                zorder=5, annotation_clip=False,
-                **arrowkw,
-            )
+                ax.text(
+                    placed_x, _Y_TALL_LABEL, "\n" + m.label,
+                    ha="left", va="bottom", rotation=90,
+                    fontsize=7.5, color=m.color, fontweight="normal",
+                    zorder=5, clip_on=False,
+                )
+            else:
+                ax.text(
+                    placed_x, _Y_TALL_LABEL, m.label,
+                    ha="left", va="bottom", rotation=90,
+                    fontsize=7.5, color=m.color,
+                    fontweight="bold" if m.bold else "normal",
+                    zorder=5, clip_on=False,
+                )
+            # Diagonal leader line for shifted labels. With ha="left" and
+            # rotation=90 the text right edge is at placed_x and extends left.
+            # Arrow starts from the center-bottom: placed_x minus one half-width.
+            if _shifted:
+                _combined_lbl = (
+                    f"{m.bold_prefix}\n{m.label}" if m.bold_prefix else m.label
+                )
+                _x_arrow = placed_x - _label_half_width(_combined_lbl, _eff_xmax)
+                ax.annotate(
+                    "",
+                    xy=(actual_x, tick_top),
+                    xytext=(_x_arrow, _Y_TALL_LABEL),
+                    arrowprops=dict(
+                        arrowstyle="-", color=m.color, lw=0.7,
+                        shrinkA=0, shrinkB=2,
+                    ),
+                    annotation_clip=False,
+                )
 
     ax.set_ylim(0, _Y_TOP)
     ax.set_yticks([])
@@ -551,22 +589,26 @@ def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
 def _forecast_view_bbox(
     tracks: gpd.GeoDataFrame,
     forecast_features: gpd.GeoDataFrame,
-    n_tail_obs: int = 4,
+    obsv_buffers: gpd.GeoDataFrame | None = None,
+    n_tail_obs: int = 5,
 ) -> tuple[tuple[float, float], tuple[float, float]]:
     """Bbox covering the forecast features plus the most recent N observed points.
 
-    Used to zoom each map onto the action: the full forecast cone/buffers and
-    just the tail of the observed track that connects to it.
+    obsv_buffers: when provided and there is no forecast, these are added to the
+    bbox so the map shows the full cross-sectional width of the current
+    wind-radius rings rather than just the tight bounding box of the track tail.
     """
     obs = tracks[tracks["kind"] == "observed"].sort_values("valid_time")
     obs_tail = obs.tail(n_tail_obs)
     fcs = tracks[tracks["kind"] == "forecast"]
-    pieces = [
-        g for g in (obs_tail, fcs, forecast_features)
-        if g is not None and not g.empty
-    ]
+
+    pieces = [g for g in (obs_tail, fcs, forecast_features) if g is not None and not g.empty]
+
+    # No forecast: expand to show the observed buffer width
+    if fcs.empty and forecast_features.empty and obsv_buffers is not None and not obsv_buffers.empty:
+        pieces.append(obsv_buffers)
+
     if not pieces:
-        # Fall back to all tracks
         pieces = [tracks]
 
     minx = min(p.total_bounds[0] for p in pieces)
@@ -608,10 +650,9 @@ def track_plot_buffers(
     """
     if tracks.empty:
         return ""
-    fcast_features = (
-        buffers[buffers["kind"] == "forecast"] if not buffers.empty else buffers
-    )
-    xlim, ylim = _forecast_view_bbox(tracks, fcast_features)
+    _fcast_buf = buffers[buffers["kind"] == "forecast"] if not buffers.empty else buffers
+    _obsv_buf = buffers[buffers["kind"] == "observed"] if not buffers.empty else buffers
+    xlim, ylim = _forecast_view_bbox(tracks, _fcast_buf, obsv_buffers=_obsv_buf)
     fig, ax = plt.subplots(figsize=(9, 6))
     _draw_countries(ax, background)
     if adm1_gdf is not None and not adm1_gdf.empty:
