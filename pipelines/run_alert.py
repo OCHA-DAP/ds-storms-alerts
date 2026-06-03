@@ -8,7 +8,7 @@ import re
 import sys
 import tempfile
 import webbrowser
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import ocha_stratus as stratus
@@ -118,8 +118,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--issued-time",
-        required=True,
-        help="Issued time of the forecast, format YYYY-MM-DDTHH (e.g. 2025-01-15T12)",
+        required=False,
+        default=None,
+        help=(
+            "Issued time of the forecast (format YYYY-MM-DDTHH). "
+            "If omitted, defaults to the most recent NHC advisory hour "
+            "(03/09/15/21 UTC) on or before the current UTC time."
+        ),
     )
     parser.add_argument(
         "--preview",
@@ -127,6 +132,17 @@ def parse_args() -> argparse.Namespace:
         help="Generate HTML and open in browser; skip email entirely.",
     )
     return parser.parse_args()
+
+
+def _most_recent_advisory_time() -> datetime:
+    """Most recent NHC advisory hour (03/09/15/21 UTC) on or before now."""
+    now = datetime.now(UTC)
+    for h in (21, 15, 9, 3):
+        if now.hour >= h:
+            return now.replace(hour=h, minute=0, second=0, microsecond=0, tzinfo=None)
+    return (now - timedelta(days=1)).replace(
+        hour=21, minute=0, second=0, microsecond=0, tzinfo=None
+    )
 
 
 TEST_EMAIL = _parse_bool_env("TEST_EMAIL", default=True)
@@ -1073,8 +1089,15 @@ def send_test_alert(engine, issued_time_dt: datetime) -> str:
 
 if __name__ == "__main__":
     args = parse_args()
-    issued_time = args.issued_time
-    issued_time_dt = datetime.strptime(issued_time, "%Y-%m-%dT%H")
+    if args.issued_time:
+        issued_time_dt = datetime.strptime(args.issued_time, "%Y-%m-%dT%H")
+    else:
+        issued_time_dt = _most_recent_advisory_time()
+        logger.info(
+            f"No --issued-time provided; defaulted to most recent advisory "
+            f"hour {issued_time_dt.isoformat()}"
+        )
+    issued_time = issued_time_dt.strftime("%Y-%m-%dT%H")
 
     preview = args.preview
     logger.info(
