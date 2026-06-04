@@ -181,57 +181,57 @@ def _cmp_storm_selector(mo, mode, cmp_storm_options):
 
 
 @app.cell
-def _adam_lookup_source(mo, mode):
-    """ADAM lookup source toggle. Defaults to Dev DB
-    (`storms.adam_fm_lookup`) so colleagues can use this app without
+def _gdacs_lookup_source(mo, mode):
+    """GDACS lookup source toggle. Defaults to Dev DB
+    (`storms.gdacs_fm_lookup`) so colleagues can use this app without
     needing the local ds-storms-pipeline build output. The Local CSV
     option is a dev workflow for testing humrev-build changes before
     pushing them to the DB.
     """
     mo.stop(mode.value != "Admin 1 comparison")
-    adam_source = mo.ui.radio(
+    gdacs_source = mo.ui.radio(
         options=[
-            "Dev DB (storms.adam_fm_lookup)",
+            "Dev DB (storms.gdacs_fm_lookup)",
             "Local CSV (dev workflow — requires ds-storms-pipeline build)",
         ],
-        value="Dev DB (storms.adam_fm_lookup)",
-        label="ADAM lookup source",
+        value="Dev DB (storms.gdacs_fm_lookup)",
+        label="GDACS lookup source",
     )
-    adam_source
-    return (adam_source,)
+    gdacs_source
+    return (gdacs_source,)
 
 
 @app.cell
-def _adam_lookup_table(mo, mode, adam_source, stratus, pd):
+def _gdacs_lookup_table(mo, mode, gdacs_source, stratus, pd):
     """Resolve the SQL table name the matching demo joins against.
 
-    - Dev DB: returns `storms.adam_fm_lookup` directly. No DB writes,
+    - Dev DB: returns `storms.gdacs_fm_lookup` directly. No DB writes,
       no local files needed.
-    - Local CSV: reads `data/adam_fm_lookup.csv` from the sibling
+    - Local CSV: reads `data/gdacs_fm_lookup.csv` from the sibling
       ds-storms-pipeline repo and pushes it to
-      `storms.adam_fm_lookup_test` so the downstream SQL has
+      `storms.gdacs_fm_lookup_test` so the downstream SQL has
       something to join. Surfaces a legible error if the CSV is
       missing rather than failing the matching demo silently.
     """
     from pathlib import Path as _Path
     mo.stop(mode.value != "Admin 1 comparison")
-    if adam_source.value.startswith("Local"):
+    if gdacs_source.value.startswith("Local"):
         _csv = (
             _Path(__file__).resolve().parents[2]
-            / "ds-storms-pipeline" / "data" / "adam_fm_lookup.csv"
+            / "ds-storms-pipeline" / "data" / "gdacs_fm_lookup.csv"
         )
         if not _csv.exists():
-            adam_lookup_table = None
+            gdacs_lookup_table = None
             _status = mo.callout(
                 mo.md(
                     f"**Local CSV not found** at `{_csv}`.\n\n"
                     f"To use this option, build the lookup locally:\n\n"
                     f"```\n"
                     f"cd ds-storms-pipeline\n"
-                    f"uv run python scripts/build_adam_fm_lookup_v2.py\n"
+                    f"uv run python scripts/build_gdacs_fm_lookup_v2.py\n"
                     f"```\n\n"
                     f"Or switch the radio above to **Dev DB** to use "
-                    f"the production `storms.adam_fm_lookup` table."
+                    f"the production `storms.gdacs_fm_lookup` table."
                 ),
                 kind="warn",
             )
@@ -241,25 +241,25 @@ def _adam_lookup_table(mo, mode, adam_source, stratus, pd):
             _df = pd.read_csv(_csv, encoding="utf-8-sig")
             _write_engine = stratus.get_engine(stage="dev", write=True)
             _df.to_sql(
-                "adam_fm_lookup_test", _write_engine,
+                "gdacs_fm_lookup_test", _write_engine,
                 schema="storms", if_exists="replace", index=False,
             )
-            adam_lookup_table = "storms.adam_fm_lookup_test"
+            gdacs_lookup_table = "storms.gdacs_fm_lookup_test"
             _status = mo.md(
                 f"**Using local CSV** — `{_csv.name}` → "
-                f"`storms.adam_fm_lookup_test` ({len(_df)} rows)"
+                f"`storms.gdacs_fm_lookup_test` ({len(_df)} rows)"
             )
     else:
-        adam_lookup_table = "storms.adam_fm_lookup"
+        gdacs_lookup_table = "storms.gdacs_fm_lookup"
         _status = mo.md(
-            "**Using production** `storms.adam_fm_lookup`."
+            "**Using production** `storms.gdacs_fm_lookup`."
         )
     _status
-    return (adam_lookup_table,)
+    return (gdacs_lookup_table,)
 
 
 @app.cell
-def _matching_demo(mo, mode, cmp_storm, engine, pd, text, adam_lookup_table):
+def _matching_demo(mo, mode, cmp_storm, engine, pd, text, gdacs_lookup_table):
     """FM-centric multi-source matching table.
 
     Architecture: three small per-source queries, each returning an
@@ -278,10 +278,10 @@ def _matching_demo(mo, mode, cmp_storm, engine, pd, text, adam_lookup_table):
     """
     mo.stop(mode.value != "Admin 1 comparison")
     mo.stop(cmp_storm.value is None)
-    # adam_lookup_table is None when the user picked Local CSV but
+    # gdacs_lookup_table is None when the user picked Local CSV but
     # the file isn't on disk — the source cell already showed the
     # error; just skip this cell instead of building broken SQL.
-    mo.stop(adam_lookup_table is None)
+    mo.stop(gdacs_lookup_table is None)
 
     _eid = cmp_storm.value
 
@@ -295,7 +295,7 @@ def _matching_demo(mo, mode, cmp_storm, engine, pd, text, adam_lookup_table):
         "  FROM storms.gdacs_exposure ge "
         "  WHERE gdacs_eventid = :eid "
         "    AND NOT EXISTS ("
-        "      SELECT 1 FROM storms.gdacs_fm_lookup x "
+        f"      SELECT 1 FROM {gdacs_lookup_table} x "
         "      WHERE x.iso3 = ge.iso3 "
         "        AND x.admin_level = ge.admin_level "
         "        AND x.gmi_admin IS NULL"
@@ -311,7 +311,7 @@ def _matching_demo(mo, mode, cmp_storm, engine, pd, text, adam_lookup_table):
         "  COUNT(DISTINCT e.gdacs_admin_code) AS n_gdacs_admins, "
         "  MAX(lk.caveat_note) AS gdacs_caveat_note "
         "FROM event_rows e "
-        "JOIN storms.gdacs_fm_lookup lk "
+        f"JOIN {gdacs_lookup_table} lk "
         "  ON lk.iso3 = e.iso3 "
         "  AND lk.admin_level = e.admin_level "
         "  AND lk.gmi_admin = e.gdacs_admin_code "
@@ -325,7 +325,7 @@ def _matching_demo(mo, mode, cmp_storm, engine, pd, text, adam_lookup_table):
         "  1 AS n_gdacs_admins, "
         "  NULL::text AS gdacs_caveat_note "
         "FROM event_rows e "
-        "LEFT JOIN storms.gdacs_fm_lookup lk "
+        f"LEFT JOIN {gdacs_lookup_table} lk "
         "  ON lk.iso3 = e.iso3 "
         "  AND lk.admin_level = e.admin_level "
         "  AND lk.gmi_admin = e.gdacs_admin_code "
@@ -382,7 +382,7 @@ def _matching_demo(mo, mode, cmp_storm, engine, pd, text, adam_lookup_table):
         "  string_agg(DISTINCT lk.caveat_note, ' | ' "
         "    ORDER BY lk.caveat_note) AS adam_caveat_note "
         "FROM adam_event_rows aer "
-        f"JOIN {adam_lookup_table} lk "
+        "JOIN storms.adam_fm_lookup lk "
         "  ON lk.iso3 = aer.iso3 "
         "  AND lk.admin_level = aer.admin_level "
         "  AND lower(lk.adam_admin_name) = aer.admin_name_lc "
@@ -394,7 +394,7 @@ def _matching_demo(mo, mode, cmp_storm, engine, pd, text, adam_lookup_table):
     # ── FM dim: pcode → name from the canonical FM lookup ──────────
     _fm_dim_sql = text(
         "SELECT DISTINCT admin_level, fm_pcode, fm_name "
-        "FROM storms.gdacs_fm_lookup"
+        f"FROM {gdacs_lookup_table}"
     )
 
     _g = pd.read_sql(_gdacs_sql, engine, params={"eid": _eid})
