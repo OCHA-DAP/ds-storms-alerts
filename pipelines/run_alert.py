@@ -241,15 +241,19 @@ def generate_monitoring_html(
         aid_wsp_poly = wsp_gdf[wsp_gdf["atcf_id"] == aid]
 
         parts: list[str] = [f"<h2 style='{_H2}'>{storm_label}</h2>"]
+        buf_m = track_plot_buffers(
+            aid_tracks, aid_buffers, background_gdf, storm_name=storm_label,
+        )
+        if buf_m:
+            parts.append(f"<h3 style='{_H3}'>Deterministic forecast</h3>{buf_m}")
         wsp_m = track_plot_wsp(
             aid_tracks, aid_buffers, aid_wsp_poly, background_gdf,
-            wind_threshold_kt=34,
+            wind_threshold_kt=34, storm_name=storm_label,
         )
         if wsp_m:
-            parts.append(f"<h3 style='{_H3}'>WSP 34 kt forecast</h3>{wsp_m}")
-        buf_m = track_plot_buffers(aid_tracks, aid_buffers, background_gdf)
-        if buf_m:
-            parts.append(f"<h3 style='{_H3}'>Forecast-only buffers</h3>{buf_m}")
+            parts.append(
+                f"<h3 style='{_H3}'>Probabilistic forecast</h3>{wsp_m}"
+            )
         sections.append("".join(parts))
 
     return "".join(sections)
@@ -548,7 +552,12 @@ def generate_alert_html(
         return (n_seasons + 1) / (exceedances + 1)
 
     def _rp_color(rp: float | None) -> str:
-        if rp is None or rp <= 3:
+        if rp is None:
+            return ""
+        # Colour by the displayed (rounded) value so e.g. 4.6 → "5-year" gets the
+        # same colour as any other 5-year RP, matching the f"{rp:.0f}" label.
+        rp = round(rp)
+        if rp <= 3:
             return ""
         if rp > 10:
             return "#ffcccc"
@@ -595,16 +604,21 @@ def generate_alert_html(
         aid_wsp_poly = wsp_gdf[wsp_gdf["atcf_id"] == aid]
         aid_adm1 = adm1_gdf[adm1_gdf["iso_3"].isin(storm_to_iso3s[aid])]
         storm_map_parts: list[str] = []
-        wsp_m = track_plot_wsp(
-            aid_tracks, aid_buffers, aid_wsp_poly, background_gdf,
-            wind_threshold_kt=34, adm1_gdf=aid_adm1,
+        buf_m = track_plot_buffers(
+            aid_tracks, aid_buffers, background_gdf,
+            adm1_gdf=aid_adm1, storm_name=storm_h2_label,
         )
-        if wsp_m:
-            storm_map_parts.append(f"<h3 style='{_H3}'>WSP 34 kt forecast</h3>{wsp_m}")
-        buf_m = track_plot_buffers(aid_tracks, aid_buffers, background_gdf, adm1_gdf=aid_adm1)
         if buf_m:
             storm_map_parts.append(
-                f"<h3 style='{_H3}'>Forecast-only buffers</h3>{buf_m}"
+                f"<h3 style='{_H3}'>Deterministic forecast</h3>{buf_m}"
+            )
+        wsp_m = track_plot_wsp(
+            aid_tracks, aid_buffers, aid_wsp_poly, background_gdf,
+            wind_threshold_kt=34, adm1_gdf=aid_adm1, storm_name=storm_h2_label,
+        )
+        if wsp_m:
+            storm_map_parts.append(
+                f"<h3 style='{_H3}'>Probabilistic forecast</h3>{wsp_m}"
             )
 
         toc_countries: list[dict] = []

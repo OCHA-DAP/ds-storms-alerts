@@ -10,6 +10,7 @@ matplotlib.use("Agg")  # must be before pyplot import
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from matplotlib.lines import Line2D
 _HIST_COLOR = "#444444"
 _OBSV_COLOR = "#1e8449"
 _FCAST_COLOR = "#b9651b"
@@ -50,7 +51,7 @@ def _format_ny(t: datetime) -> str:
         t = t.replace(tzinfo=_UTC)
     local = t.astimezone(_NY)
     hour = local.strftime("%I").lstrip("0") or "12"
-    return f"{local.strftime('%a')} {hour}{local.strftime('%p')} ET"
+    return f"{local.strftime('%a')} {hour}{local.strftime('%p')}"
 
 
 
@@ -152,6 +153,21 @@ def _label_half_width(label: str, x_max: float) -> float:
     """
     n_lines = label.count("\n") + 1
     return n_lines * x_max * 0.009
+
+
+def _center_rotated_label_at(text_obj, target_x_data: float, ax, renderer) -> None:
+    """Shift text_obj so its rotated bbox is horizontally centred at target_x_data.
+
+    For ha="left", va="bottom", rotation=90 the anchor is the rotated label's right
+    edge; we shift the anchor right by half the bbox width so the bbox midpoint sits
+    at target_x_data. Computed and applied in DATA coords, so it survives the later
+    bbox_inches="tight" rescale at savefig.
+    """
+    bbox = text_obj.get_window_extent(renderer=renderer)
+    bbox_mid_disp = (bbox.x0 + bbox.x1) / 2
+    bbox_mid_data = ax.transData.inverted().transform((bbox_mid_disp, 0))[0]
+    delta = target_x_data - bbox_mid_data
+    text_obj.set_x(text_obj.get_position()[0] + delta)
 
 
 def _place_tall_labels(
@@ -259,6 +275,10 @@ def _strip_chart(
             else max(float(m.value) for m in tall_marks)
         )
         _placed = _place_tall_labels(tall_marks, _eff_xmax)
+        # Collect (text_obj, placed_x) here, then centre in a second pass AFTER
+        # set_xlim below. Rotated-label width in data units depends on the x-axis
+        # scale, so centring must use the final transData, not the autoscale one.
+        _to_center: list[tuple] = []
         for m, placed_x in _placed:
             actual_x = float(m.value)
             _shifted = abs(placed_x - actual_x) > _eff_xmax * 0.005
@@ -275,51 +295,55 @@ def _strip_chart(
                 color=m.color, linewidth=linewidth, alpha=1.0,
                 zorder=4, solid_capstyle="butt",
             )
-            # Draw text label(s). Text and arrow are always separate so the
-            # arrow can start from the visual bottom of the rotated label rather
-            # than from the anchor point (which lands at the visual centre with
-            # va="bottom" and rotation=90).
+            # Draw text label(s) at the left-edge anchor; they are re-centred on
+            # placed_x in the second pass after set_xlim. With ha="left",
+            # va="bottom", rotation=90 the anchor is the rotated label's right edge;
+            # _center_rotated_label_at shifts it so the label's bottom-middle lands
+            # at data-x = placed_x. Text and arrow stay separate so the arrow can
+            # run to that bottom-middle point.
             if m.bold_prefix:
                 # Render as two overlapping same-anchor texts using blank lines as
-                # spacers so they align like a single multi-line label.
-                # ha="left" with rotation=90 means all lines start at _Y_TALL_LABEL
-                # (extending upward), giving true left-alignment.
+                # spacers so they align like a single multi-line label. Both have
+                # identical line counts (1 + _n_suffix), so each re-centres to the
+                # same anchor and stays overlapped.
+                # Emphasis labels (forecast final exposure + observed-to-date):
+                # a bit larger than the data-source ticks below.
                 _n_suffix = m.label.count("\n") + 1
-                ax.text(
+                t_pref = ax.text(
                     placed_x, _Y_TALL_LABEL, m.bold_prefix + "\n" * _n_suffix,
                     ha="left", va="bottom", rotation=90,
-                    fontsize=7.5, color=m.color, fontweight="bold",
+                    fontsize=8.0, color=m.color, fontweight="bold",
                     zorder=5, clip_on=False,
                 )
-                ax.text(
+                t_main = ax.text(
                     placed_x, _Y_TALL_LABEL, "\n" + m.label,
                     ha="left", va="bottom", rotation=90,
-                    fontsize=7.5, color=m.color, fontweight="normal",
+                    fontsize=8.0, color=m.color, fontweight="normal",
                     zorder=5, clip_on=False,
                 )
+                _to_center.append((t_pref, placed_x))
+                _to_center.append((t_main, placed_x))
             else:
-                ax.text(
+                t = ax.text(
                     placed_x, _Y_TALL_LABEL, m.label,
                     ha="left", va="bottom", rotation=90,
-                    fontsize=7.5, color=m.color,
+                    fontsize=6.5, color=m.color,
                     fontweight="bold" if m.bold else "normal",
                     zorder=5, clip_on=False,
                 )
-            # Diagonal leader line for shifted labels. With ha="left" and
-            # rotation=90 the text right edge is at placed_x and extends left.
-            # Arrow starts from the center-bottom: placed_x minus one half-width.
+                _to_center.append((t, placed_x))
+            # Diagonal leader line for shifted labels. The label is now centred on
+            # placed_x, so (placed_x, _Y_TALL_LABEL) is exactly its bottom-middle.
             if _shifted:
-                _combined_lbl = (
-                    f"{m.bold_prefix}\n{m.label}" if m.bold_prefix else m.label
-                )
-                _x_arrow = placed_x - _label_half_width(_combined_lbl, _eff_xmax)
                 ax.annotate(
                     "",
                     xy=(actual_x, tick_top),
-                    xytext=(_x_arrow, _Y_TALL_LABEL),
+                    xytext=(placed_x, _Y_TALL_LABEL),
                     arrowprops=dict(
+                        # shrinkA pulls the tail back from the label (xytext side)
+                        # so the leader line doesn't crowd the label's bottom edge.
                         arrowstyle="-", color=m.color, lw=0.7,
-                        shrinkA=0, shrinkB=2,
+                        shrinkA=5, shrinkB=2,
                     ),
                     annotation_clip=False,
                 )
@@ -340,6 +364,14 @@ def _strip_chart(
     else:
         xmin, xmax = ax.get_xlim()
         ax.set_xlim(min(xmin, 0), xmax)
+
+    # Centre tall labels now that the x-axis scale is final. Rotated-label width in
+    # data units depends on the data-per-pixel ratio, which is only correct once
+    # set_xlim above has fixed the view limits.
+    if tall_marks and _to_center:
+        _renderer = fig.canvas.get_renderer()
+        for _t, _px in _to_center:
+            _center_rotated_label_at(_t, _px, ax, _renderer)
 
     if total_pop is not None and total_pop > 0:
         xlim = ax.get_xlim()
@@ -438,7 +470,7 @@ def _draw_countries(ax, countries: gpd.GeoDataFrame) -> None:
     """Draw adm0 outlines — world background layer."""
     if countries.empty:
         return
-    countries.plot(ax=ax, facecolor="#f5f5f5", edgecolor="#aaaaaa", linewidth=0.5, zorder=1)
+    countries.plot(ax=ax, facecolor="#f4f5f7", edgecolor="#cdd2d9", linewidth=0.5, zorder=1)
 
 
 def _draw_adm1(ax, adm1_gdf: gpd.GeoDataFrame) -> None:
@@ -446,11 +478,11 @@ def _draw_adm1(ax, adm1_gdf: gpd.GeoDataFrame) -> None:
     if adm1_gdf.empty:
         return
     adm1_gdf.plot(
-        ax=ax, facecolor="#f5f5f5", edgecolor="#bbbbbb", linewidth=0.35, zorder=1
+        ax=ax, facecolor="#f4f5f7", edgecolor="#cdd2d9", linewidth=0.35, zorder=1
     )
     # Emphasise the national (adm0) border with a slightly thicker line.
     outer = adm1_gdf.dissolve(by="iso_3", as_index=False)
-    outer.plot(ax=ax, facecolor="none", edgecolor="#888888", linewidth=0.8, zorder=1)
+    outer.plot(ax=ax, facecolor="none", edgecolor="#9aa0a8", linewidth=0.8, zorder=1)
 
 
 def _draw_obsv_buffers(ax, buffers: gpd.GeoDataFrame) -> list[mpatches.Patch]:
@@ -466,7 +498,7 @@ def _draw_obsv_buffers(ax, buffers: gpd.GeoDataFrame) -> list[mpatches.Patch]:
     for wsp in sorted(valid["wind_speed_kt"].unique()):
         proxies.append(mpatches.Patch(
             facecolor=_NHC_WIND_COLOR.get(int(wsp), "#888888"),
-            alpha=_OBSV_BUFFER_ALPHA, label=f"Observed {int(wsp)} kt",
+            alpha=_OBSV_BUFFER_ALPHA, label=f"{int(wsp)} kt",
         ))
     return proxies
 
@@ -483,7 +515,7 @@ def _draw_fcast_buffers(ax, buffers: gpd.GeoDataFrame) -> list[mpatches.Patch]:
     for wsp in sorted(valid["wind_speed_kt"].unique()):
         proxies.append(mpatches.Patch(
             facecolor=_NHC_WIND_COLOR.get(int(wsp), "#888888"),
-            alpha=_FCAST_BUFFER_ALPHA, label=f"Forecast {int(wsp)} kt",
+            alpha=_FCAST_BUFFER_ALPHA, label=f"{int(wsp)} kt",
         ))
     return proxies
 
@@ -518,7 +550,7 @@ def _draw_wsp_polygons(
         proxies.append(mpatches.Patch(
             facecolor=color, alpha=0.7,
             edgecolor=edgecolor, linewidth=linewidth,
-            label=f"WSP {wind_threshold_kt} kt ≥{int(pct)}%",
+            label=f"≥{int(pct)}%",
         ))
     return proxies
 
@@ -537,6 +569,7 @@ def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
             ax.scatter(
                 obs.geometry.x, obs.geometry.y,
                 color="#222222", s=15, zorder=4,
+                edgecolors="white", linewidths=0.6,
             )
 
         if not fcs.empty:
@@ -555,6 +588,7 @@ def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
             ax.scatter(
                 fcs.geometry.x, fcs.geometry.y,
                 color="#444444", s=18, marker="D", zorder=4,
+                edgecolors="white", linewidths=0.6,
             )
 
             # Label every forecast point, alternating offset to reduce overlap
@@ -567,21 +601,20 @@ def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
                     xytext=(dx, dy),
                     textcoords="offset points",
                     fontsize=6.5,
-                    color="#222222",
+                    color="#333333",
                     zorder=5,
                     arrowprops=dict(
                         arrowstyle="-",
-                        color="#888888",
+                        color="#b0b0b0",
                         linewidth=0.4,
                         shrinkA=0,
                         shrinkB=1,
                     ),
                     bbox=dict(
-                        boxstyle="round,pad=0.18",
+                        boxstyle="round,pad=0.3",
                         facecolor="white",
-                        edgecolor="#cccccc",
-                        linewidth=0.4,
-                        alpha=0.9,
+                        edgecolor="none",
+                        alpha=0.8,
                     ),
                 )
 
@@ -628,7 +661,10 @@ def _finalize_map(ax, title: str, legend_handles: list) -> None:
     ax.set_ylabel("")
     for side in ("top", "right", "left", "bottom"):
         ax.spines[side].set_visible(False)
-    ax.set_title(title, fontsize=11, fontweight="bold", loc="left")
+    ax.set_title(
+        title, fontsize=12, fontweight="bold", loc="left",
+        color="#222222", pad=12,
+    )
     if legend_handles:
         ax.legend(
             handles=legend_handles,
@@ -636,11 +672,70 @@ def _finalize_map(ax, title: str, legend_handles: list) -> None:
         )
 
 
+def _add_time_note(ax, tracks: gpd.GeoDataFrame) -> None:
+    """Small footnote clarifying all point times are ET (forecast points only)."""
+    if tracks.empty or not (tracks["kind"] == "forecast").any():
+        return
+    ax.text(
+        0.01, 0.01, "Times shown in ET (America/New_York)",
+        transform=ax.transAxes, fontsize=7, color="#777777",
+        ha="left", va="bottom", zorder=6,
+    )
+
+
+def _track_legend_handles(tracks: gpd.GeoDataFrame) -> list:
+    """Legend proxies for the observed/forecast track lines (no 'track' suffix)."""
+    handles: list = []
+    if not tracks.empty and (tracks["kind"] == "observed").any():
+        handles.append(Line2D([0], [0], color="#222222", lw=2, label="Observed"))
+    if not tracks.empty and (tracks["kind"] == "forecast").any():
+        handles.append(
+            Line2D([0], [0], color="#444444", lw=2, ls=(0, (4, 2)), label="Forecast")
+        )
+    return handles
+
+
+def _add_stacked_legends(ax, fig, groups: list[tuple[str, list]]) -> None:
+    """Add several titled legends as one tight vertical stack off the right edge.
+
+    groups is an ordered list of (title, handles). Each legend's height is
+    measured after creation so the next sits directly beneath it (a contiguous
+    stack), regardless of entry counts. The off-axes legends are captured by
+    savefig(bbox_inches="tight").
+    """
+    renderer = fig.canvas.get_renderer()
+    ax_h = ax.get_window_extent(renderer=renderer).height
+    y = 1.0
+    for title, handles in groups:
+        if not handles:
+            continue
+        leg = ax.legend(
+            handles=handles, title=title,
+            loc="upper left", bbox_to_anchor=(1.03, y),
+            fontsize=8, title_fontsize=8.5, framealpha=0.92,
+            facecolor="white", edgecolor="#e2e2e2", fancybox=True,
+            borderaxespad=0, borderpad=0.6, labelspacing=0.35,
+            handlelength=1.5, handletextpad=0.6,
+        )
+        leg._legend_box.align = "left"
+        _t = leg.get_title()
+        _t.set_ha("left")
+        _t.set_color("#333333")
+        _t.set_fontweight("semibold")
+        ax.add_artist(leg)
+        # add_artist clips to the axes patch; these sit off the right edge, so
+        # disable clipping or they vanish (and drop out of the tight bbox).
+        leg.set_clip_on(False)
+        leg_h = leg.get_window_extent(renderer=renderer).height
+        y -= leg_h / ax_h + 0.012  # tight gap → reads as a single stack
+
+
 def track_plot_buffers(
     tracks: gpd.GeoDataFrame,
     buffers: gpd.GeoDataFrame,
     background: gpd.GeoDataFrame,
     adm1_gdf: gpd.GeoDataFrame | None = None,
+    storm_name: str = "",
 ) -> str:
     """Map: storm tracks + 34/50/64 kt observed and forecast-only buffers.
 
@@ -662,13 +757,24 @@ def track_plot_buffers(
     _draw_tracks(ax, tracks)
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
-    handles, _ = ax.get_legend_handles_labels()
+    # No on-plot legend — titled legends stacked off the right edge.
     _finalize_map(
         ax,
-        title="Storm tracks — observed + forecast-only buffers",
-        legend_handles=obsv_proxies + fcast_proxies + handles,
+        title=(
+            f"{storm_name}: track and swaths forecast" if storm_name
+            else "Storm tracks — observed + forecast wind swaths"
+        ),
+        legend_handles=[],
     )
+    # tight_layout first so the axes is at its final size before the off-axes
+    # legends are measured and stacked against it.
     fig.tight_layout()
+    _add_stacked_legends(ax, fig, [
+        ("Observed\nwind swaths", obsv_proxies),
+        ("Forecasted\nwind swaths", fcast_proxies),
+        ("Tracks", _track_legend_handles(tracks)),
+    ])
+    _add_time_note(ax, tracks)
     return _fig_to_img_tag(fig)
 
 
@@ -679,6 +785,7 @@ def track_plot_wsp(
     background: gpd.GeoDataFrame,
     wind_threshold_kt: int = 50,
     adm1_gdf: gpd.GeoDataFrame | None = None,
+    storm_name: str = "",
 ) -> str:
     """Map: tracks + observed buffers + WSP fcastonly polygons (one threshold).
 
@@ -686,7 +793,9 @@ def track_plot_wsp(
     Affected countries in adm1_gdf are rendered with adm1 division lines on top.
     Axis limits clip the view without creating artificial boundary edges.
     """
-    if tracks.empty:
+    # Omit the probabilistic section entirely when no WSP polygons are available
+    # (otherwise this would render as a bare track/buffer plot with no probabilities).
+    if tracks.empty or wsp.empty:
         return ""
     xlim, ylim = _forecast_view_bbox(tracks, wsp)
     fig, ax = plt.subplots(figsize=(9, 6))
@@ -698,13 +807,23 @@ def track_plot_wsp(
     _draw_tracks(ax, tracks)
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
-    handles, _ = ax.get_legend_handles_labels()
-    _finalize_map(
-        ax,
-        title=f"Storm tracks — observed buffers + WSP {wind_threshold_kt} kt forecast",
-        legend_handles=obsv_proxies + wsp_proxies + handles,
+
+    title = (
+        f"{storm_name}: {wind_threshold_kt}-knot wind speed probabilities"
+        if storm_name else f"{wind_threshold_kt}-knot wind speed probabilities"
     )
+    # No on-plot legend — three titled legends are stacked off the right edge.
+    _finalize_map(ax, title=title, legend_handles=[])
+
+    # tight_layout first so the axes is at its final size before the off-axes
+    # legends are measured and stacked against it.
     fig.tight_layout()
+    _add_stacked_legends(ax, fig, [
+        (f"Probability of\n≥{wind_threshold_kt} kt winds", wsp_proxies),
+        ("Observed\nwind swaths", obsv_proxies),
+        ("Tracks", _track_legend_handles(tracks)),
+    ])
+    _add_time_note(ax, tracks)
     return _fig_to_img_tag(fig)
 
 
