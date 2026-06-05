@@ -22,6 +22,14 @@ variables:
   git_branch:
     description: Branch the job pulls the pipeline from
     default: initial-pipeline
+  # Send-mode switches (the DBX analog of the GHA repo vars). Flip without
+  # editing files via, e.g.:  databricks bundle deploy -t prod --var test_email=False
+  dry_run:
+    description: '"True" = generate but skip send/write; "False" = actually send'
+    default: "False"
+  test_email:
+    description: '"True" = Tristan-only test list; "False" = real per-country subscriber lists'
+    default: "True"
 
 targets:
   dev:
@@ -61,10 +69,10 @@ resources:
       parameters:
         - name: issued_time      # YYYY-MM-DDTHH backfill override; "" → realtime
           default: ""
-        - name: test_email       # "True" → send to test list only
-          default: "True"
-        - name: dry_run          # "True" → generate but skip send/write (safe default)
-          default: "True"
+        - name: test_email       # send-mode switch (see variables block)
+          default: ${var.test_email}
+        - name: dry_run          # send-mode switch (see variables block)
+          default: ${var.dry_run}
 
       tasks:
         - task_key: run_alert
