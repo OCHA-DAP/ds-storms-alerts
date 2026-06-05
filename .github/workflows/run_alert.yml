@@ -20,7 +20,7 @@ on:
           - 'True'
           - 'False'
   schedule:
-    - cron: '30 3,9,15,21 * * *'
+    - cron: '35 3,9,15,21 * * *'
 
 jobs:
   run-alert:
