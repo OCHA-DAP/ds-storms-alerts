@@ -15,6 +15,13 @@
 bundle:
   name: ds-storms-alerts
 
+# The job runs entirely from source: GIT, so the deploy-time file sync isn't
+# used at runtime. Exclude the large data/*.parquet files — uploading them is
+# unnecessary and was timing out (HTTP 408) on the bigger boundary files.
+sync:
+  exclude:
+    - "data/**"
+
 variables:
   existing_cluster_id:
     description: Interactive cluster the job runs on (carries the DSCI_AZ_* env vars)
