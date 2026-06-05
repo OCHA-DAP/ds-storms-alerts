@@ -69,14 +69,22 @@ os.environ["DRY_RUN"] = DRY_RUN
 # Make `src` importable for the child process (repo isn't pip-installed here).
 env = dict(os.environ)
 env["PYTHONPATH"] = REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+# Give matplotlib a writable local config/cache dir (the cloned repo lives on the
+# read-only workspace FUSE mount, which it can't use).
+env["MPLCONFIGDIR"] = "/tmp/mplconfig"
 
 cmd = [sys.executable, os.path.join(REPO_ROOT, "pipelines", "run_alert.py")]
 if ISSUED_TIME:
     cmd += ["--issued-time", ISSUED_TIME]
 
-print(
-    f"[run_alert_job] repo_root={REPO_ROOT} TEST_EMAIL={TEST_EMAIL} "
-    f"DRY_RUN={DRY_RUN} issued_time={ISSUED_TIME or '(realtime)'}"
-)
-rc = subprocess.run(cmd, cwd=REPO_ROOT, env=env, check=False).returncode
-sys.exit(rc)
+if __name__ == "__main__":
+    print(
+        f"[run_alert_job] repo_root={REPO_ROOT} TEST_EMAIL={TEST_EMAIL} "
+        f"DRY_RUN={DRY_RUN} issued_time={ISSUED_TIME or '(realtime)'}"
+    )
+    rc = subprocess.run(cmd, cwd=REPO_ROOT, env=env, check=False).returncode
+    # DBX treats a top-level sys.exit()/SystemExit (even code 0) as a task
+    # failure. Raise only on non-zero; let success return naturally.
+    if rc != 0:
+        raise RuntimeError(f"run_alert.py exited with code {rc}")
+    print("[run_alert_job] OK")
