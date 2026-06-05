@@ -1,0 +1,85 @@
+# Databricks Asset Bundle — runs the storm-alert pipeline as a DBX job.
+#
+#   databricks bundle validate -t dev -p default
+#   databricks bundle deploy   -t dev -p default
+#   databricks bundle run storm_alert -t dev -p default          # dry-run (default)
+#   databricks bundle run storm_alert -t dev -p default --params dry_run=False,test_email=True
+#
+# The job clones this repo (source: GIT) at ${var.git_branch} and runs the thin
+# wrapper databricks/run_alert_job.py, which shells out to pipelines/run_alert.py.
+# Pipeline code (pipelines/, src/) stays pure Python and is unchanged — the GHA
+# workflow still runs it the same way.
+#
+# Bundle docs: https://docs.databricks.com/dev-tools/bundles/
+
+bundle:
+  name: ds-storms-alerts
+
+variables:
+  existing_cluster_id:
+    description: Interactive cluster the job runs on (carries the DSCI_AZ_* env vars)
+    default: "0515-161935-i2w5mxhc"
+  git_branch:
+    description: Branch the job pulls the pipeline from
+    default: initial-pipeline
+
+targets:
+  dev:
+    # development mode auto-pauses the schedule and prefixes the job name
+    # ("[dev <user>] Storm Alert") — set up but not firing on cron while GHA runs.
+    mode: development
+    default: true
+    workspace:
+      profile: default
+  prod:
+    # production mode runs the schedule as defined; deploy here at cutover.
+    # (run_as / a shared root_path can be revisited when cutting over off a
+    # personal identity.)
+    mode: production
+    workspace:
+      profile: default
+      root_path: /Workspace/Users/adm.tdowning@global.un.org/.bundle/${bundle.name}/${bundle.target}
+
+resources:
+  jobs:
+    storm_alert:
+      name: Storm Alert
+      git_source:
+        git_url: https://github.com/OCHA-DAP/ds-storms-alerts.git
+        git_provider: gitHub
+        git_branch: ${var.git_branch}
+
+      schedule:
+        # 03:30 / 09:30 / 15:30 / 21:30 UTC — ~30 min after each NHC advisory,
+        # giving the upstream ds-storms-pipeline time to land its outputs.
+        quartz_cron_expression: "0 30 3,9,15,21 * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED   # honored by prod; dev mode pauses it regardless
+
+      max_concurrent_runs: 1
+
+      parameters:
+        - name: issued_time      # YYYY-MM-DDTHH backfill override; "" → realtime
+          default: ""
+        - name: test_email       # "True" → send to test list only
+          default: "True"
+        - name: dry_run          # "True" → generate but skip send/write (safe default)
+          default: "True"
+
+      tasks:
+        - task_key: run_alert
+          existing_cluster_id: ${var.existing_cluster_id}
+          spark_python_task:
+            python_file: databricks/run_alert_job.py
+            source: GIT
+            parameters:
+              - "{{job.parameters.issued_time}}"
+              - "{{job.parameters.test_email}}"
+              - "{{job.parameters.dry_run}}"
+          libraries:
+            - pypi: { package: "ocha-stratus>=0.1.7" }
+            - pypi:
+                package: "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@2d4870749faa4235e65164b731e0a574a2e209ab"
+            - pypi: { package: "matplotlib>=3.9" }
+            - pypi: { package: "geopandas" }
+            - pypi: { package: "databricks-sdk" }
