@@ -7,7 +7,7 @@ name: Build and deploy Python app to Azure Web App - chd-ds-storms-alerts
 on:
   push:
     branches:
-      - initial-pipeline
+      - main
   workflow_dispatch:
 
 jobs:
