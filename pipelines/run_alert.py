@@ -10,6 +10,7 @@ import tempfile
 import webbrowser
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import ocha_stratus as stratus
 
@@ -94,6 +95,43 @@ def _storm_label(name: object, season: object, suffix: str = "") -> str:
     )
     season_part = f" {int(season)}" if season_ok else ""
     return f"{base}{season_part}"
+
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _format_issued_et(dt: datetime) -> str:
+    """Format an issued time (naive = UTC) in US Eastern, e.g. 'Jun. 6, 11am'."""
+    aware = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+    local = aware.astimezone(_ET)
+    hour = local.strftime("%I").lstrip("0") or "12"
+    ampm = local.strftime("%p").lower()
+    return f"{local.strftime('%b')}. {local.day}, {hour}{ampm}"
+
+
+def _oxford(items: list[str]) -> str:
+    """Join with an Oxford comma: [] → '', [a] → 'a', [a,b] → 'a and b',
+    [a,b,c] → 'a, b, and c'."""
+    items = [i for i in items if i]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
+def _build_subject(
+    issued_time_dt: datetime, storm_names: list[str], prefix: str = ""
+) -> str:
+    """[Cyclone monitoring] NHC forecast issued {ET time} (storm, storm)."""
+    names = ", ".join(storm_names) if storm_names else "—"
+    return (
+        f"{prefix}[Cyclone monitoring] NHC forecast issued "
+        f"{_format_issued_et(issued_time_dt)} ({names})"
+    )
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -580,7 +618,10 @@ def generate_alert_html(
 
     toc_storms: list[dict] = []
 
-    for aid in sorted(storm_to_iso3s.keys(), key=lambda a: -_storm_exposure_score(a)):
+    _ordered_aids = sorted(
+        storm_to_iso3s.keys(), key=lambda a: -_storm_exposure_score(a)
+    )
+    for aid in _ordered_aids:
         s_name, s_season = storm_meta.get(aid, (None, None))
         storm_h2_label = _storm_label(s_name, s_season)
 
@@ -968,7 +1009,52 @@ def generate_alert_html(
             + "</p>"
         )
 
-    return toc_html + already_passed_html + "\n".join(sections), all_render_iso3s
+    # Intro block: which of ADAM / GDACS / OCHA CHD contributed exposure data.
+    def _has_exposure(df) -> bool:
+        return (
+            df is not None and not df.empty
+            and "pop_exposed" in df.columns and (df["pop_exposed"] > 0).any()
+        )
+
+    _chd = (
+        _has_exposure(fcast_df) or _has_exposure(obsv_df) or _has_exposure(wsp_exp_df)
+    )
+    _src_flags = [
+        ("ADAM", _has_exposure(adam_cur_df)),
+        ("GDACS", _has_exposure(gdacs_cur_df)),
+        ("OCHA CHD", _chd),
+    ]
+    _present = [s for s, ok in _src_flags if ok]
+    _missing = [s for s, ok in _src_flags if not ok]
+
+    storm_names = [
+        _storm_label(storm_meta.get(aid, (None, None))[0], None)
+        for aid in _ordered_aids
+    ]
+    _n = len(storm_names)
+    _missing_sentence = (
+        f"Estimates from {_oxford(_missing)} were not accessed for these "
+        f"estimates.<br>"
+        if _missing else ""
+    )
+    intro_html = (
+        f"<p style='font-family:sans-serif;color:#333;font-size:0.95em;"
+        f"line-height:1.55;margin:0 0 22px'>"
+        f"Dear colleagues,<br>"
+        f"NHC has issued their cyclone forecasts for "
+        f"{_format_issued_et(issued_time_dt)}. "
+        f"There {'is' if _n == 1 else 'are'} {_n} active "
+        f"storm{'' if _n == 1 else 's'}: <b>{', '.join(storm_names)}</b>.<br>"
+        f"This email consolidates exposure estimates from {_oxford(_present)}.<br>"
+        f"{_missing_sentence}"
+        f"Best regards,<br>OCHA Centre for Humanitarian Data</p>"
+    )
+
+    return (
+        intro_html + toc_html + already_passed_html + "\n".join(sections),
+        all_render_iso3s,
+        storm_names,
+    )
 
 
 def generate_exposure_csv(
@@ -1081,7 +1167,9 @@ def generate_exposure_csv(
                 row[f"pop_exposed_{wsp}kt"] = (
                     int(round(sum(active.values()) / len(active))) if active else 0
                 )
-                row[f"sources_{wsp}kt"] = ",".join(active.keys()) if active else ""
+                row[f"sources_{wsp}kt"] = (
+                    ",".join(_SRC_LABELS.get(k, k) for k in active) if active else ""
+                )
             rows.append(row)
 
         buf = io.StringIO()
@@ -1109,12 +1197,13 @@ def send_test_alert(engine, issued_time_dt: datetime) -> str:
         if not active_meta:
             return "No active storms for this issued time — nothing to send."
         body = generate_monitoring_html(engine, issued_time_dt, active_meta)
-        subject = f"[TEST] Storm monitoring: {issued_time} — no exposure"
+        _names = [_storm_label(m["name"], None) for m in active_meta]
+        subject = _build_subject(issued_time_dt, _names, prefix="[TEST] ")
         campaign_name = f"[TEST] ds-storms-alerts_monitoring_{issued_time}"
         is_monitoring = True
     else:
-        body, _ = result
-        subject = f"[TEST] Storm alert: {issued_time}"
+        body, _, _names = result
+        subject = _build_subject(issued_time_dt, _names, prefix="[TEST] ")
         campaign_name = f"[TEST] ds-storms-alerts_{issued_time}"
         is_monitoring = False
 
@@ -1177,17 +1266,17 @@ if __name__ == "__main__":
         )
         body = generate_monitoring_html(engine, issued_time_dt, active_meta)
         active_iso3s: list[str] = []
+        _names = [_storm_label(m["name"], None) for m in active_meta]
         is_monitoring = True
     else:
-        body, active_iso3s = result
+        body, active_iso3s, _names = result
         is_monitoring = False
 
     prefix = "[TEST] " if TEST_EMAIL else ""
+    subject = _build_subject(issued_time_dt, _names, prefix=prefix)
     if is_monitoring:
-        subject = f"{prefix}Storm monitoring: {issued_time} — no exposure"
         campaign_name = f"{prefix}ds-storms-alerts_monitoring_{issued_time}"
     else:
-        subject = f"{prefix}Storm alert: {issued_time}"
         campaign_name = f"{prefix}ds-storms-alerts_{issued_time}"
 
     if preview:
