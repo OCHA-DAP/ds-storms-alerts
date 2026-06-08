@@ -35,6 +35,7 @@ variables:
     description: '"True" = generate but skip send/write; "False" = actually send'
     default: "False"
   test_email:
+    # Default is the safe test list; the prod target overrides to "False" (see below).
     description: '"True" = Tristan-only test list; "False" = real per-country subscriber lists'
     default: "True"
 
@@ -47,13 +48,17 @@ targets:
     workspace:
       profile: default
   prod:
-    # production mode runs the schedule as defined; deploy here at cutover.
+    # production mode runs the schedule as defined; this is the live cutover.
     # (run_as / a shared root_path can be revisited when cutting over off a
     # personal identity.)
     mode: production
     workspace:
       profile: default
       root_path: /Workspace/Users/adm.tdowning@global.un.org/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      # Live: send to the real per-country subscriber lists (not the test list).
+      # Still reads the DEV database (run_alert.py is stage="dev").
+      test_email: "False"
 
 resources:
   jobs:
