@@ -1033,20 +1033,22 @@ def generate_alert_html(
     ]
     _n = len(storm_names)
     _missing_sentence = (
-        f"Estimates from {_oxford(_missing)} were not accessed for these "
-        f"estimates.<br>"
+        f" Estimates from {_oxford(_missing)} were not accessed for this email."
         if _missing else ""
     )
+    _p = (
+        "font-family:sans-serif;color:#333;font-size:0.95em;"
+        "line-height:1.55;margin:0 0 14px"
+    )
     intro_html = (
-        f"<p style='font-family:sans-serif;color:#333;font-size:0.95em;"
-        f"line-height:1.55;margin:0 0 22px'>"
-        f"Dear colleagues,<br>"
-        f"NHC has issued their cyclone forecasts for "
+        f"<p style='{_p}'>Dear colleagues,</p>"
+        f"<p style='{_p}'>NHC has issued their cyclone forecasts for "
         f"{_format_issued_et(issued_time_dt)}. "
         f"There {'is' if _n == 1 else 'are'} {_n} active "
-        f"storm{'' if _n == 1 else 's'}: <b>{', '.join(storm_names)}</b>.<br>"
-        f"This email consolidates exposure estimates from {_oxford(_present)}.<br>"
-        f"{_missing_sentence}"
+        f"storm{'' if _n == 1 else 's'}: <b>{', '.join(storm_names)}</b>.</p>"
+        f"<p style='{_p}'>This email consolidates exposure estimates from "
+        f"{_oxford(_present)}.{_missing_sentence}</p>"
+        f"<p style='{_p};margin-bottom:22px'>"
         f"Best regards,<br>OCHA Centre for Humanitarian Data</p>"
     )
 
