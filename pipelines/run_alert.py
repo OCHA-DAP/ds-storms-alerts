@@ -169,6 +169,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Generate HTML and open in browser; skip email entirely.",
     )
+    parser.add_argument(
+        "--stage",
+        default="dev",
+        choices=["dev", "prod"],
+        help=(
+            "ocha-stratus DB/blob stage to read exposure data from "
+            "(default: dev — where the storm pipeline currently writes)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -194,6 +203,10 @@ def resolve_country_list_ids(client, iso3s: list[str]) -> list[int]:
     - iso3→list_id from iso3:* tags (one per country)
     - aggregate:all list ID (always included)
     - aggregate:lac list ID (included if any iso3 is in LAC_ISO3S)
+    - aggregate:monitoring list ID(s) (always included) — intentional: monitoring
+      subscribers (currently the DSci team) receive the full exposure alert too, as
+      a redundant cross-check on top of the no-exposure monitoring email they get
+      from the other branch.
 
     Raises RuntimeError if any per-country iso3 has no list.
     """
@@ -425,11 +438,18 @@ def generate_alert_html(
         set(all_render_iso3s) | {iso3 for _, iso3 in already_passed_pairs}
     )
     adm1_gdf = load_adm1_boundaries(_all_name_iso3s)
-    iso3_to_name: dict[str, str] = (
-        adm1_gdf.groupby("iso_3")["adm0_name"]
-        .agg(lambda x: x.value_counts().index[0])
-        .to_dict()
-    )
+    def _mode_name(x):
+        # value_counts() drops NaN, so an all-NaN group yields an empty Series;
+        # return None then so _cname falls back to the iso3 code (no IndexError).
+        vc = x.value_counts()
+        return vc.index[0] if len(vc) else None
+
+    iso3_to_name: dict[str, str] = {
+        k: v
+        for k, v in adm1_gdf.groupby("iso_3")["adm0_name"]
+        .agg(_mode_name).to_dict().items()
+        if v is not None
+    }
 
     def _cname(iso3: str) -> str:
         return iso3_to_name.get(iso3, iso3)
@@ -1259,11 +1279,13 @@ if __name__ == "__main__":
     issued_time = issued_time_dt.strftime("%Y-%m-%dT%H")
 
     preview = args.preview
+    stage = args.stage
     logger.info(
-        f"Starting alert pipeline: {issued_time=} {TEST_EMAIL=} {DRY_RUN=} {preview=}"
+        f"Starting alert pipeline: {issued_time=} {stage=} "
+        f"{TEST_EMAIL=} {DRY_RUN=} {preview=}"
     )
 
-    engine = stratus.get_engine(stage="dev")
+    engine = stratus.get_engine(stage=stage)
     result = generate_alert_html(engine, issued_time_dt)
 
     if result is None:

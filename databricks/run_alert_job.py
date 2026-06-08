@@ -1,10 +1,11 @@
 """DBX entry wrapper for the storm-alert pipeline.
 
-The bundle's ``spark_python_task`` passes three job parameters positionally:
+The bundle's ``spark_python_task`` passes the job parameters positionally:
 
     sys.argv[1] = issued_time   # YYYY-MM-DDTHH, or "" for realtime
     sys.argv[2] = test_email    # "True" | "False"
     sys.argv[3] = dry_run       # "True" | "False"
+    sys.argv[4] = stage         # "dev" | "prod" (ocha-stratus DB/blob stage)
 
 ``pipelines/run_alert.py`` and ``src/`` stay pure Python — they don't know about
 DBX (the GHA workflow runs the same script). This wrapper is the only DBX-specific
@@ -46,17 +47,20 @@ REPO_ROOT = os.path.abspath(os.path.join(_find_script_dir(), ".."))
 ISSUED_TIME = _arg(1)
 TEST_EMAIL = _arg(2, "True")
 DRY_RUN = _arg(3, "True")
+STAGE = _arg(4, "dev")
 
-# Listmonk creds — absent from the reused cluster's env, pulled from the dsci scope.
+# Listmonk config — absent from the reused cluster's env, pulled from the dsci scope
+# (base URL + API creds, so dev/prod can't drift and repointing needs no code edit).
 # Tolerated if missing so a dry-run (no send) still validates DB/blob/plotting;
 # run_alert.py only builds the ListmonkClient when actually sending, and will then
 # raise a clear missing-env error.
 from databricks.sdk.runtime import dbutils  # noqa: E402
 
-os.environ["DSCI_LISTMONK_BASE_URL"] = (
-    "https://listmonk-demo-afhcg8e2hde0fxca.eastus2-01.azurewebsites.net/api"
-)
-for _key in ("DSCI_LISTMONK_API_USERNAME", "DSCI_LISTMONK_API_KEY"):
+for _key in (
+    "DSCI_LISTMONK_BASE_URL",
+    "DSCI_LISTMONK_API_USERNAME",
+    "DSCI_LISTMONK_API_KEY",
+):
     try:
         os.environ[_key] = dbutils.secrets.get("dsci", _key)
     except Exception as exc:  # noqa: BLE001
@@ -73,13 +77,15 @@ env["PYTHONPATH"] = REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")
 # read-only workspace FUSE mount, which it can't use).
 env["MPLCONFIGDIR"] = "/tmp/mplconfig"
 
-cmd = [sys.executable, os.path.join(REPO_ROOT, "pipelines", "run_alert.py")]
+cmd = [sys.executable, os.path.join(REPO_ROOT, "pipelines", "run_alert.py"),
+       "--stage", STAGE]
 if ISSUED_TIME:
     cmd += ["--issued-time", ISSUED_TIME]
 
 if __name__ == "__main__":
     print(
-        f"[run_alert_job] repo_root={REPO_ROOT} TEST_EMAIL={TEST_EMAIL} "
+        f"[run_alert_job] repo_root={REPO_ROOT} STAGE={STAGE} "
+        f"TEST_EMAIL={TEST_EMAIL} "
         f"DRY_RUN={DRY_RUN} issued_time={ISSUED_TIME or '(realtime)'}"
     )
     rc = subprocess.run(cmd, cwd=REPO_ROOT, env=env, check=False).returncode

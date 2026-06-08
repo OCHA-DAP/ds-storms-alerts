@@ -82,11 +82,18 @@ def main(dry_run: bool = False) -> None:
                 existing_iso3s[tag[5:]] = lst["id"]
 
     adm1 = load_adm1_boundaries(iso3s)
-    iso3_to_name: dict[str, str] = (
-        adm1.groupby("iso_3")["adm0_name"]
-        .agg(lambda x: x.value_counts().index[0])
-        .to_dict()
-    )
+
+    def _mode_name(x):
+        # All-NaN group → empty value_counts → None (avoids IndexError); callers
+        # fall back to the iso3 code.
+        vc = x.value_counts()
+        return vc.index[0] if len(vc) else None
+
+    iso3_to_name: dict[str, str] = {
+        k: v
+        for k, v in adm1.groupby("iso_3")["adm0_name"].agg(_mode_name).to_dict().items()
+        if v is not None
+    }
 
     created = 0
     skipped = 0

@@ -48,6 +48,13 @@ variables:
     # Default is the safe test list; the prod target overrides to "False" (see below).
     description: '"True" = Tristan-only test list; "False" = real per-country subscriber lists'
     default: "True"
+  stage:
+    # ocha-stratus DB/blob stage the pipeline reads exposure data from. Currently
+    # "dev" for all targets — that's where the storm pipeline writes (the cluster
+    # has no prod-write). Flip a target to "prod" once prod data lands; keeping it
+    # a variable means the data source can't silently disagree with the target.
+    description: '"dev" | "prod" — DB/blob stage to read from'
+    default: "dev"
 
 targets:
   prod:
@@ -99,6 +106,8 @@ resources:
           default: ${var.test_email}
         - name: dry_run          # send-mode switch (see variables block)
           default: ${var.dry_run}
+        - name: stage            # DB/blob stage to read from (see variables block)
+          default: ${var.stage}
 
       tasks:
         - task_key: run_alert
@@ -110,6 +119,7 @@ resources:
               - "{{job.parameters.issued_time}}"
               - "{{job.parameters.test_email}}"
               - "{{job.parameters.dry_run}}"
+              - "{{job.parameters.stage}}"
           libraries:
             - pypi: { package: "ocha-stratus>=0.1.7" }
             - pypi:

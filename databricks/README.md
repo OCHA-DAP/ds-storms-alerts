@@ -66,8 +66,9 @@ real**. For a safe manual check pass `--params test_email=True,dry_run=True`, or
 
 1. Workspace GitHub credentials for this private repo (same mechanism as
    `ds-storms-pipeline`).
-2. Listmonk creds in the `dsci` secret scope:
+2. Listmonk config in the `dsci` secret scope (base URL + API creds):
    ```bash
+   databricks secrets put-secret dsci DSCI_LISTMONK_BASE_URL     -p default
    databricks secrets put-secret dsci DSCI_LISTMONK_API_USERNAME -p default
    databricks secrets put-secret dsci DSCI_LISTMONK_API_KEY      -p default
    ```
