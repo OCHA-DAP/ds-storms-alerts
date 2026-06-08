@@ -747,10 +747,9 @@ def generate_alert_html(
                     {"our": _our, "ADAM": _adam_v, "GDACS": _gdacs_v}.items()
                     if v > 0
                 }
-                _tot = (
-                    int(round(sum(_toc_active.values()) / len(_toc_active)))
-                    if _toc_active else 0
-                )
+                # Combine sources by taking the MAX across available sources
+                # (CHD / ADAM / GDACS), not the mean.
+                _tot = max(_toc_active.values()) if _toc_active else 0
                 if _tot > 0:
                     _tp = iso3_to_total_pop.get(iso3, 0)
                     _toc_wsps.append({
@@ -857,13 +856,14 @@ def generate_alert_html(
                 )
 
                 if active_sources:
-                    mean_val = int(round(sum(active_sources.values()) / len(active_sources)))
+                    # Combined estimate = MAX across available sources, not the mean.
+                    agg_val = max(active_sources.values())
                     _is_final = (aid, iso3) in final_update_pairs
-                    _mean_suffix = "Estimated\nfinal exposure" if _is_final else "Forecasted\nfinal exposure"
+                    _final_suffix = "Estimated\nfinal exposure" if _is_final else "Forecasted\nfinal exposure"
                     _storm_name = _storm_label(name_aid, None)
-                    mean_mark = StormMark(
-                        value=mean_val,
-                        label=_mean_suffix,
+                    agg_mark = StormMark(
+                        value=agg_val,
+                        label=_final_suffix,
                         bold_prefix=_storm_name,
                         color=wsp_color,
                         bold=True,
@@ -882,7 +882,7 @@ def generate_alert_html(
                         )]
                         if obsv_floor > 0 and not _is_final else []
                     )
-                    combined_marks = hist_marks + obs_ticks + source_ticks + [mean_mark]
+                    combined_marks = hist_marks + obs_ticks + source_ticks + [agg_mark]
                 else:
                     combined_marks = hist_marks
 
@@ -1081,7 +1081,13 @@ def generate_alert_html(
 
     _hr = "<hr style='border:none;border-top:1px solid #e2e2e2;margin:26px 0'>"
     summary_header = f"<h2 style='{_H2}'>Summary table</h2>"
-    body = intro_html + _hr + summary_header + toc_html + already_passed_html
+    rp_note = (
+        "<p style='font-size:0.82em;color:#777;font-style:italic;"
+        "margin:0 0 18px'>Return periods are calculated from the CHD exposure "
+        "estimates only — these have the longest historical record and ensure a "
+        "consistent methodology across storms and countries.</p>"
+    )
+    body = intro_html + _hr + summary_header + toc_html + rp_note + already_passed_html
     if sections:
         body += _hr + _hr.join(sections)
     return body, all_render_iso3s, storm_names
@@ -1096,8 +1102,8 @@ def generate_exposure_csv(
         country, iso3, is_final_alert,
         pop_exposed_34kt, pop_exposed_50kt, pop_exposed_64kt,
         sources_34kt, sources_50kt, sources_64kt
-    where pop_exposed is the mean across available sources (our est., ADAM, GDACS)
-    and sources_* lists which sources contributed (e.g. "our,ADAM,GDACS").
+    where pop_exposed is the MAX across available sources (CHD, ADAM, GDACS)
+    and sources_* lists which sources contributed (e.g. "CHD,ADAM,GDACS").
     """
     import pandas as _pd
 
@@ -1195,7 +1201,7 @@ def generate_exposure_csv(
                     if v > 0
                 }
                 row[f"pop_exposed_{wsp}kt"] = (
-                    int(round(sum(active.values()) / len(active))) if active else 0
+                    max(active.values()) if active else 0
                 )
                 row[f"sources_{wsp}kt"] = (
                     ",".join(_SRC_LABELS.get(k, k) for k in active) if active else ""
