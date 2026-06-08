@@ -1,0 +1,1393 @@
+import argparse
+import base64
+import io
+import logging
+import math
+import os
+import re
+import sys
+import tempfile
+import webbrowser
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import ocha_stratus as stratus
+
+from src.constants import COUNTRY_LIST_TAG, LAC_ISO3S, TEST_LIST_IDS
+from src.data import (
+    fetch_active_storm_meta,
+    fetch_adam_current_exposure,
+    fetch_adam_historical_exposure,
+    fetch_admin_population,
+    fetch_all_monitored_countries,
+    fetch_all_prior_country_pairs,
+    fetch_buffers,
+    fetch_current_obsv_exposure,
+    fetch_fcast_exposure,
+    fetch_gdacs_current_exposure,
+    fetch_gdacs_historical_exposure,
+    fetch_historical_obsv_exposure,
+    fetch_track_geo,
+    fetch_prev_any_pairs,
+    fetch_wsp_fcastonly_exposure,
+    fetch_wsp_fcastonly_polygons,
+    load_adm1_boundaries,
+    load_background_countries,
+)
+from src.plots import (
+    StormMark,
+    WspPdf,
+    adam_strip_chart,
+    country_strip_chart,
+    gdacs_strip_chart,
+    track_plot_buffers,
+    track_plot_wsp,
+    wind_speed_color,
+)
+
+_HIST_COLOR = "#888888"
+_SRC_LABELS = {"our": "CHD", "ADAM": "ADAM", "GDACS": "GDACS"}
+
+# WSP probability band midpoints (fraction) used to compute expected exposure.
+_WSP_BAND_MIDPOINT = {
+    0: 0.025, 5: 0.075, 10: 0.15, 20: 0.25, 30: 0.35,
+    40: 0.45, 50: 0.55, 60: 0.65, 70: 0.75, 80: 0.85, 90: 0.95,
+}
+
+
+def _wsp_expected_pop(
+    wsp_exp_df, atcf_id: str, iso3: str, wind_threshold_kt: int
+) -> float | None:
+    """Probability-weighted expected population exposed from WSP fcastonly bands.
+
+    Returns None if no WSP data exists for this (atcf_id, iso3, wind_threshold_kt).
+    """
+    sub = wsp_exp_df[
+        (wsp_exp_df["atcf_id"] == atcf_id)
+        & (wsp_exp_df["iso3"] == iso3)
+        & (wsp_exp_df["wind_threshold_kt"] == wind_threshold_kt)
+    ]
+    if sub.empty:
+        return None
+    return sum(
+        _WSP_BAND_MIDPOINT.get(int(row["percentage"]), 0.025) * int(row["pop_exposed"])
+        for _, row in sub.iterrows()
+    )
+
+
+def _storm_label(name: object, season: object, suffix: str = "") -> str:
+    """Build a strip-chart label.
+
+    Historical (no suffix): "Storm 2024" — single line including year.
+    Current (suffix given): "Storm\\nsuffix" — two lines, year dropped to keep
+    the visual compact.
+    """
+    name_ok = isinstance(name, str) and name and not (
+        isinstance(name, float) and math.isnan(name)
+    )
+    base = name.strip().title() if name_ok else "Unknown"
+    if suffix:
+        return f"{base}\n{suffix}"
+    season_ok = (
+        season not in (None, "")
+        and not (isinstance(season, float) and math.isnan(season))
+    )
+    season_part = f" {int(season)}" if season_ok else ""
+    return f"{base}{season_part}"
+
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _format_issued_et(dt: datetime) -> str:
+    """Format an issued time (naive = UTC) in US Eastern, e.g. 'Jun. 6, 11am'."""
+    aware = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+    local = aware.astimezone(_ET)
+    hour = local.strftime("%I").lstrip("0") or "12"
+    ampm = local.strftime("%p").lower()
+    return f"{local.strftime('%b')}. {local.day}, {hour}{ampm}"
+
+
+def _oxford(items: list[str]) -> str:
+    """Join with an Oxford comma: [] → '', [a] → 'a', [a,b] → 'a and b',
+    [a,b,c] → 'a, b, and c'."""
+    items = [i for i in items if i]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
+def _build_subject(
+    issued_time_dt: datetime, storm_names: list[str], prefix: str = ""
+) -> str:
+    """[Cyclone monitoring] NHC forecast issued {ET time} (storm, storm)."""
+    names = ", ".join(storm_names) if storm_names else "—"
+    return (
+        f"{prefix}[Cyclone monitoring] NHC forecast issued "
+        f"{_format_issued_et(issued_time_dt)} ({names})"
+    )
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+_H2 = "font-size:1.35em;margin:24px 0 8px;font-weight:600"
+_H3 = "font-size:1.1em;margin:16px 0 6px;font-weight:600;color:#444"
+_H4 = "font-size:0.95em;margin:10px 0 4px;font-weight:600;color:#666"
+_H5 = "font-size:0.85em;margin:8px 0 3px;font-weight:600;color:#888"
+
+
+def _parse_bool_env(name: str, default: bool) -> bool:
+    val = os.environ.get(name, "")
+    if val == "":
+        return default
+    return val.strip().lower() not in ("false", "0", "no")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--issued-time",
+        required=False,
+        default=None,
+        help=(
+            "Issued time of the forecast (format YYYY-MM-DDTHH). "
+            "If omitted, defaults to the most recent NHC advisory hour "
+            "(03/09/15/21 UTC) on or before the current UTC time."
+        ),
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Generate HTML and open in browser; skip email entirely.",
+    )
+    parser.add_argument(
+        "--stage",
+        default="dev",
+        choices=["dev", "prod"],
+        help=(
+            "ocha-stratus DB/blob stage to read exposure data from "
+            "(default: dev — where the storm pipeline currently writes)."
+        ),
+    )
+    return parser.parse_args()
+
+
+def _most_recent_advisory_time() -> datetime:
+    """Most recent NHC advisory hour (03/09/15/21 UTC) on or before now."""
+    now = datetime.now(UTC)
+    for h in (21, 15, 9, 3):
+        if now.hour >= h:
+            return now.replace(hour=h, minute=0, second=0, microsecond=0, tzinfo=None)
+    return (now - timedelta(days=1)).replace(
+        hour=21, minute=0, second=0, microsecond=0, tzinfo=None
+    )
+
+
+TEST_EMAIL = _parse_bool_env("TEST_EMAIL", default=True)
+DRY_RUN = _parse_bool_env("DRY_RUN", default=True)
+
+
+def resolve_country_list_ids(client, iso3s: list[str]) -> list[int]:
+    """Return listmonk list IDs for the given iso3s plus applicable aggregate lists.
+
+    Fetches all lists tagged COUNTRY_LIST_TAG and builds:
+    - iso3→list_id from iso3:* tags (one per country)
+    - aggregate:all list ID (always included)
+    - aggregate:lac list ID (included if any iso3 is in LAC_ISO3S)
+    - aggregate:monitoring list ID(s) (always included) — intentional: monitoring
+      subscribers (currently the DSci team) receive the full exposure alert too, as
+      a redundant cross-check on top of the no-exposure monitoring email they get
+      from the other branch.
+
+    Raises RuntimeError if any per-country iso3 has no list.
+    """
+    all_lists = client.fetch_all_lists(tag=COUNTRY_LIST_TAG)
+    iso3_to_list: dict[str, int] = {}
+    aggregate_all_id: int | None = None
+    aggregate_lac_id: int | None = None
+    monitoring_ids: list[int] = []
+    for lst in all_lists:
+        for tag in lst.get("tags", []):
+            if tag.startswith("iso3:"):
+                iso3_to_list[tag[5:]] = lst["id"]
+            elif tag == "aggregate:all":
+                aggregate_all_id = lst["id"]
+            elif tag == "aggregate:lac":
+                aggregate_lac_id = lst["id"]
+            elif tag == "aggregate:monitoring":
+                monitoring_ids.append(lst["id"])
+
+    missing = [iso3 for iso3 in iso3s if iso3 not in iso3_to_list]
+    if missing:
+        raise RuntimeError(
+            f"No listmonk list found for iso3(s): {missing}. "
+            f"Run pipelines/setup_country_lists.py first."
+        )
+
+    result = [iso3_to_list[iso3] for iso3 in iso3s]
+    if aggregate_all_id is not None:
+        result.append(aggregate_all_id)
+    if aggregate_lac_id is not None and any(iso3 in LAC_ISO3S for iso3 in iso3s):
+        result.append(aggregate_lac_id)
+    result.extend(monitoring_ids)
+    return result
+
+
+def _fetch_monitoring_list_ids(client) -> list[int]:
+    """Return IDs of all aggregate:monitoring lists."""
+    all_lists = client.fetch_all_lists(tag=COUNTRY_LIST_TAG)
+    return [
+        lst["id"]
+        for lst in all_lists
+        for tag in lst.get("tags", [])
+        if tag == "aggregate:monitoring"
+    ]
+
+
+def generate_monitoring_html(
+    engine, issued_time_dt: datetime, active_meta: list[dict]
+) -> str:
+    """Email body for advisories with active storms but no exposure.
+
+    Includes the same per-storm maps as the normal alert (WSP 34 kt + buffers).
+    No ToC, no country sections, no historical comparisons.
+    """
+    atcf_ids = [m["atcf_id"] for m in active_meta]
+
+    logger.info("Fetching track geometries (monitoring)...")
+    tracks_gdf = fetch_track_geo(engine, atcf_ids, issued_time_dt)
+    logger.info("Fetching wind buffers (monitoring)...")
+    buffers_gdf = fetch_buffers(engine, atcf_ids, issued_time_dt)
+    logger.info("Fetching WSP fcastonly polygons (monitoring)...")
+    wsp_gdf = fetch_wsp_fcastonly_polygons(
+        engine, atcf_ids, issued_time_dt, wind_threshold_kt=34,
+    )
+    logger.info("Loading country boundaries (monitoring)...")
+    background_gdf = load_background_countries()
+
+    n = len(active_meta)
+    intro = (
+        f"<p style='font-family:sans-serif;color:#555;"
+        f"margin:0 0 24px;font-size:0.95em;line-height:1.5'>"
+        f"{n} active storm{'s' if n != 1 else ''} at this advisory. "
+        f"None {'are' if n != 1 else 'is'} currently forecast to affect "
+        f"any monitored country.</p>"
+    )
+
+    sections: list[str] = [intro]
+    for meta in active_meta:
+        aid = meta["atcf_id"]
+        storm_label = _storm_label(meta["name"], meta["season"])
+        aid_tracks = tracks_gdf[tracks_gdf["atcf_id"] == aid]
+        aid_buffers = buffers_gdf[buffers_gdf["atcf_id"] == aid]
+        aid_wsp_poly = wsp_gdf[wsp_gdf["atcf_id"] == aid]
+
+        parts: list[str] = [f"<h2 style='{_H2}'>{storm_label}</h2>"]
+        buf_m = track_plot_buffers(
+            aid_tracks, aid_buffers, background_gdf, storm_name=storm_label,
+        )
+        if buf_m:
+            parts.append(f"<h3 style='{_H3}'>Deterministic forecast</h3>{buf_m}")
+        wsp_m = track_plot_wsp(
+            aid_tracks, aid_buffers, aid_wsp_poly, background_gdf,
+            wind_threshold_kt=34, storm_name=storm_label,
+        )
+        if wsp_m:
+            parts.append(
+                f"<h3 style='{_H3}'>Probabilistic forecast</h3>{wsp_m}"
+            )
+        sections.append("".join(parts))
+
+    return "".join(sections)
+
+
+def generate_alert_html(
+    engine, issued_time_dt: datetime
+) -> tuple[str, list[str]] | None:
+    """Run the full pipeline and return (html_body, iso3s).
+
+    Returns None if there are no countries with any forecasted exposure and no
+    storm-country pairs eligible for a final update notice.
+    """
+    issued_time = issued_time_dt.strftime("%Y-%m-%dT%H")
+    logger.info("Fetching forecast exposure...")
+    fcast_df = fetch_fcast_exposure(engine, issued_time_dt)
+
+    all_atcf_ids = fcast_df["atcf_id"].unique().tolist()
+
+    # Fetch previous advisory pairs first so we can extend the WSP seed to include
+    # storms that have WSP exposure but no track fcastonly exposure this advisory.
+    logger.info("Fetching previous advisory exposure (for final update detection)...")
+    prev_any_rows = fetch_prev_any_pairs(engine, issued_time_dt)
+    prev_any_pairs = {(r["atcf_id"], r["iso3"]) for r in prev_any_rows}
+    prev_atcf_ids = sorted({r["atcf_id"] for r in prev_any_rows})
+
+    all_wsp_seed_ids = sorted(set(all_atcf_ids) | set(prev_atcf_ids))
+    logger.info("Fetching WSP fcastonly exposure (all wind speeds)...")
+    wsp_exp_df = fetch_wsp_fcastonly_exposure(engine, all_wsp_seed_ids, issued_time_dt)
+
+    # Trigger: any (atcf_id, iso3) pair with non-zero exposure at any wind speed
+    # from either WSP fcastonly or track fcastonly.
+    current_any_pairs = (
+        {(r.atcf_id, r.iso3) for r in fcast_df.itertuples()}
+        | {(r.atcf_id, r.iso3) for r in wsp_exp_df.itertuples() if r.pop_exposed > 0}
+    )
+    if current_any_pairs:
+        atcf_ids = sorted({aid for aid, _ in current_any_pairs})
+        iso3s = sorted({iso3 for _, iso3 in current_any_pairs})
+    else:
+        atcf_ids, iso3s = [], []
+
+    # Final update pairs: had any exposure in previous advisory, have none now.
+    final_update_pairs: set[tuple[str, str]] = prev_any_pairs - current_any_pairs
+    final_update_meta: dict[tuple[str, str], tuple] = {
+        (r["atcf_id"], r["iso3"]): (r["name"], r["season"])
+        for r in prev_any_rows
+        if (r["atcf_id"], r["iso3"]) in final_update_pairs
+    }
+
+    if not current_any_pairs and not final_update_pairs:
+        return None
+
+
+    # Extend fetch lists to cover final-update storms/countries.
+    extra_atcf_ids = sorted({aid for aid, _ in final_update_pairs} - set(atcf_ids))
+    all_fetch_atcf_ids = atcf_ids + extra_atcf_ids
+
+    logger.info(
+        f"Active storms: {atcf_ids}, affected countries: {iso3s}"
+        + (f", final-update candidates: {extra_atcf_ids}" if extra_atcf_ids else "")
+    )
+
+    logger.info("Fetching current observed exposure...")
+    obsv_df = fetch_current_obsv_exposure(engine, all_fetch_atcf_ids, issued_time_dt)
+
+    # Filter final_update_pairs: only keep pairs with observed exposure (cumulative).
+    obsv_pairs = {
+        (r.atcf_id, r.iso3) for r in obsv_df.itertuples() if r.pop_exposed > 0
+    }
+    final_update_pairs = {pair for pair in final_update_pairs if pair in obsv_pairs}
+
+    # Recompute render lists after observed filter.
+    extra_iso3s = sorted({iso3 for _, iso3 in final_update_pairs} - set(iso3s))
+    all_render_iso3s = iso3s + extra_iso3s
+    all_render_atcf_ids = sorted(
+        set(atcf_ids) | {aid for aid, _ in final_update_pairs}
+    )
+
+    logger.info("Fetching historical observed exposure...")
+    hist_df = fetch_historical_obsv_exposure(
+        engine, all_render_iso3s, exclude_atcf_ids=all_render_atcf_ids
+    )
+    hist_df = hist_df[hist_df["season"] >= 2002].reset_index(drop=True)
+
+    iso3_to_total_pop = fetch_admin_population(engine, all_render_iso3s)
+
+    all_prior_pairs = fetch_all_prior_country_pairs(engine, all_render_atcf_ids, issued_time_dt)
+    obsv_with_exposure = {
+        (r.atcf_id, r.iso3) for r in obsv_df.itertuples() if r.pop_exposed > 0
+    }
+    already_passed_pairs: dict[tuple[str, str], datetime] = {
+        k: v for k, v in all_prior_pairs.items()
+        if k not in current_any_pairs
+        and k not in final_update_pairs
+        and k in obsv_with_exposure
+    }
+
+    logger.info("Fetching GDACS current exposure...")
+    gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_render_atcf_ids)
+
+    logger.info("Fetching GDACS historical exposure...")
+    gdacs_hist_df = fetch_gdacs_historical_exposure(
+        engine, all_render_iso3s, exclude_atcf_ids=all_render_atcf_ids
+    )
+    gdacs_hist_df = gdacs_hist_df[gdacs_hist_df["season"] >= 2002].reset_index(drop=True)
+
+    logger.info("Fetching ADAM current exposure...")
+    adam_cur_df = fetch_adam_current_exposure(engine, all_render_atcf_ids)
+
+    logger.info("Fetching ADAM historical exposure...")
+    adam_hist_df = fetch_adam_historical_exposure(
+        engine, all_render_iso3s, exclude_atcf_ids=all_render_atcf_ids
+    )
+    adam_hist_df = adam_hist_df[adam_hist_df["season"] >= 2002].reset_index(drop=True)
+
+    logger.info("Fetching track geometries...")
+    tracks_gdf = fetch_track_geo(engine, all_fetch_atcf_ids, issued_time_dt)
+
+    logger.info("Fetching wind buffers...")
+    buffers_gdf = fetch_buffers(engine, all_fetch_atcf_ids, issued_time_dt)
+
+    logger.info("Fetching WSP fcastonly polygons (34 kt) for map...")
+    wsp_gdf = fetch_wsp_fcastonly_polygons(
+        engine, all_fetch_atcf_ids, issued_time_dt, wind_threshold_kt=34,
+    )
+
+    logger.info("Loading country boundaries...")
+    background_gdf = load_background_countries()
+    _all_name_iso3s = sorted(
+        set(all_render_iso3s) | {iso3 for _, iso3 in already_passed_pairs}
+    )
+    adm1_gdf = load_adm1_boundaries(_all_name_iso3s)
+    def _mode_name(x):
+        # value_counts() drops NaN, so an all-NaN group yields an empty Series;
+        # return None then so _cname falls back to the iso3 code (no IndexError).
+        vc = x.value_counts()
+        return vc.index[0] if len(vc) else None
+
+    iso3_to_name: dict[str, str] = {
+        k: v
+        for k, v in adm1_gdf.groupby("iso_3")["adm0_name"]
+        .agg(_mode_name).to_dict().items()
+        if v is not None
+    }
+
+    def _cname(iso3: str) -> str:
+        return iso3_to_name.get(iso3, iso3)
+
+    logger.info("Generating plots...")
+
+    sections: list[str] = []
+
+    def _marks(df, iso3, wsp, color, suffix="", short=False):
+        sub = df[(df["iso3"] == iso3) & (df["wind_speed_kt"] == wsp)]
+        return [
+            StormMark(
+                value=int(row["pop_exposed"]),
+                label=_storm_label(row["name"], row["season"], suffix),
+                color=color,
+                short=short,
+            )
+            for _, row in sub.iterrows()
+            if row["pop_exposed"] > 0
+        ]
+
+    def _filter_historical(
+        hist_marks: list[StormMark],
+        x_max: float,
+        current_values: list[float] | None = None,
+    ) -> list[StormMark]:
+        """Keep the highest-value historical storms; drop ones too close to a
+        bigger neighbour or to a current/forecast mark, and drop storms below
+        a minimum absolute value (relative to x_max)."""
+        if not hist_marks or x_max <= 0:
+            return hist_marks
+        sorted_marks = sorted(hist_marks, key=lambda m: m.value, reverse=True)
+        min_gap = x_max * 0.025
+        min_value = x_max * 0.005
+        blocked = list(current_values or [])
+        kept: list[StormMark] = []
+        for m in sorted_marks:
+            if m.value < min_value:
+                continue
+            if any(abs(m.value - v) < min_gap for v in blocked):
+                continue
+            if all(abs(m.value - k.value) >= min_gap for k in kept):
+                kept.append(m)
+        return kept
+
+    def _obsv_for(df, atcf_id: str, iso3: str, wsp: int) -> int:
+        m = df[
+            (df["atcf_id"] == atcf_id)
+            & (df["iso3"] == iso3)
+            & (df["wind_speed_kt"] == wsp)
+        ]
+        return int(m["pop_exposed"].sum()) if not m.empty else 0
+
+    def _max_for_wsp(wsp: int) -> float:
+        sources = [
+            fcast_df, obsv_df, hist_df,
+            gdacs_cur_df, gdacs_hist_df,
+            adam_cur_df, adam_hist_df,
+        ]
+        candidates = [0.0]
+        for src in sources:
+            sub = src[src["wind_speed_kt"] == wsp]
+            if not sub.empty:
+                candidates.append(float(sub["pop_exposed"].max()))
+        # Forecast total (fcast + obsv) — can exceed either individually.
+        f = fcast_df[fcast_df["wind_speed_kt"] == wsp]
+        if not f.empty:
+            for _, row in f.iterrows():
+                total = float(row["pop_exposed"]) + _obsv_for(
+                    obsv_df, row["atcf_id"], row["iso3"], wsp,
+                )
+                candidates.append(total)
+        # WSP fcastonly PDF tail = obsv + cumulative fcastonly pop across bands.
+        w = wsp_exp_df[wsp_exp_df["wind_threshold_kt"] == wsp]
+        if not w.empty:
+            for (atcf_id, iso3), grp in w.groupby(["atcf_id", "iso3"]):
+                obsv = _obsv_for(obsv_df, atcf_id, iso3, wsp)
+                candidates.append(obsv + float(grp["pop_exposed"].sum()))
+        return max(candidates)
+
+    # Storm metadata for section headers.
+    # Priority: fcast_df (most current) > prev_any_rows (covers WSP-only storms
+    # that have no track fcast exposure) > final_update_meta.
+    storm_meta: dict[str, tuple] = {}
+    for r in prev_any_rows:
+        if r["atcf_id"] not in storm_meta:
+            storm_meta[r["atcf_id"]] = (r["name"], r["season"])
+    for _, row in fcast_df.drop_duplicates("atcf_id").iterrows():
+        storm_meta[row["atcf_id"]] = (row["name"], row["season"])
+    for (aid, _), (nm, ssn) in final_update_meta.items():
+        if aid not in storm_meta:
+            storm_meta[aid] = (nm, ssn)
+
+    # Storm-to-country mapping for rendering.
+    storm_to_iso3s: dict[str, set[str]] = {}
+    for aid, iso3 in current_any_pairs:
+        storm_to_iso3s.setdefault(aid, set()).add(iso3)
+    for aid, iso3 in final_update_pairs:
+        storm_to_iso3s.setdefault(aid, set()).add(iso3)
+
+    wind_speeds_in_order = (64, 50, 34)
+    x_max_per_wsp = {wsp: _max_for_wsp(wsp) for wsp in wind_speeds_in_order}
+
+    def _storm_exposure_score(aid: str) -> float:
+        sub_fcast = fcast_df[fcast_df["atcf_id"] == aid]
+        sub_obsv = obsv_df[obsv_df["atcf_id"] == aid]
+        candidates: list[float] = [0.0]
+        if not sub_fcast.empty:
+            candidates.append(float(sub_fcast["pop_exposed"].max()))
+        if not sub_obsv.empty:
+            candidates.append(float(sub_obsv["pop_exposed"].max()))
+        return max(candidates)
+
+    def _country_exposure_score(aid: str, iso3: str) -> float:
+        sub_fcast = fcast_df[(fcast_df["atcf_id"] == aid) & (fcast_df["iso3"] == iso3)]
+        sub_obsv = obsv_df[(obsv_df["atcf_id"] == aid) & (obsv_df["iso3"] == iso3)]
+        candidates: list[float] = [0.0]
+        if not sub_fcast.empty:
+            candidates.append(float(sub_fcast["pop_exposed"].max()))
+        if not sub_obsv.empty:
+            candidates.append(float(sub_obsv["pop_exposed"].max()))
+        return max(candidates)
+
+    def _country_rp_score(aid: str, iso3: str) -> float:
+        """Max RP across all wind speeds for this country/storm (higher = rarer)."""
+        best = 0.0
+        for _tw in (34, 50, 64):
+            _tr = fcast_df[
+                (fcast_df["atcf_id"] == aid)
+                & (fcast_df["iso3"] == iso3)
+                & (fcast_df["wind_speed_kt"] == _tw)
+            ]
+            _fv = int(_tr["pop_exposed"].iloc[0]) if not _tr.empty else 0
+            _ov = _obsv_for(obsv_df, aid, iso3, _tw)
+            _tot = _fv + _ov
+            if _tot > 0:
+                rp = _rp_numeric(float(_tot), iso3, _tw)
+                if rp is not None and rp > best:
+                    best = rp
+        return best
+
+    n_seasons = issued_time_dt.year - 2002 + 1
+
+    def _fmt_pop_toc(x: float) -> str:
+        if x >= 1_000_000:
+            return f"{x / 1_000_000:.1f}M"
+        if x >= 1_000:
+            return f"{x / 1_000:.0f}K"
+        return str(int(x))
+
+    def _rp_numeric(forecast_val: float, iso3: str, wsp: int) -> float | None:
+        if forecast_val <= 0:
+            return None
+        hist_vals = hist_df[
+            (hist_df["iso3"] == iso3) & (hist_df["wind_speed_kt"] == wsp)
+        ]["pop_exposed"].tolist()
+        exceedances = sum(1 for v in hist_vals if v >= forecast_val)
+        return (n_seasons + 1) / (exceedances + 1)
+
+    def _rp_color(rp: float | None) -> str:
+        if rp is None:
+            return ""
+        # Colour by the displayed (rounded) value so e.g. 4.6 → "5-year" gets the
+        # same colour as any other 5-year RP, matching the f"{rp:.0f}" label.
+        rp = round(rp)
+        if rp <= 3:
+            return ""
+        if rp > 10:
+            return "#ffcccc"
+        if rp > 5:
+            return "#ffe8cc"
+        return "#fff9c4"
+
+    def _rp_text(forecast_val: float, iso3: str, wsp: int) -> str:
+        rp = _rp_numeric(forecast_val, iso3, wsp)
+        if rp is None:
+            return ""
+        hist_vals = hist_df[
+            (hist_df["iso3"] == iso3) & (hist_df["wind_speed_kt"] == wsp)
+        ]["pop_exposed"].tolist()
+        exceedances = sum(1 for v in hist_vals if v >= forecast_val)
+        return (
+            f"≈{rp:.0f}-year RP "
+            f"({exceedances} storms since 2002 had ≥ this exposure)"
+        )
+
+    toc_storms: list[dict] = []
+
+    _ordered_aids = sorted(
+        storm_to_iso3s.keys(), key=lambda a: -_storm_exposure_score(a)
+    )
+    for aid in _ordered_aids:
+        s_name, s_season = storm_meta.get(aid, (None, None))
+        storm_h2_label = _storm_label(s_name, s_season)
+
+        # Pre-filter DataFrames to this storm for per-storm mark computation.
+        aid_obsv_df = obsv_df[obsv_df["atcf_id"] == aid]
+        aid_gdacs_cur = (
+            gdacs_cur_df[gdacs_cur_df["atcf_id"] == aid]
+            if "atcf_id" in gdacs_cur_df.columns else gdacs_cur_df
+        )
+        aid_adam_cur = (
+            adam_cur_df[adam_cur_df["atcf_id"] == aid]
+            if "atcf_id" in adam_cur_df.columns else adam_cur_df
+        )
+        tr_storm = fcast_df[fcast_df["atcf_id"] == aid]
+        name_aid = tr_storm["name"].iloc[0] if not tr_storm.empty else s_name
+        season_aid = tr_storm["season"].iloc[0] if not tr_storm.empty else s_season
+
+        # Per-storm maps (WSP + buffers filtered to this storm only).
+        aid_tracks = tracks_gdf[tracks_gdf["atcf_id"] == aid]
+        aid_buffers = buffers_gdf[buffers_gdf["atcf_id"] == aid]
+        aid_wsp_poly = wsp_gdf[wsp_gdf["atcf_id"] == aid]
+        aid_adm1 = adm1_gdf[adm1_gdf["iso_3"].isin(storm_to_iso3s[aid])]
+        storm_map_parts: list[str] = []
+        buf_m = track_plot_buffers(
+            aid_tracks, aid_buffers, background_gdf,
+            adm1_gdf=aid_adm1, storm_name=storm_h2_label,
+        )
+        if buf_m:
+            storm_map_parts.append(
+                f"<h3 style='{_H3}'>Deterministic forecast</h3>{buf_m}"
+            )
+        wsp_m = track_plot_wsp(
+            aid_tracks, aid_buffers, aid_wsp_poly, background_gdf,
+            wind_threshold_kt=34, adm1_gdf=aid_adm1, storm_name=storm_h2_label,
+        )
+        if wsp_m:
+            storm_map_parts.append(
+                f"<h3 style='{_H3}'>Probabilistic forecast</h3>{wsp_m}"
+            )
+
+        toc_countries: list[dict] = []
+        country_sections: list[str] = []
+        for iso3 in sorted(storm_to_iso3s[aid], key=lambda c: -_country_rp_score(aid, c)):
+            # Final update notice for this (storm, country) pair.
+            notice_html = ""
+            if (aid, iso3) in final_update_pairs:
+                storm_lbl = (
+                    name_aid.strip().title()
+                    if isinstance(name_aid, str) and name_aid
+                    else aid
+                )
+                _cn = _cname(iso3)
+                notice_html = (
+                    f"<p style='background:#fff3cd;border-left:4px solid #ffc107;"
+                    f"padding:10px 14px;margin:12px 0;font-size:0.95em'>"
+                    f"This is the last update for <strong>{storm_lbl}</strong> in "
+                    f"<strong>{_cn}</strong> as there is no further forecasted "
+                    f"exposure. Figures below and attached data indicate purely "
+                    f"observed exposure and will not change, unless the track of the "
+                    f"storm changes significantly and returns towards {_cn} again. "
+                    f"In this case another update will be issued for "
+                    f"{storm_lbl} in {_cn}.</p>"
+                )
+
+            # Only render wind speeds that have current data for this (storm, country).
+            active_wsps = [
+                wsp for wsp in wind_speeds_in_order
+                if (
+                    (_wsp_expected_pop(wsp_exp_df, aid, iso3, wsp) or 0) > 0
+                    or not fcast_df[
+                        (fcast_df["atcf_id"] == aid)
+                        & (fcast_df["iso3"] == iso3)
+                        & (fcast_df["wind_speed_kt"] == wsp)
+                    ].empty
+                    or _obsv_for(obsv_df, aid, iso3, wsp) > 0
+                )
+            ]
+            if not active_wsps:
+                continue
+
+            _toc_wsps: list[dict] = []
+            for _tw in (34, 50, 64):
+                _tr = fcast_df[
+                    (fcast_df["atcf_id"] == aid)
+                    & (fcast_df["iso3"] == iso3)
+                    & (fcast_df["wind_speed_kt"] == _tw)
+                ]
+                _fv = int(_tr["pop_exposed"].iloc[0]) if not _tr.empty else 0
+                _ov = _obsv_for(obsv_df, aid, iso3, _tw)
+                _our = _fv + _ov
+                _gdacs_r = aid_gdacs_cur[
+                    (aid_gdacs_cur["iso3"] == iso3)
+                    & (aid_gdacs_cur["wind_speed_kt"] == _tw)
+                ]
+                _gdacs_v = int(_gdacs_r["pop_exposed"].iloc[0]) if not _gdacs_r.empty else 0
+                _adam_r = aid_adam_cur[
+                    (aid_adam_cur["iso3"] == iso3)
+                    & (aid_adam_cur["wind_speed_kt"] == _tw)
+                ]
+                _adam_v = int(_adam_r["pop_exposed"].iloc[0]) if not _adam_r.empty else 0
+                _toc_active = {
+                    k: v for k, v in
+                    {"our": _our, "ADAM": _adam_v, "GDACS": _gdacs_v}.items()
+                    if v > 0
+                }
+                _tot = (
+                    int(round(sum(_toc_active.values()) / len(_toc_active)))
+                    if _toc_active else 0
+                )
+                if _tot > 0:
+                    _tp = iso3_to_total_pop.get(iso3, 0)
+                    _toc_wsps.append({
+                        "wsp": _tw,
+                        "total": _tot,
+                        "rp": _rp_numeric(float(_our), iso3, _tw),
+                        "pct": _tot / _tp * 100 if _tp > 0 else None,
+                    })
+            if _toc_wsps:
+                # Find most similar historical storms by relative-difference score
+                # across all three wind speeds (lower score = more similar).
+                _curr_vec = {34: 0, 50: 0, 64: 0}
+                for _tw_d in _toc_wsps:
+                    _curr_vec[_tw_d["wsp"]] = _tw_d["total"]
+
+                _hist_storms_by_id: dict[str, dict] = {}
+                for _, _hr in hist_df[hist_df["iso3"] == iso3].iterrows():
+                    _aid_h = _hr["atcf_id"]
+                    if _aid_h not in _hist_storms_by_id:
+                        _hist_storms_by_id[_aid_h] = {
+                            "name": _hr["name"], "season": _hr["season"],
+                            34: 0, 50: 0, 64: 0,
+                        }
+                    _hist_storms_by_id[_aid_h][int(_hr["wind_speed_kt"])] = int(_hr["pop_exposed"])
+
+                _sim_scores: list[tuple[float, str]] = []
+                for _hd in _hist_storms_by_id.values():
+                    _score = sum(
+                        abs(_curr_vec[_ws] - _hd[_ws]) / max(_curr_vec[_ws], _hd[_ws], 1)
+                        for _ws in (34, 50, 64)
+                    )
+                    _sim_scores.append((_score, _storm_label(_hd["name"], _hd["season"])))
+                _sim_scores.sort()
+                _similar = [_lbl for _, _lbl in _sim_scores[:3]]
+
+                toc_countries.append({
+                    "name": _cname(iso3),
+                    "is_final": (aid, iso3) in final_update_pairs,
+                    "wsps": _toc_wsps,
+                    "similar": _similar,
+                })
+
+            combined_blocks: list[str] = []
+            _total_pop = iso3_to_total_pop.get(iso3, 0)
+
+            for wsp in active_wsps:
+                wsp_color = wind_speed_color(wsp)
+                obsv_floor = _obsv_for(obsv_df, aid, iso3, wsp)
+
+                # Our estimate: deterministic track fcastonly + cumulative observed.
+                tr_row = fcast_df[
+                    (fcast_df["atcf_id"] == aid)
+                    & (fcast_df["iso3"] == iso3)
+                    & (fcast_df["wind_speed_kt"] == wsp)
+                ]
+                fcast_val = int(tr_row["pop_exposed"].iloc[0]) if not tr_row.empty else 0
+                our_val = fcast_val + obsv_floor
+
+                # GDACS and ADAM current estimates for this country/wind speed.
+                gdacs_row = aid_gdacs_cur[
+                    (aid_gdacs_cur["iso3"] == iso3)
+                    & (aid_gdacs_cur["wind_speed_kt"] == wsp)
+                ]
+                gdacs_val = int(gdacs_row["pop_exposed"].iloc[0]) if not gdacs_row.empty else 0
+
+                adam_row = aid_adam_cur[
+                    (aid_adam_cur["iso3"] == iso3)
+                    & (aid_adam_cur["wind_speed_kt"] == wsp)
+                ]
+                adam_val = int(adam_row["pop_exposed"].iloc[0]) if not adam_row.empty else 0
+
+                active_sources = {
+                    k: v for k, v in
+                    {"our": our_val, "ADAM": adam_val, "GDACS": gdacs_val}.items()
+                    if v > 0
+                }
+
+                # WSP data for this country/storm/wsp — needed for x_max and PDF.
+                wsp_sub = wsp_exp_df[
+                    (wsp_exp_df["atcf_id"] == aid)
+                    & (wsp_exp_df["iso3"] == iso3)
+                    & (wsp_exp_df["wind_threshold_kt"] == wsp)
+                ]
+
+                # x_max = min(total_pop, 2 × wsp_extent), extended if any mark exceeds it.
+                # wsp_extent = right edge of the PDF polygon (obsv_floor + sum of all bands),
+                # which is the "maximum value from the WSP distribution" as seen on the chart.
+                _wsp_extent = obsv_floor + float(wsp_sub["pop_exposed"].sum()) if not wsp_sub.empty else 0.0
+                _base = _wsp_extent if _wsp_extent > 0 else (
+                    max(active_sources.values()) if active_sources else x_max_per_wsp[wsp]
+                )
+                _cap = min(_total_pop, 2 * _base) if _total_pop > 0 else 2 * _base
+                _max_active = max(active_sources.values()) if active_sources else 0
+                _chart_xmax = max(_cap, _max_active)
+                # show "total pop." tick only when total_pop is visible on this chart
+                _chart_total_pop = (
+                    _total_pop if (_total_pop > 0 and _total_pop <= _chart_xmax) else None
+                )
+
+                hist_marks = _filter_historical(
+                    _marks(hist_df, iso3, wsp, _HIST_COLOR, short=True),
+                    _chart_xmax,
+                    current_values=list(active_sources.values()),
+                )
+
+                if active_sources:
+                    mean_val = int(round(sum(active_sources.values()) / len(active_sources)))
+                    _is_final = (aid, iso3) in final_update_pairs
+                    _mean_suffix = "Estimated\nfinal exposure" if _is_final else "Forecasted\nfinal exposure"
+                    _storm_name = _storm_label(name_aid, None)
+                    mean_mark = StormMark(
+                        value=mean_val,
+                        label=_mean_suffix,
+                        bold_prefix=_storm_name,
+                        color=wsp_color,
+                        bold=True,
+                    )
+                    source_ticks = [
+                        StormMark(value=v, label=_SRC_LABELS[k], color=wsp_color, short=False)
+                        for k, v in active_sources.items()
+                    ]
+                    obs_ticks = (
+                        [StormMark(
+                            value=obsv_floor,
+                            label="Observed\nup to present",
+                            bold_prefix=_storm_name,
+                            color=wsp_color,
+                            short=False,
+                        )]
+                        if obsv_floor > 0 and not _is_final else []
+                    )
+                    combined_marks = hist_marks + obs_ticks + source_ticks + [mean_mark]
+                else:
+                    combined_marks = hist_marks
+
+                pdf = None
+                if not wsp_sub.empty:
+                    pdf = WspPdf(
+                        bands=[
+                            (int(r["percentage"]), int(r["pop_exposed"]))
+                            for _, r in wsp_sub.iterrows()
+                        ],
+                        x_offset=float(obsv_floor),
+                        color=wsp_color,
+                    )
+
+                combined_img = country_strip_chart(
+                    iso3, wsp, combined_marks,
+                    x_max=_chart_xmax,
+                    pdf=pdf,
+                    total_pop=_chart_total_pop,
+                )
+                _rp = _rp_text(float(our_val), iso3, wsp)
+                _rp_html = (
+                    f"<p style='font-size:0.78em;color:#666;"
+                    f"margin:-4px 0 10px;padding-left:2px'>{_rp}</p>"
+                    if _rp else ""
+                )
+                combined_blocks.append(
+                    f"<h5 style='{_H5}'>{wsp} kt</h5>{combined_img}{_rp_html}"
+                )
+
+            country_sections.append(
+                f"<h3 style='{_H3}'>{_cname(iso3)}</h3>"
+                + notice_html
+                + "".join(combined_blocks)
+            )
+
+        if toc_countries:
+            toc_storms.append(
+                {"label": storm_h2_label, "aid": aid, "countries": toc_countries}
+            )
+
+        if storm_map_parts or country_sections:
+            sections.append(
+                f"<h2 id='storm-{aid}' style='{_H2}'>{storm_h2_label}</h2>"
+                + "".join(storm_map_parts)
+                + "".join(country_sections)
+            )
+
+    _TD = "padding:6px 10px;border:1px solid #ddd;vertical-align:top"
+    _TH = (
+        "padding:6px 10px;border:1px solid #ddd;background:#f0f0f0;"
+        "text-align:left;font-weight:600;white-space:nowrap"
+    )
+    tbl_rows: list[str] = []
+    for _st in toc_storms:
+        _st_total_rows = sum(len(_c["wsps"]) for _c in _st["countries"])
+        _st_max_rp = max(
+            (_w["rp"] for _c in _st["countries"] for _w in _c["wsps"] if _w["rp"]),
+            default=None,
+        )
+        _st_color = _rp_color(_st_max_rp)
+        _st_first = True
+        for _c in _st["countries"]:
+            _c_rows = len(_c["wsps"])
+            _c_max_rp = max((_w["rp"] for _w in _c["wsps"] if _w["rp"]), default=None)
+            _c_color = _rp_color(_c_max_rp)
+            _c_name = _c["name"]
+            if _c["is_final"]:
+                _c_name += (
+                    " <em style='font-weight:normal;color:#888;"
+                    "font-size:0.85em'>(final)</em>"
+                )
+            _c_first = True
+            for _w in _c["wsps"]:
+                _rc = _rp_color(_w["rp"])
+                _rp_str = f"{_w['rp']:.0f}-year" if _w["rp"] else "—"
+                _row = "<tr>"
+                if _st_first:
+                    _bg = _st_color or "#fafafa"
+                    _st_link = (
+                        f"<a href='#storm-{_st['aid']}' "
+                        f"style='color:inherit;text-decoration:underline'>"
+                        f"{_st['label']}</a>"
+                    )
+                    _row += (
+                        f"<td rowspan='{_st_total_rows}' style='{_TD};"
+                        f"background:{_bg};font-weight:600'>"
+                        f"{_st_link}</td>"
+                    )
+                    _st_first = False
+                if _c_first:
+                    _bg = _c_color or "#fff"
+                    _row += (
+                        f"<td rowspan='{_c_rows}' style='{_TD};"
+                        f"background:{_bg}'>{_c_name}</td>"
+                    )
+                    _sim_html = "<br>".join(_c.get("similar", [])) or "—"
+                    _row += (
+                        f"<td rowspan='{_c_rows}' style='{_TD};font-size:0.82em;"
+                        f"color:#555;vertical-align:top'>{_sim_html}</td>"
+                    )
+                    _c_first = False
+                _cell_bg = _rc or "#fff"
+                _pct_part = ""
+                if _w.get("pct") is not None:
+                    _pct_int = min(int(round(_w["pct"])), 100)
+                    _pct_part = (
+                        f" <span style='color:#aaa;font-size:0.85em'>"
+                        f"({_pct_int}%)</span>"
+                    )
+                _row += (
+                    f"<td style='{_TD};text-align:center'>{_w['wsp']} kt</td>"
+                    f"<td style='{_TD};background:{_cell_bg};"
+                    f"text-align:right'>{_fmt_pop_toc(_w['total'])}{_pct_part}</td>"
+                    f"<td style='{_TD};background:{_cell_bg}'>{_rp_str}</td>"
+                    f"</tr>"
+                )
+                tbl_rows.append(_row)
+
+    toc_html = (
+        f"<table style='width:100%;border-collapse:collapse;"
+        f"margin:0 0 10px;font-size:0.88em'>"
+        f"<thead><tr>"
+        f"<th style='{_TH}'>Storm</th>"
+        f"<th style='{_TH}'>Country</th>"
+        f"<th style='{_TH}'>Similar storms</th>"
+        f"<th style='{_TH}'>Wind</th>"
+        f"<th style='{_TH}'>Exposure [% pop.]</th>"
+        f"<th style='{_TH}'>Return period</th>"
+        f"</tr></thead>"
+        f"<tbody>{''.join(tbl_rows)}</tbody>"
+        f"</table>"
+    )
+    already_passed_html = ""
+    if already_passed_pairs:
+        _passed_by_storm: dict[str, list[str]] = {}
+        for (_ap_aid, _ap_iso3), _ap_last_t in sorted(already_passed_pairs.items()):
+            _ap_t_str = _ap_last_t.strftime("%d %b %HZ")
+            _passed_by_storm.setdefault(_ap_aid, []).append(
+                f"{_cname(_ap_iso3)} ({_ap_t_str})"
+            )
+        _passed_parts = []
+        for _ap_aid, _ap_entries in _passed_by_storm.items():
+            _ap_label = _storm_label(*storm_meta.get(_ap_aid, (None, None)))
+            _passed_parts.append(f"{_ap_label}: {', '.join(sorted(_ap_entries))}")
+        already_passed_html = (
+            "<p style='font-size:0.88em;color:#666;margin:0 0 20px'>"
+            "<strong>Countries already passed</strong> "
+            "(see past emails for final exposure estimate): "
+            + "; ".join(_passed_parts)
+            + "</p>"
+        )
+
+    # Intro block: which of ADAM / GDACS / OCHA CHD contributed exposure data.
+    def _has_exposure(df) -> bool:
+        return (
+            df is not None and not df.empty
+            and "pop_exposed" in df.columns and (df["pop_exposed"] > 0).any()
+        )
+
+    _chd = (
+        _has_exposure(fcast_df) or _has_exposure(obsv_df) or _has_exposure(wsp_exp_df)
+    )
+    _src_flags = [
+        ("ADAM", _has_exposure(adam_cur_df)),
+        ("GDACS", _has_exposure(gdacs_cur_df)),
+        ("OCHA CHD", _chd),
+    ]
+    _present = [s for s, ok in _src_flags if ok]
+    _missing = [s for s, ok in _src_flags if not ok]
+
+    storm_names = [
+        _storm_label(storm_meta.get(aid, (None, None))[0], None)
+        for aid in _ordered_aids
+    ]
+    _n = len(storm_names)
+    _missing_sentence = (
+        f" Estimates from {_oxford(_missing)} were not accessed for this email."
+        if _missing else ""
+    )
+    _p = (
+        "font-family:sans-serif;color:#333;font-size:0.95em;"
+        "line-height:1.55;margin:0 0 14px"
+    )
+    intro_html = (
+        f"<p style='{_p}'>Dear colleagues,</p>"
+        f"<p style='{_p}'>NHC has issued their cyclone forecasts for "
+        f"{_format_issued_et(issued_time_dt)}. "
+        f"There {'is' if _n == 1 else 'are'} {_n} active "
+        f"storm{'' if _n == 1 else 's'}: <b>{', '.join(storm_names)}</b>.</p>"
+        f"<p style='{_p}'>This email consolidates exposure estimates from "
+        f"{_oxford(_present)}.{_missing_sentence}</p>"
+        f"<p style='{_p};margin-bottom:22px'>"
+        f"Best regards,<br>OCHA Centre for Humanitarian Data</p>"
+    )
+
+    _hr = "<hr style='border:none;border-top:1px solid #e2e2e2;margin:26px 0'>"
+    summary_header = f"<h2 style='{_H2}'>Summary table</h2>"
+    body = intro_html + _hr + summary_header + toc_html + already_passed_html
+    if sections:
+        body += _hr + _hr.join(sections)
+    return body, all_render_iso3s, storm_names
+
+
+def generate_exposure_csv(
+    engine, issued_time_dt: datetime
+) -> list[tuple[str, bytes]]:
+    """Return a list of (filename, csv_bytes) — one per active or final-update storm.
+
+    Each CSV has one row per country with columns:
+        country, iso3, is_final_alert,
+        pop_exposed_34kt, pop_exposed_50kt, pop_exposed_64kt,
+        sources_34kt, sources_50kt, sources_64kt
+    where pop_exposed is the mean across available sources (our est., ADAM, GDACS)
+    and sources_* lists which sources contributed (e.g. "our,ADAM,GDACS").
+    """
+    import pandas as _pd
+
+    fcast_df = fetch_fcast_exposure(engine, issued_time_dt)
+    all_atcf_ids = fcast_df["atcf_id"].unique().tolist()
+
+    prev_any_rows = fetch_prev_any_pairs(engine, issued_time_dt)
+    prev_any_pairs = {(r["atcf_id"], r["iso3"]) for r in prev_any_rows}
+    prev_atcf_ids = sorted({r["atcf_id"] for r in prev_any_rows})
+
+    current_any_pairs = {(r.atcf_id, r.iso3) for r in fcast_df.itertuples()}
+    final_update_pairs: set[tuple[str, str]] = prev_any_pairs - current_any_pairs
+
+    all_fetch_ids = sorted(set(all_atcf_ids) | {aid for aid, _ in final_update_pairs})
+    if not all_fetch_ids:
+        return []
+
+    obsv_df = fetch_current_obsv_exposure(engine, all_fetch_ids, issued_time_dt)
+    obsv_pairs = {
+        (r.atcf_id, r.iso3) for r in obsv_df.itertuples() if r.pop_exposed > 0
+    }
+    final_update_pairs = {p for p in final_update_pairs if p in obsv_pairs}
+
+    gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_fetch_ids)
+    adam_cur_df = fetch_adam_current_exposure(engine, all_fetch_ids)
+
+    # Storm metadata (name, season) for filenames
+    meta: dict[str, tuple] = {}
+    for _, row in fcast_df.drop_duplicates("atcf_id").iterrows():
+        meta[row["atcf_id"]] = (row["name"], row["season"])
+    for r in prev_any_rows:
+        if r["atcf_id"] not in meta:
+            meta[r["atcf_id"]] = (r["name"], r["season"])
+
+    # Group pairs by storm
+    storm_to_pairs: dict[str, list[tuple[str, str]]] = {}
+    for aid, iso3 in current_any_pairs | final_update_pairs:
+        storm_to_pairs.setdefault(aid, []).append((aid, iso3))
+
+    # Country name lookup
+    all_iso3s = sorted({iso3 for pairs in storm_to_pairs.values() for _, iso3 in pairs})
+    adm1 = load_adm1_boundaries(all_iso3s)
+    iso3_to_name = (
+        adm1.drop_duplicates("iso_3").set_index("iso_3")["adm0_name"].to_dict()
+    )
+
+    def _obsv(aid: str, iso3: str, wsp: int) -> int:
+        sub = obsv_df[
+            (obsv_df["atcf_id"] == aid)
+            & (obsv_df["iso3"] == iso3)
+            & (obsv_df["wind_speed_kt"] == wsp)
+        ]
+        return int(sub["pop_exposed"].sum()) if not sub.empty else 0
+
+    results: list[tuple[str, bytes]] = []
+    for aid in sorted(storm_to_pairs.keys()):
+        nm, ssn = meta.get(aid, (None, None))
+        storm_slug = _storm_label(nm, ssn).lower().replace(" ", "_")
+        filename = f"{storm_slug}_{aid}_issued_{issued_time_dt.strftime('%Y-%m-%dT%H')}.csv"
+
+        rows = []
+        for _, iso3 in sorted(storm_to_pairs[aid], key=lambda p: p[1]):
+            is_final = (aid, iso3) in final_update_pairs
+            row: dict = {
+                "country": iso3_to_name.get(iso3, iso3),
+                "iso3": iso3,
+                "is_final_alert": is_final,
+            }
+            for wsp in (34, 50, 64):
+                tr = fcast_df[
+                    (fcast_df["atcf_id"] == aid)
+                    & (fcast_df["iso3"] == iso3)
+                    & (fcast_df["wind_speed_kt"] == wsp)
+                ]
+                fcast_val = int(tr["pop_exposed"].iloc[0]) if not tr.empty else 0
+                our_val = fcast_val + _obsv(aid, iso3, wsp)
+
+                gr = gdacs_cur_df[
+                    (gdacs_cur_df["atcf_id"] == aid)
+                    & (gdacs_cur_df["iso3"] == iso3)
+                    & (gdacs_cur_df["wind_speed_kt"] == wsp)
+                ]
+                gdacs_val = int(gr["pop_exposed"].iloc[0]) if not gr.empty else 0
+
+                ar = adam_cur_df[
+                    (adam_cur_df["atcf_id"] == aid)
+                    & (adam_cur_df["iso3"] == iso3)
+                    & (adam_cur_df["wind_speed_kt"] == wsp)
+                ]
+                adam_val = int(ar["pop_exposed"].iloc[0]) if not ar.empty else 0
+
+                active = {
+                    k: v for k, v in
+                    {"our": our_val, "ADAM": adam_val, "GDACS": gdacs_val}.items()
+                    if v > 0
+                }
+                row[f"pop_exposed_{wsp}kt"] = (
+                    int(round(sum(active.values()) / len(active))) if active else 0
+                )
+                row[f"sources_{wsp}kt"] = (
+                    ",".join(_SRC_LABELS.get(k, k) for k in active) if active else ""
+                )
+            rows.append(row)
+
+        buf = io.StringIO()
+        _pd.DataFrame(rows).to_csv(buf, index=False)
+        results.append((filename, buf.getvalue().encode()))
+
+    return results
+
+
+def send_test_alert(engine, issued_time_dt: datetime) -> str:
+    """Generate and send a test email for the given issued time.
+
+    Uses TEST_LIST_IDS. Returns a human-readable status string.
+    Raises on failure (caller should catch for UI display).
+    """
+    import base64
+    import re as _re
+
+    from ocha_relay.listmonk import ListmonkClient
+
+    issued_time = issued_time_dt.strftime("%Y-%m-%dT%H")
+    result = generate_alert_html(engine, issued_time_dt)
+    if result is None:
+        active_meta = fetch_active_storm_meta(engine, issued_time_dt)
+        if not active_meta:
+            return "No active storms for this issued time — nothing to send."
+        body = generate_monitoring_html(engine, issued_time_dt, active_meta)
+        _names = [_storm_label(m["name"], None) for m in active_meta]
+        subject = _build_subject(issued_time_dt, _names, prefix="[TEST] ")
+        campaign_name = f"[TEST] ds-storms-alerts_monitoring_{issued_time}"
+        is_monitoring = True
+    else:
+        body, _, _names = result
+        subject = _build_subject(issued_time_dt, _names, prefix="[TEST] ")
+        campaign_name = f"[TEST] ds-storms-alerts_{issued_time}"
+        is_monitoring = False
+
+    client = ListmonkClient.from_env()
+
+    _uploaded: dict[str, str] = {}
+
+    def _upload_image(m: _re.Match) -> str:
+        b64 = m.group(1)
+        if b64 not in _uploaded:
+            _uploaded[b64] = client.upload_media(base64.b64decode(b64), "chart.png")
+        return _uploaded[b64]
+
+    body = _re.sub(r'data:image/png;base64,([A-Za-z0-9+/=]+)', _upload_image, body)
+
+    media_ids: list[int] = []
+    if not is_monitoring:
+        csv_files = generate_exposure_csv(engine, issued_time_dt)
+        for filename, csv_bytes in csv_files:
+            media_ids.append(client.upload_attachment(csv_bytes, filename))
+
+    cid = client.create_campaign(
+        name=campaign_name,
+        subject=subject,
+        body=body,
+        list_ids=TEST_LIST_IDS,
+        media_ids=media_ids,
+    )
+    client.send_campaign(cid, skip_confirmation=True)
+    return f"Sent campaign {cid}: {campaign_name!r}"
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    if args.issued_time:
+        issued_time_dt = datetime.strptime(args.issued_time, "%Y-%m-%dT%H")
+    else:
+        issued_time_dt = _most_recent_advisory_time()
+        logger.info(
+            f"No --issued-time provided; defaulted to most recent advisory "
+            f"hour {issued_time_dt.isoformat()}"
+        )
+    issued_time = issued_time_dt.strftime("%Y-%m-%dT%H")
+
+    preview = args.preview
+    stage = args.stage
+    logger.info(
+        f"Starting alert pipeline: {issued_time=} {stage=} "
+        f"{TEST_EMAIL=} {DRY_RUN=} {preview=}"
+    )
+
+    engine = stratus.get_engine(stage=stage)
+    result = generate_alert_html(engine, issued_time_dt)
+
+    if result is None:
+        active_meta = fetch_active_storm_meta(engine, issued_time_dt)
+        if not active_meta:
+            logger.info("No active storms this advisory — nothing to send.")
+            sys.exit(0)
+        logger.info(
+            f"Active storms but no exposure: {[m['atcf_id'] for m in active_meta]}"
+        )
+        body = generate_monitoring_html(engine, issued_time_dt, active_meta)
+        active_iso3s: list[str] = []
+        _names = [_storm_label(m["name"], None) for m in active_meta]
+        is_monitoring = True
+    else:
+        body, active_iso3s, _names = result
+        is_monitoring = False
+
+    prefix = "[TEST] " if TEST_EMAIL else ""
+    subject = _build_subject(issued_time_dt, _names, prefix=prefix)
+    if is_monitoring:
+        campaign_name = f"{prefix}ds-storms-alerts_monitoring_{issued_time}"
+    else:
+        campaign_name = f"{prefix}ds-storms-alerts_{issued_time}"
+
+    if preview:
+        style = "font-family:sans-serif;max-width:900px;margin:auto"
+        html = f"<html><body style='{style}'>{body}</body></html>"
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".html",
+            prefix=f"storms_preview_{issued_time}_",
+            delete=False,
+            encoding="utf-8",
+        ) as f:
+            f.write(html)
+        path = Path(f.name)
+        webbrowser.open(path.as_uri())
+        logger.info(f"Preview opened: {path}")
+        sys.exit(0)
+
+    if DRY_RUN:
+        target = (
+            "monitoring list only" if is_monitoring
+            else f"countries {active_iso3s}"
+        )
+        logger.info(
+            f"DRY_RUN=True — skipping email. "
+            f"Would have sent: {subject!r} to {target}"
+        )
+    else:
+        from ocha_relay.listmonk import ListmonkClient
+
+        client = ListmonkClient.from_env()
+
+        if is_monitoring:
+            list_ids = _fetch_monitoring_list_ids(client)
+            if not list_ids:
+                logger.info("No aggregate:monitoring list — skipping send.")
+                sys.exit(0)
+        elif TEST_EMAIL:
+            list_ids = TEST_LIST_IDS
+        else:
+            logger.info(f"Resolving per-country lists for: {active_iso3s}")
+            list_ids = resolve_country_list_ids(client, active_iso3s)
+        logger.info(f"Targeting list IDs: {list_ids}")
+
+        logger.info("Uploading images to listmonk media library...")
+        _uploaded: dict[str, str] = {}
+
+        def _upload_image(m: re.Match) -> str:
+            b64 = m.group(1)
+            if b64 not in _uploaded:
+                _uploaded[b64] = client.upload_media(
+                    base64.b64decode(b64), "chart.png"
+                )
+            return _uploaded[b64]
+
+        body = re.sub(
+            r'data:image/png;base64,([A-Za-z0-9+/=]+)',
+            _upload_image,
+            body,
+        )
+        logger.info(f"Uploaded {len(_uploaded)} images.")
+
+        media_ids: list[int] = []
+        if not is_monitoring:
+            logger.info("Generating and uploading CSV attachments...")
+            csv_files = generate_exposure_csv(engine, issued_time_dt)
+            for filename, csv_bytes in csv_files:
+                media_ids.append(client.upload_attachment(csv_bytes, filename))
+                logger.info(f"  Attached {filename}")
+
+        cid = client.create_campaign(
+            name=campaign_name,
+            subject=subject,
+            body=body,
+            list_ids=list_ids,
+            media_ids=media_ids,
+        )
+        logger.info(f"Created campaign {cid}: {campaign_name!r}")
+        client.send_campaign(cid, skip_confirmation=True)
+        logger.info(f"Sent campaign {cid}")
+
+    logger.info("Alert pipeline complete.")
