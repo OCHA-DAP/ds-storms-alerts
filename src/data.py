@@ -34,6 +34,13 @@ _BLOB_ADM0_PREFIX = _BLOB_BASE + "adm0/"
 _ADMIN_LEVEL = 0
 _WIND_SPEEDS_KT = (34, 50, 64)
 
+# NHC publishes the WSP product on a 6-hourly synoptic grid (00/06/12/18Z),
+# which lags the 3-hourly track-advisory grid (…/15/18/21Z) by 3 hours. So a
+# track advisory has no exact-time WSP match on the off-grid hours (03/09/15/21);
+# pair it with the WSP issued exactly 3 h earlier (e.g. 15:00 advisory → 12:00
+# WSP), preferring an exact match when one exists (synoptic advisories).
+_WSP_OFFSET_HOURS = 3
+
 
 def fetch_fcast_exposure(engine: Engine, issued_time: datetime) -> pd.DataFrame:
     """Forecast-only exposure for all wind speeds at issued_time (admin0, > 0).
@@ -384,20 +391,32 @@ def fetch_wsp_fcastonly_exposure(
     cols = ["atcf_id", "iso3", "wind_threshold_kt", "percentage", "pop_exposed"]
     if not atcf_ids:
         return pd.DataFrame(columns=cols)
+    # Match the WSP issued at the advisory time, or exactly _WSP_OFFSET_HOURS
+    # earlier; per storm keep the later of the two if both exist (see note above).
     sql = text("""
-        SELECT atcf_id, pcode AS iso3, wind_threshold_kt, percentage, pop_exposed
-        FROM storms.nhc_wsp_fcastonly_exposure
-        WHERE atcf_id IN :atcf_ids
-          AND issued_time = :issued_time
-          AND admin_level = :admin_level
-        ORDER BY atcf_id, iso3, wind_threshold_kt, percentage
+        WITH cand AS (
+            SELECT atcf_id, pcode AS iso3, wind_threshold_kt, percentage,
+                   pop_exposed, issued_time
+            FROM storms.nhc_wsp_fcastonly_exposure
+            WHERE atcf_id IN :atcf_ids
+              AND issued_time IN (:t_exact, :t_prev)
+              AND admin_level = :admin_level
+        ),
+        latest AS (
+            SELECT atcf_id, MAX(issued_time) AS it FROM cand GROUP BY atcf_id
+        )
+        SELECT c.atcf_id, c.iso3, c.wind_threshold_kt, c.percentage, c.pop_exposed
+        FROM cand c
+        JOIN latest l ON c.atcf_id = l.atcf_id AND c.issued_time = l.it
+        ORDER BY c.atcf_id, c.iso3, c.wind_threshold_kt, c.percentage
     """).bindparams(bindparam("atcf_ids", expanding=True))
     with engine.connect() as conn:
         result = conn.execute(
             sql,
             {
                 "atcf_ids": atcf_ids,
-                "issued_time": issued_time,
+                "t_exact": issued_time,
+                "t_prev": issued_time - timedelta(hours=_WSP_OFFSET_HOURS),
                 "admin_level": _ADMIN_LEVEL,
             },
         )
@@ -418,19 +437,30 @@ def fetch_wsp_fcastonly_polygons(
         return gpd.GeoDataFrame(
             columns=["atcf_id", "percentage", "geometry"], crs="EPSG:4326"
         )
+    # Match the WSP issued at the advisory time, or exactly _WSP_OFFSET_HOURS
+    # earlier; per storm keep the later of the two if both exist (see note above).
     sql = text("""
-        SELECT atcf_id, percentage, geometry
-        FROM storms.nhc_wsp_fcastonly_polygon
-        WHERE atcf_id IN :atcf_ids
-          AND issued_time = :issued_time
-          AND wind_threshold_kt = :wind_threshold_kt
-          AND geometry IS NOT NULL
+        WITH cand AS (
+            SELECT atcf_id, percentage, geometry, issued_time
+            FROM storms.nhc_wsp_fcastonly_polygon
+            WHERE atcf_id IN :atcf_ids
+              AND issued_time IN (:t_exact, :t_prev)
+              AND wind_threshold_kt = :wind_threshold_kt
+              AND geometry IS NOT NULL
+        ),
+        latest AS (
+            SELECT atcf_id, MAX(issued_time) AS it FROM cand GROUP BY atcf_id
+        )
+        SELECT c.atcf_id, c.percentage, c.geometry
+        FROM cand c
+        JOIN latest l ON c.atcf_id = l.atcf_id AND c.issued_time = l.it
     """).bindparams(bindparam("atcf_ids", expanding=True))
     return gpd.read_postgis(
         sql, engine,
         params={
             "atcf_ids": atcf_ids,
-            "issued_time": issued_time,
+            "t_exact": issued_time,
+            "t_prev": issued_time - timedelta(hours=_WSP_OFFSET_HOURS),
             "wind_threshold_kt": wind_threshold_kt,
         },
         geom_col="geometry",
