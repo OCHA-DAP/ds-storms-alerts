@@ -900,11 +900,13 @@ def generate_alert_html(
             )
 
         if toc_countries:
-            toc_storms.append({"label": storm_h2_label, "countries": toc_countries})
+            toc_storms.append(
+                {"label": storm_h2_label, "aid": aid, "countries": toc_countries}
+            )
 
         if storm_map_parts or country_sections:
             sections.append(
-                f"<h2 style='{_H2}'>{storm_h2_label}</h2>"
+                f"<h2 id='storm-{aid}' style='{_H2}'>{storm_h2_label}</h2>"
                 + "".join(storm_map_parts)
                 + "".join(country_sections)
             )
@@ -940,10 +942,15 @@ def generate_alert_html(
                 _row = "<tr>"
                 if _st_first:
                     _bg = _st_color or "#fafafa"
+                    _st_link = (
+                        f"<a href='#storm-{_st['aid']}' "
+                        f"style='color:inherit;text-decoration:underline'>"
+                        f"{_st['label']}</a>"
+                    )
                     _row += (
                         f"<td rowspan='{_st_total_rows}' style='{_TD};"
                         f"background:{_bg};font-weight:600'>"
-                        f"{_st['label']}</td>"
+                        f"{_st_link}</td>"
                     )
                     _st_first = False
                 if _c_first:
@@ -977,7 +984,7 @@ def generate_alert_html(
 
     toc_html = (
         f"<table style='width:100%;border-collapse:collapse;"
-        f"margin:0 0 28px;font-size:0.88em'>"
+        f"margin:0 0 10px;font-size:0.88em'>"
         f"<thead><tr>"
         f"<th style='{_TH}'>Storm</th>"
         f"<th style='{_TH}'>Country</th>"
@@ -1052,11 +1059,12 @@ def generate_alert_html(
         f"Best regards,<br>OCHA Centre for Humanitarian Data</p>"
     )
 
-    return (
-        intro_html + toc_html + already_passed_html + "\n".join(sections),
-        all_render_iso3s,
-        storm_names,
-    )
+    _hr = "<hr style='border:none;border-top:1px solid #e2e2e2;margin:26px 0'>"
+    summary_header = f"<h2 style='{_H2}'>Summary table</h2>"
+    body = intro_html + _hr + summary_header + toc_html + already_passed_html
+    if sections:
+        body += _hr + _hr.join(sections)
+    return body, all_render_iso3s, storm_names
 
 
 def generate_exposure_csv(
