@@ -38,7 +38,7 @@ variables:
     default: "0515-161935-i2w5mxhc"
   git_branch:
     description: Branch the job pulls the pipeline from
-    default: initial-pipeline
+    default: main
   # Send-mode switches (the DBX analog of the GHA repo vars). Flip without
   # editing files via, e.g.:  databricks bundle deploy -t prod --var test_email=False
   dry_run:
