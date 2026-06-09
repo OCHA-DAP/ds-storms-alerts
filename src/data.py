@@ -34,12 +34,12 @@ _BLOB_ADM0_PREFIX = _BLOB_BASE + "adm0/"
 _ADMIN_LEVEL = 0
 _WIND_SPEEDS_KT = (34, 50, 64)
 
-# NHC publishes the WSP product on a 6-hourly synoptic grid (00/06/12/18Z),
-# which lags the 3-hourly track-advisory grid (…/15/18/21Z) by 3 hours. So a
-# track advisory has no exact-time WSP match on the off-grid hours (03/09/15/21);
-# pair it with the WSP issued exactly 3 h earlier (e.g. 15:00 advisory → 12:00
-# WSP), preferring an exact match when one exists (synoptic advisories).
-_WSP_OFFSET_HOURS = 3
+# Auxiliary products (WSP polygons/exposure, and the GDACS/ADAM exposure, whose
+# valid_time tracks the NHC advisory time) are paired with the track advisory by
+# matching the advisory time OR exactly this many hours earlier — taking the later
+# of the two when both exist. This covers both the WSP synoptic-grid lag
+# (e.g. 15:00 advisory → 12:00 WSP) and a one-cycle lag in GDACS/ADAM publication.
+_ISSUED_OFFSET_HOURS = 3
 
 
 def fetch_fcast_exposure(engine: Engine, issued_time: datetime) -> pd.DataFrame:
@@ -103,10 +103,13 @@ def fetch_current_obsv_exposure(
 
 
 def fetch_gdacs_current_exposure(
-    engine: Engine, atcf_ids: list[str]
+    engine: Engine, atcf_ids: list[str], issued_time: datetime
 ) -> pd.DataFrame:
-    """Latest GDACS exposure per (atcf_id, iso3, wind_speed_kt) for active storms.
+    """GDACS exposure per (atcf_id, iso3, wind_speed_kt) for the given advisory.
 
+    GDACS exposure has no issued_time, but its valid_time tracks the NHC advisory
+    time. Match valid_time to the advisory time, or _ISSUED_OFFSET_HOURS earlier,
+    preferring the exact one (valid_time DESC) — same rule as the WSP fetches.
     Returns columns: atcf_id, iso3, wind_speed_kt, pop_exposed, name, season.
     """
     cols = ["atcf_id", "iso3", "wind_speed_kt", "pop_exposed", "name", "season"]
@@ -122,21 +125,30 @@ def fetch_gdacs_current_exposure(
         WHERE lk.atcf_id IN :atcf_ids
           AND g.admin_level = :admin_level
           AND g.pop_exposed > 0
+          AND g.valid_time IN (:t_exact, :t_prev)
         ORDER BY lk.atcf_id, g.iso3, g.wind_speed_kt, g.valid_time DESC
     """).bindparams(bindparam("atcf_ids", expanding=True))
     with engine.connect() as conn:
         result = conn.execute(
             sql,
-            {"atcf_ids": atcf_ids, "admin_level": _ADMIN_LEVEL},
+            {
+                "atcf_ids": atcf_ids,
+                "admin_level": _ADMIN_LEVEL,
+                "t_exact": issued_time,
+                "t_prev": issued_time - timedelta(hours=_ISSUED_OFFSET_HOURS),
+            },
         )
         return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
 
 
 def fetch_adam_current_exposure(
-    engine: Engine, atcf_ids: list[str]
+    engine: Engine, atcf_ids: list[str], issued_time: datetime
 ) -> pd.DataFrame:
-    """Latest ADAM exposure per (atcf_id, iso3, wind_speed_kt) for active storms.
+    """ADAM exposure per (atcf_id, iso3, wind_speed_kt) for the given advisory.
 
+    ADAM exposure has no issued_time, but its valid_time tracks the NHC advisory
+    time. Match valid_time to the advisory time, or _ISSUED_OFFSET_HOURS earlier,
+    preferring the exact one (valid_time DESC) — same rule as the WSP fetches.
     Returns columns: atcf_id, iso3, wind_speed_kt, pop_exposed, name, season.
     """
     cols = ["atcf_id", "iso3", "wind_speed_kt", "pop_exposed", "name", "season"]
@@ -152,12 +164,18 @@ def fetch_adam_current_exposure(
         WHERE lk.atcf_id IN :atcf_ids
           AND a.admin_level = :admin_level
           AND a.pop_exposed > 0
+          AND a.valid_time IN (:t_exact, :t_prev)
         ORDER BY lk.atcf_id, a.iso3, a.wind_speed_kt, a.valid_time DESC
     """).bindparams(bindparam("atcf_ids", expanding=True))
     with engine.connect() as conn:
         result = conn.execute(
             sql,
-            {"atcf_ids": atcf_ids, "admin_level": _ADMIN_LEVEL},
+            {
+                "atcf_ids": atcf_ids,
+                "admin_level": _ADMIN_LEVEL,
+                "t_exact": issued_time,
+                "t_prev": issued_time - timedelta(hours=_ISSUED_OFFSET_HOURS),
+            },
         )
         return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
 
@@ -391,7 +409,7 @@ def fetch_wsp_fcastonly_exposure(
     cols = ["atcf_id", "iso3", "wind_threshold_kt", "percentage", "pop_exposed"]
     if not atcf_ids:
         return pd.DataFrame(columns=cols)
-    # Match the WSP issued at the advisory time, or exactly _WSP_OFFSET_HOURS
+    # Match the WSP issued at the advisory time, or exactly _ISSUED_OFFSET_HOURS
     # earlier; per storm keep the later of the two if both exist (see note above).
     sql = text("""
         WITH cand AS (
@@ -416,7 +434,7 @@ def fetch_wsp_fcastonly_exposure(
             {
                 "atcf_ids": atcf_ids,
                 "t_exact": issued_time,
-                "t_prev": issued_time - timedelta(hours=_WSP_OFFSET_HOURS),
+                "t_prev": issued_time - timedelta(hours=_ISSUED_OFFSET_HOURS),
                 "admin_level": _ADMIN_LEVEL,
             },
         )
@@ -437,7 +455,7 @@ def fetch_wsp_fcastonly_polygons(
         return gpd.GeoDataFrame(
             columns=["atcf_id", "percentage", "geometry"], crs="EPSG:4326"
         )
-    # Match the WSP issued at the advisory time, or exactly _WSP_OFFSET_HOURS
+    # Match the WSP issued at the advisory time, or exactly _ISSUED_OFFSET_HOURS
     # earlier; per storm keep the later of the two if both exist (see note above).
     sql = text("""
         WITH cand AS (
@@ -460,7 +478,7 @@ def fetch_wsp_fcastonly_polygons(
         params={
             "atcf_ids": atcf_ids,
             "t_exact": issued_time,
-            "t_prev": issued_time - timedelta(hours=_WSP_OFFSET_HOURS),
+            "t_prev": issued_time - timedelta(hours=_ISSUED_OFFSET_HOURS),
             "wind_threshold_kt": wind_threshold_kt,
         },
         geom_col="geometry",

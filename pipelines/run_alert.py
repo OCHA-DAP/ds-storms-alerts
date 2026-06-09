@@ -404,7 +404,7 @@ def generate_alert_html(
     }
 
     logger.info("Fetching GDACS current exposure...")
-    gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_render_atcf_ids)
+    gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_render_atcf_ids, issued_time_dt)
 
     logger.info("Fetching GDACS historical exposure...")
     gdacs_hist_df = fetch_gdacs_historical_exposure(
@@ -413,7 +413,7 @@ def generate_alert_html(
     gdacs_hist_df = gdacs_hist_df[gdacs_hist_df["season"] >= 2002].reset_index(drop=True)
 
     logger.info("Fetching ADAM current exposure...")
-    adam_cur_df = fetch_adam_current_exposure(engine, all_render_atcf_ids)
+    adam_cur_df = fetch_adam_current_exposure(engine, all_render_atcf_ids, issued_time_dt)
 
     logger.info("Fetching ADAM historical exposure...")
     adam_hist_df = fetch_adam_historical_exposure(
@@ -1127,8 +1127,8 @@ def generate_exposure_csv(
     }
     final_update_pairs = {p for p in final_update_pairs if p in obsv_pairs}
 
-    gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_fetch_ids)
-    adam_cur_df = fetch_adam_current_exposure(engine, all_fetch_ids)
+    gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_fetch_ids, issued_time_dt)
+    adam_cur_df = fetch_adam_current_exposure(engine, all_fetch_ids, issued_time_dt)
 
     # Storm metadata (name, season) for filenames
     meta: dict[str, tuple] = {}
