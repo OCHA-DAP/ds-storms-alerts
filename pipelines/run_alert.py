@@ -1134,8 +1134,18 @@ def _build_adm1_rows(
 
     Enumerates every (iso3, fm_pcode) seen in ANY adm1 source for this storm's
     countries, then for each wind speed takes the MAX across CHD (fcast + obsv),
-    ADAM and GDACS — mirroring the admin-0 logic one level down. Returns only
-    units with at least one positive estimate.
+    ADAM and GDACS — mirroring the admin-0 logic one level down.
+
+    The set of sources is held **consistent across all admin-1 units within a
+    storm-country** (per wind speed): a source counts as "used" for the country
+    if it covers any of that country's units at that wind speed, and then every
+    unit's figure is the MAX over that same set (a source that doesn't reach a
+    given unit simply contributes 0). This keeps the units directly comparable —
+    every row in a country reflects the same sources — rather than one unit being
+    max(CHD, ADAM) and its neighbour ADAM-only. The numeric MAX is unchanged by
+    this (adding zeros never changes a maximum); only the `sources_*` labels
+    become uniform per country. Returns only units with at least one positive
+    estimate.
     """
     import pandas as _pd
 
@@ -1175,6 +1185,23 @@ def _build_adm1_rows(
             if _pd.notna(r.fm_pcode)
         }
 
+    # First pass: per-unit source values, and the consistent set of sources used
+    # for each (iso3, wind speed) — a source is "used" for the country if it
+    # covers any unit there at that wind speed.
+    unit_vals: dict[tuple[str, str, int], dict[str, int]] = {}
+    sources_used: dict[tuple[str, int], set[str]] = {}
+    for iso3, pcode in adm1_keys:
+        for wsp in (34, 50, 64):
+            vals = {
+                "our": _num(f1, iso3, pcode, wsp) + _num(o1, iso3, pcode, wsp),
+                "ADAM": _num(a1, iso3, pcode, wsp),
+                "GDACS": _num(g1, iso3, pcode, wsp),
+            }
+            unit_vals[(iso3, pcode, wsp)] = vals
+            used = sources_used.setdefault((iso3, wsp), set())
+            used |= {k for k, v in vals.items() if v > 0}
+
+    # Second pass: build a row per unit, MAX over the country's consistent set.
     out: list[dict] = []
     for iso3, pcode in sorted(adm1_keys):
         row: dict = {
@@ -1187,18 +1214,14 @@ def _build_adm1_rows(
         }
         any_value = False
         for wsp in (34, 50, 64):
-            our_val = _num(f1, iso3, pcode, wsp) + _num(o1, iso3, pcode, wsp)
-            gdacs_val = _num(g1, iso3, pcode, wsp)
-            adam_val = _num(a1, iso3, pcode, wsp)
-            active = {
-                k: v for k, v in
-                {"our": our_val, "ADAM": adam_val, "GDACS": gdacs_val}.items()
-                if v > 0
-            }
-            row[f"pop_exposed_{wsp}kt"] = max(active.values()) if active else 0
-            row[f"sources_{wsp}kt"] = (
-                ",".join(_SRC_LABELS.get(k, k) for k in active) if active else ""
+            vals = unit_vals[(iso3, pcode, wsp)]
+            used = sources_used.get((iso3, wsp), set())
+            # Iterate in canonical order so the source list is stable.
+            ordered = [k for k in ("our", "ADAM", "GDACS") if k in used]
+            row[f"pop_exposed_{wsp}kt"] = (
+                max(vals[k] for k in ordered) if ordered else 0
             )
+            row[f"sources_{wsp}kt"] = ",".join(_SRC_LABELS[k] for k in ordered)
             cavs = [
                 c for c in (
                     _caveat(g1, iso3, pcode, wsp),
@@ -1206,7 +1229,7 @@ def _build_adm1_rows(
                 ) if c
             ]
             row[f"caveat_{wsp}kt"] = " | ".join(dict.fromkeys(cavs))
-            any_value = any_value or bool(active)
+            any_value = any_value or any(v > 0 for v in vals.values())
         if any_value:
             out.append(row)
     return out
@@ -1224,12 +1247,14 @@ def generate_exposure_csv(
         sources_34kt, sources_50kt, sources_64kt,
         caveat_34kt, caveat_50kt, caveat_64kt
     pop_exposed is the MAX across available sources (CHD, ADAM, GDACS) per unit,
-    and sources_* lists which sources contributed (e.g. "CHD,ADAM,GDACS"). At
+    and sources_* lists which sources were used (e.g. "CHD,ADAM,GDACS"). At
     admin 1 the three sources are harmonized onto a common FieldMaps pcode
-    (`pcode`/`adm1_name`); because MAX is taken per unit independently, admin 1
-    figures do NOT necessarily sum to the country total. caveat_* carries any
-    GDACS/ADAM matching caveat for that unit (e.g. a pre-split boundary). admin 0
-    rows leave pcode/adm1_name/caveat_* blank.
+    (`pcode`/`adm1_name`), and the source set is held consistent across all
+    admin-1 units within a storm-country (per wind speed) so the units are
+    directly comparable — see _build_adm1_rows. Because MAX is taken per unit
+    independently, admin 1 figures do NOT necessarily sum to the country total.
+    caveat_* carries any GDACS/ADAM matching caveat for that unit (e.g. a
+    pre-split boundary). admin 0 rows leave pcode/adm1_name/caveat_* blank.
     """
     import pandas as _pd
 
