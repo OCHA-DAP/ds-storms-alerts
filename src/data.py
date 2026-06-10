@@ -109,7 +109,9 @@ def fetch_gdacs_current_exposure(
 
     GDACS exposure has no issued_time, but its valid_time tracks the NHC advisory
     time. Match valid_time to the advisory time, or _ISSUED_OFFSET_HOURS earlier,
-    preferring the exact one (valid_time DESC) — same rule as the WSP fetches.
+    keeping the later of the two when both exist — done at the SQL level by
+    DISTINCT ON (atcf_id, iso3, wind_speed_kt) + ORDER BY valid_time DESC, so a
+    single row per group is returned (no downstream dedup). Same rule as the WSP fetches.
     Returns columns: atcf_id, iso3, wind_speed_kt, pop_exposed, name, season.
     """
     cols = ["atcf_id", "iso3", "wind_speed_kt", "pop_exposed", "name", "season"]
@@ -148,7 +150,9 @@ def fetch_adam_current_exposure(
 
     ADAM exposure has no issued_time, but its valid_time tracks the NHC advisory
     time. Match valid_time to the advisory time, or _ISSUED_OFFSET_HOURS earlier,
-    preferring the exact one (valid_time DESC) — same rule as the WSP fetches.
+    keeping the later of the two when both exist — done at the SQL level by
+    DISTINCT ON (atcf_id, iso3, wind_speed_kt) + ORDER BY valid_time DESC, so a
+    single row per group is returned (no downstream dedup). Same rule as the WSP fetches.
     Returns columns: atcf_id, iso3, wind_speed_kt, pop_exposed, name, season.
     """
     cols = ["atcf_id", "iso3", "wind_speed_kt", "pop_exposed", "name", "season"]

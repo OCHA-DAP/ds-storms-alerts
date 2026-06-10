@@ -747,8 +747,9 @@ def generate_alert_html(
                     {"our": _our, "ADAM": _adam_v, "GDACS": _gdacs_v}.items()
                     if v > 0
                 }
-                # Combine sources by taking the MAX across available sources
-                # (CHD / ADAM / GDACS), not the mean.
+                # Combine sources by MAX, not mean: alerts bias to action — the
+                # highest credible estimate across CHD/ADAM/GDACS is the
+                # operationally relevant figure, even when one source is conservative.
                 _tot = max(_toc_active.values()) if _toc_active else 0
                 if _tot > 0:
                     _tp = iso3_to_total_pop.get(iso3, 0)
@@ -856,7 +857,8 @@ def generate_alert_html(
                 )
 
                 if active_sources:
-                    # Combined estimate = MAX across available sources, not the mean.
+                    # Combined estimate = MAX across sources, not mean (bias to
+                    # action — see _tot in the ToC loop for the full rationale).
                     agg_val = max(active_sources.values())
                     _is_final = (aid, iso3) in final_update_pairs
                     _final_suffix = "Estimated\nfinal exposure" if _is_final else "Forecasted\nfinal exposure"
@@ -1053,6 +1055,14 @@ def generate_alert_html(
     ]
     _present = [s for s, ok in _src_flags if ok]
     _missing = [s for s, ok in _src_flags if not ok]
+    if _missing:
+        # Surfaces a source that didn't match this advisory's issued_time (e.g.
+        # ADAM/GDACS publishing >3h late) so the consolidated MAX silently
+        # degrading to fewer sources is at least visible in the run logs.
+        logger.warning(
+            f"No exposure matched for source(s) {_missing} at issued_time "
+            f"{issued_time} (or -3h); consolidated figures use {_present} only."
+        )
 
     storm_names = [
         _storm_label(storm_meta.get(aid, (None, None))[0], None)
@@ -1203,6 +1213,8 @@ def generate_exposure_csv(
                     {"our": our_val, "ADAM": adam_val, "GDACS": gdacs_val}.items()
                     if v > 0
                 }
+                # MAX across sources, not mean (bias to action — see the alert
+                # ToC loop for the rationale).
                 row[f"pop_exposed_{wsp}kt"] = (
                     max(active.values()) if active else 0
                 )

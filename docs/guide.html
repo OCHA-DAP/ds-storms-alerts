@@ -230,6 +230,16 @@
     <li><strong>Estimated final exposure</strong> (bold mark, final updates only) — same as above but for final-update advisories where all exposure is observed.</li>
     <li><strong>Shaded area</strong> — when present, shows the probabilistic WSP forecast distribution: the spread of possible outcomes rather than a single deterministic value.</li>
   </ul>
+  <div class="callout">
+    <p><strong>Comparing the bold mark to history.</strong> The grey historical
+    marks (and the return period) use the <strong>CHD-only</strong> estimate, because
+    CHD is the only source with a consistent record back to 2002. The bold
+    "final exposure" mark, however, is the <strong>maximum across sources</strong>, so
+    it is intentionally at least as high as any single source and is <em>not</em>
+    directly comparable to the grey CHD-only distribution. For a like-for-like
+    historical read, use the individual <strong>CHD</strong> tick (and the return
+    period); the bold mark is the consolidated operational headline.</p>
+  </div>
 
   <h3>Maps</h3>
   <p>Up to two maps are included per storm when the relevant data is available:</p>
@@ -282,6 +292,13 @@
     advisory cycle even when a source lags slightly. The probabilistic WSP product, in
     particular, is published on a 6-hourly cycle and is matched this way to the
     advisory.
+  </p>
+  <p>
+    If a source is delayed beyond that window (more than three hours late for a given
+    advisory), it is simply omitted from that email rather than shown with stale
+    figures — the consolidated number degrades gracefully to whichever sources are
+    available (in the limit, CHD only). The intro paragraph always lists which sources
+    contributed and flags any that were not available.
   </p>
 
   <h2>Questions and feedback</h2>
