@@ -404,7 +404,7 @@ def generate_alert_html(
     }
 
     logger.info("Fetching GDACS current exposure...")
-    gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_render_atcf_ids)
+    gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_render_atcf_ids, issued_time_dt)
 
     logger.info("Fetching GDACS historical exposure...")
     gdacs_hist_df = fetch_gdacs_historical_exposure(
@@ -413,7 +413,7 @@ def generate_alert_html(
     gdacs_hist_df = gdacs_hist_df[gdacs_hist_df["season"] >= 2002].reset_index(drop=True)
 
     logger.info("Fetching ADAM current exposure...")
-    adam_cur_df = fetch_adam_current_exposure(engine, all_render_atcf_ids)
+    adam_cur_df = fetch_adam_current_exposure(engine, all_render_atcf_ids, issued_time_dt)
 
     logger.info("Fetching ADAM historical exposure...")
     adam_hist_df = fetch_adam_historical_exposure(
@@ -747,10 +747,10 @@ def generate_alert_html(
                     {"our": _our, "ADAM": _adam_v, "GDACS": _gdacs_v}.items()
                     if v > 0
                 }
-                _tot = (
-                    int(round(sum(_toc_active.values()) / len(_toc_active)))
-                    if _toc_active else 0
-                )
+                # Combine sources by MAX, not mean: alerts bias to action — the
+                # highest credible estimate across CHD/ADAM/GDACS is the
+                # operationally relevant figure, even when one source is conservative.
+                _tot = max(_toc_active.values()) if _toc_active else 0
                 if _tot > 0:
                     _tp = iso3_to_total_pop.get(iso3, 0)
                     _toc_wsps.append({
@@ -857,13 +857,15 @@ def generate_alert_html(
                 )
 
                 if active_sources:
-                    mean_val = int(round(sum(active_sources.values()) / len(active_sources)))
+                    # Combined estimate = MAX across sources, not mean (bias to
+                    # action — see _tot in the ToC loop for the full rationale).
+                    agg_val = max(active_sources.values())
                     _is_final = (aid, iso3) in final_update_pairs
-                    _mean_suffix = "Estimated\nfinal exposure" if _is_final else "Forecasted\nfinal exposure"
+                    _final_suffix = "Estimated\nfinal exposure" if _is_final else "Forecasted\nfinal exposure"
                     _storm_name = _storm_label(name_aid, None)
-                    mean_mark = StormMark(
-                        value=mean_val,
-                        label=_mean_suffix,
+                    agg_mark = StormMark(
+                        value=agg_val,
+                        label=_final_suffix,
                         bold_prefix=_storm_name,
                         color=wsp_color,
                         bold=True,
@@ -882,7 +884,7 @@ def generate_alert_html(
                         )]
                         if obsv_floor > 0 and not _is_final else []
                     )
-                    combined_marks = hist_marks + obs_ticks + source_ticks + [mean_mark]
+                    combined_marks = hist_marks + obs_ticks + source_ticks + [agg_mark]
                 else:
                     combined_marks = hist_marks
 
@@ -1020,7 +1022,7 @@ def generate_alert_html(
     if already_passed_pairs:
         _passed_by_storm: dict[str, list[str]] = {}
         for (_ap_aid, _ap_iso3), _ap_last_t in sorted(already_passed_pairs.items()):
-            _ap_t_str = _ap_last_t.strftime("%d %b %HZ")
+            _ap_t_str = _format_issued_et(_ap_last_t)
             _passed_by_storm.setdefault(_ap_aid, []).append(
                 f"{_cname(_ap_iso3)} ({_ap_t_str})"
             )
@@ -1053,6 +1055,14 @@ def generate_alert_html(
     ]
     _present = [s for s, ok in _src_flags if ok]
     _missing = [s for s, ok in _src_flags if not ok]
+    if _missing:
+        # Surfaces a source that didn't match this advisory's issued_time (e.g.
+        # ADAM/GDACS publishing >3h late) so the consolidated MAX silently
+        # degrading to fewer sources is at least visible in the run logs.
+        logger.warning(
+            f"No exposure matched for source(s) {_missing} at issued_time "
+            f"{issued_time} (or -3h); consolidated figures use {_present} only."
+        )
 
     storm_names = [
         _storm_label(storm_meta.get(aid, (None, None))[0], None)
@@ -1070,7 +1080,7 @@ def generate_alert_html(
     intro_html = (
         f"<p style='{_p}'>Dear colleagues,</p>"
         f"<p style='{_p}'>NHC has issued their cyclone forecasts for "
-        f"{_format_issued_et(issued_time_dt)}. "
+        f"{_format_issued_et(issued_time_dt)} (NY time). "
         f"There {'is' if _n == 1 else 'are'} {_n} active "
         f"storm{'' if _n == 1 else 's'}: <b>{', '.join(storm_names)}</b>.</p>"
         f"<p style='{_p}'>This email consolidates exposure estimates from "
@@ -1080,8 +1090,17 @@ def generate_alert_html(
     )
 
     _hr = "<hr style='border:none;border-top:1px solid #e2e2e2;margin:26px 0'>"
-    summary_header = f"<h2 style='{_H2}'>Summary table</h2>"
-    body = intro_html + _hr + summary_header + toc_html + already_passed_html
+    summary_header = f"<h2 style='{_H2}'>Summary</h2>"
+    links_note = (
+        "<p style='font-size:0.85em;color:#666;margin:0 0 18px'>"
+        "<a href='https://ocha-dap.github.io/ds-storms-alerts/guide.html' "
+        "style='color:#0645ad'>Methodology &amp; documentation</a>"
+        " &nbsp;|&nbsp; "
+        "<a href='https://ocha-dap.github.io/ds-storms-alerts/' "
+        "style='color:#0645ad'>Sign up for alerts</a>"
+        "</p>"
+    )
+    body = intro_html + _hr + summary_header + toc_html + links_note + already_passed_html
     if sections:
         body += _hr + _hr.join(sections)
     return body, all_render_iso3s, storm_names
@@ -1096,8 +1115,8 @@ def generate_exposure_csv(
         country, iso3, is_final_alert,
         pop_exposed_34kt, pop_exposed_50kt, pop_exposed_64kt,
         sources_34kt, sources_50kt, sources_64kt
-    where pop_exposed is the mean across available sources (our est., ADAM, GDACS)
-    and sources_* lists which sources contributed (e.g. "our,ADAM,GDACS").
+    where pop_exposed is the MAX across available sources (CHD, ADAM, GDACS)
+    and sources_* lists which sources contributed (e.g. "CHD,ADAM,GDACS").
     """
     import pandas as _pd
 
@@ -1121,8 +1140,8 @@ def generate_exposure_csv(
     }
     final_update_pairs = {p for p in final_update_pairs if p in obsv_pairs}
 
-    gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_fetch_ids)
-    adam_cur_df = fetch_adam_current_exposure(engine, all_fetch_ids)
+    gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_fetch_ids, issued_time_dt)
+    adam_cur_df = fetch_adam_current_exposure(engine, all_fetch_ids, issued_time_dt)
 
     # Storm metadata (name, season) for filenames
     meta: dict[str, tuple] = {}
@@ -1194,8 +1213,10 @@ def generate_exposure_csv(
                     {"our": our_val, "ADAM": adam_val, "GDACS": gdacs_val}.items()
                     if v > 0
                 }
+                # MAX across sources, not mean (bias to action — see the alert
+                # ToC loop for the rationale).
                 row[f"pop_exposed_{wsp}kt"] = (
-                    int(round(sum(active.values()) / len(active))) if active else 0
+                    max(active.values()) if active else 0
                 )
                 row[f"sources_{wsp}kt"] = (
                     ",".join(_SRC_LABELS.get(k, k) for k in active) if active else ""
