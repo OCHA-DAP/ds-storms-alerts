@@ -174,7 +174,7 @@
       <tr><td><strong>Country</strong></td><td>Affected country. Rows marked <em>(final)</em> are final-update advisories.</td></tr>
       <tr><td><strong>Similar storms</strong></td><td>The 3 historical storms (since 2002) with the most similar population-exposure profile across all wind thresholds.</td></tr>
       <tr><td><strong>Wind</strong></td><td>Wind speed threshold: 34 kt, 50 kt, or 64 kt (see below).</td></tr>
-      <tr><td><strong>Exposure [% pop.]</strong></td><td>Estimated population within the wind radius — the mean of available data sources — with the percentage of that country's total population in parentheses.</td></tr>
+      <tr><td><strong>Exposure [% pop.]</strong></td><td>Estimated population within the wind radius — the <strong>maximum</strong> across available data sources (CHD, ADAM, GDACS) — with the percentage of that country's total population in parentheses.</td></tr>
       <tr><td><strong>Return period</strong></td><td>How historically rare this level of exposure is (see below).</td></tr>
     </tbody>
   </table>
@@ -206,6 +206,15 @@
     <span><span class="rp-swatch" style="background:#ffe8cc"></span> &gt;5-year RP</span>
     <span><span class="rp-swatch" style="background:#ffcccc"></span> &gt;10-year RP</span>
   </div>
+  <div class="callout">
+    <p><strong>Return periods use the CHD estimate only.</strong> Unlike the headline
+    exposure figure (which takes the maximum across sources), the return period is
+    always computed from the OCHA CHD estimate. CHD has the longest and most consistent
+    historical record — every storm since 2002 is processed the same way — so it gives
+    a like-for-like comparison across storms and countries. (Colour bands are keyed to
+    the rounded displayed value, e.g. a 4.6-year RP shows as "5-year" and is coloured
+    accordingly.)</p>
+  </div>
 
   <h3>Strip charts</h3>
   <p>
@@ -217,19 +226,21 @@
     <li><strong>Observed up to present</strong> — cumulative population already within the
       wind radius based on the observed (post-landfall) track.</li>
     <li><strong>CHD / ADAM / GDACS</strong> — individual source estimates (forecast plus observed combined). See data sources below.</li>
-    <li><strong>Forecasted final exposure</strong> (bold mark) — the mean across available sources; the headline figure for this advisory.</li>
+    <li><strong>Forecasted final exposure</strong> (bold mark) — the maximum across available sources; the headline figure for this advisory.</li>
     <li><strong>Estimated final exposure</strong> (bold mark, final updates only) — same as above but for final-update advisories where all exposure is observed.</li>
     <li><strong>Shaded area</strong> — when present, shows the probabilistic WSP forecast distribution: the spread of possible outcomes rather than a single deterministic value.</li>
   </ul>
 
   <h3>Maps</h3>
-  <p>Two maps are included per storm when the relevant data is available:</p>
+  <p>Up to two maps are included per storm when the relevant data is available:</p>
   <ul>
-    <li><strong>WSP 34 kt forecast</strong> — the footprint of the probabilistic
-      wind-speed-probability (WSP) model at the 34 kt threshold, showing where
-      there is some probability of tropical-storm-force winds.</li>
-    <li><strong>Forecast-only buffers</strong> — deterministic wind-radius buffer
-      zones along the forecast portion of the track.</li>
+    <li><strong>Deterministic forecast</strong> — the observed and forecast track with
+      the wind-radius swaths (34 / 50 / 64 kt) along it: where tropical-storm- to
+      hurricane-force winds are expected based on the single forecast track.</li>
+    <li><strong>Probabilistic forecast</strong> — the NHC wind-speed-probability (WSP)
+      model at the 34 kt threshold: the probability of tropical-storm-force winds
+      across the forecast, capturing track and intensity uncertainty rather than a
+      single line. Omitted when no WSP data is available for the advisory.</li>
   </ul>
 
   <h3>Data sources</h3>
@@ -255,6 +266,23 @@
       </tr>
     </tbody>
   </table>
+
+  <h3>How the estimates are combined and timed</h3>
+  <p>
+    For each country and wind threshold, the headline <strong>exposure</strong> figure
+    is the <strong>maximum</strong> across whichever of the three sources have data for
+    that advisory — a deliberately conservative choice. Each source's individual
+    estimate is shown separately in the strip charts so you can see the spread, and the
+    email lists which sources contributed (and notes any that were unavailable).
+  </p>
+  <p>
+    The sources publish on slightly different schedules. Each is paired to the NHC
+    advisory by matching its issue time to the advisory time, or to the closest
+    issuance up to three hours earlier — so a single email reflects one consistent
+    advisory cycle even when a source lags slightly. The probabilistic WSP product, in
+    particular, is published on a 6-hourly cycle and is matched this way to the
+    advisory.
+  </p>
 
   <h2>Questions and feedback</h2>
   <p>
