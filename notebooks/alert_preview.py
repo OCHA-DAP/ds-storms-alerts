@@ -181,48 +181,112 @@ def _cmp_storm_selector(mo, mode, cmp_storm_options):
 
 
 @app.cell
-def _matching_demo(mo, mode, cmp_storm, engine, pd, text):
+def _gdacs_lookup_source(mo, mode):
+    """GDACS lookup source toggle. Defaults to Dev DB
+    (`storms.gdacs_fm_lookup`) so colleagues can use this app without
+    needing the local ds-storms-pipeline build output. The Local CSV
+    option is a dev workflow for testing humrev-build changes before
+    pushing them to the DB.
+    """
+    mo.stop(mode.value != "Admin 1 comparison")
+    gdacs_source = mo.ui.radio(
+        options=[
+            "Dev DB (storms.gdacs_fm_lookup)",
+            "Local CSV (dev workflow — requires ds-storms-pipeline build)",
+        ],
+        value="Dev DB (storms.gdacs_fm_lookup)",
+        label="GDACS lookup source",
+    )
+    gdacs_source
+    return (gdacs_source,)
+
+
+@app.cell
+def _gdacs_lookup_table(mo, mode, gdacs_source, stratus, pd):
+    """Resolve the SQL table name the matching demo joins against.
+
+    - Dev DB: returns `storms.gdacs_fm_lookup` directly. No DB writes,
+      no local files needed.
+    - Local CSV: reads `data/gdacs_fm_lookup.csv` from the sibling
+      ds-storms-pipeline repo and pushes it to
+      `storms.gdacs_fm_lookup_test` so the downstream SQL has
+      something to join. Surfaces a legible error if the CSV is
+      missing rather than failing the matching demo silently.
+    """
+    from pathlib import Path as _Path
+    mo.stop(mode.value != "Admin 1 comparison")
+    if gdacs_source.value.startswith("Local"):
+        _csv = (
+            _Path(__file__).resolve().parents[2]
+            / "ds-storms-pipeline" / "data" / "gdacs_fm_lookup.csv"
+        )
+        if not _csv.exists():
+            gdacs_lookup_table = None
+            _status = mo.callout(
+                mo.md(
+                    f"**Local CSV not found** at `{_csv}`.\n\n"
+                    f"To use this option, build the lookup locally:\n\n"
+                    f"```\n"
+                    f"cd ds-storms-pipeline\n"
+                    f"uv run python scripts/build_gdacs_fm_lookup_v2.py\n"
+                    f"```\n\n"
+                    f"Or switch the radio above to **Dev DB** to use "
+                    f"the production `storms.gdacs_fm_lookup` table."
+                ),
+                kind="warn",
+            )
+        else:
+            # utf-8-sig: transparently strips BOM if present (the
+            # lookup CSV is written with BOM so Excel handles it).
+            _df = pd.read_csv(_csv, encoding="utf-8-sig")
+            _write_engine = stratus.get_engine(stage="dev", write=True)
+            _df.to_sql(
+                "gdacs_fm_lookup_test", _write_engine,
+                schema="storms", if_exists="replace", index=False,
+            )
+            gdacs_lookup_table = "storms.gdacs_fm_lookup_test"
+            _status = mo.md(
+                f"**Using local CSV** — `{_csv.name}` → "
+                f"`storms.gdacs_fm_lookup_test` ({len(_df)} rows)"
+            )
+    else:
+        gdacs_lookup_table = "storms.gdacs_fm_lookup"
+        _status = mo.md(
+            "**Using production** `storms.gdacs_fm_lookup`."
+        )
+    _status
+    return (gdacs_lookup_table,)
+
+
+@app.cell
+def _matching_demo(mo, mode, cmp_storm, engine, pd, text, gdacs_lookup_table):
+    """FM-centric multi-source matching table.
+
+    Architecture: three small per-source queries, each returning an
+    FM-keyed snap (admin_level, iso3, fm_pcode, wind_speed_kt). Outer-
+    merged in pandas. The GDACS query also surfaces orphan rows
+    (gdacs admin with no FM lookup match) as fm_pcode=NULL entries.
+
+    Row status (derived from which sources reported):
+      ❌ orphan           — GDACS admin with no FM match in lookup
+      ⚠️ aggregated       — N>1 GDACS admins → 1 FM (e.g. PRI's 8
+                            senatorial districts → 1 FM polygon)
+      ⚠️ caveat           — GDACS row with a caveat from gdacs_fm_lookup
+      ⚠️ ADAM-only        — ADAM has pop but GDACS and NHC don't —
+                            surfaces ADAM coverage that GDACS missed
+      ✅ clean 1:1         — clean FM↔source match, no caveat
+    """
     mo.stop(mode.value != "Admin 1 comparison")
     mo.stop(cmp_storm.value is None)
+    # gdacs_lookup_table is None when the user picked Local CSV but
+    # the file isn't on disk — the source cell already showed the
+    # error; just skip this cell instead of building broken SQL.
+    mo.stop(gdacs_lookup_table is None)
 
-    # Four CTEs:
-    #  1. event_rows     — latest GDACS snapshot per (admin_level,
-    #     gdacs_admin_code, wind_speed_kt) for this event. Works for
-    #     both single-snapshot (pre-2025) and multi-episode (2025+)
-    #     events.
-    #  2. event_atcf     — the ATCF id(s) this GDACS event resolves
-    #     to via storm_id_lookup. Used to pull NHC numbers.
-    #  3. latest_advisory — per (atcf_id, iso3, wind_speed_kt), the
-    #     LAST issued_time on file. Mirrors GDACS's own convention
-    #     (gdacs_pop comes from the latest episode per event), so the
-    #     comparison is apples-to-apples — both sides show the source's
-    #     final/latest snapshot. Snapping to ONE advisory per
-    #     storm-country-windkt also keeps adm0 + adm1 NHC numbers
-    #     temporally coherent (within a single advisory adm0 =
-    #     sum(adm1)).
-    #  4. nhc_snap        — NHC rows pulled from those latest advisories,
-    #     keyed by (pcode, admin_level, wind_speed_kt) for join.
-    # Then LEFT JOIN the lookup (orphans surface as fm_pcode NULL)
-    # and LEFT JOIN nhc_snap on the FM pcode (NHC's pcode is
-    # FM-keyed). GDACS pop is null on many rows — that's a data
-    # quirk (admin in buffer, no pop attributed), not a matching
-    # failure.
-    # Final SELECT is a UNION of two halves:
-    #   gdacs_side  — GDACS-driven rows (each event_rows row → lookup
-    #                 fm_pcode → nhc_snap value if NHC covers the same
-    #                 fm_pcode). Includes orphan rows where
-    #                 lk.fm_pcode is NULL.
-    #   nhc_only    — NHC-snap rows whose (admin_level, pcode) is NOT
-    #                 in gdacs_side AT ANY wind speed. These are FM
-    #                 admin units NHC covers but GDACS didn't report
-    #                 for this storm at all (e.g. Yucatán in SARA
-    #                 2024 — NHC has it; GDACS only reported Campeche +
-    #                 Quintana Roo). We deliberately do NOT add rows
-    #                 here for wind speeds NHC has but GDACS doesn't
-    #                 publish (NHC has 34/50/64 kt; GDACS only has
-    #                 34/64), since the FM unit IS covered by GDACS
-    #                 — just not at that wind threshold.
-    _sql = text(
+    _eid = cmp_storm.value
+
+    # ── GDACS snap: matched rows aggregated to FM + orphan rows ────
+    _gdacs_sql = text(
         "WITH event_rows AS ("
         "  SELECT DISTINCT ON (admin_level, gdacs_admin_code, wind_speed_kt) "
         "    admin_level, iso3, gdacs_admin_code, "
@@ -231,258 +295,194 @@ def _matching_demo(mo, mode, cmp_storm, engine, pd, text):
         "  FROM storms.gdacs_exposure ge "
         "  WHERE gdacs_eventid = :eid "
         "    AND NOT EXISTS ("
-        "      SELECT 1 FROM storms.gdacs_fm_lookup x "
+        f"      SELECT 1 FROM {gdacs_lookup_table} x "
         "      WHERE x.iso3 = ge.iso3 "
         "        AND x.admin_level = ge.admin_level "
         "        AND x.gmi_admin IS NULL"
         "    )"
         "  ORDER BY admin_level, gdacs_admin_code, wind_speed_kt, "
         "           valid_time DESC"
-        "), event_atcf AS ("
+        ") "
+        # Matched: aggregate to FM
+        "SELECT e.admin_level, e.iso3, lk.fm_pcode, e.wind_speed_kt, "
+        "  SUM(e.pop_exposed) AS gdacs_pop, "
+        "  string_agg(e.gdacs_admin_code, ', ' "
+        "    ORDER BY e.gdacs_admin_code) AS gdacs_admins, "
+        "  COUNT(DISTINCT e.gdacs_admin_code) AS n_gdacs_admins, "
+        "  MAX(lk.caveat_note) AS gdacs_caveat_note "
+        "FROM event_rows e "
+        f"JOIN {gdacs_lookup_table} lk "
+        "  ON lk.iso3 = e.iso3 "
+        "  AND lk.admin_level = e.admin_level "
+        "  AND lk.gmi_admin = e.gdacs_admin_code "
+        "GROUP BY e.admin_level, e.iso3, lk.fm_pcode, e.wind_speed_kt "
+        "UNION ALL "
+        # Orphans: GDACS admin with no FM match
+        "SELECT e.admin_level, e.iso3, "
+        "  NULL::text AS fm_pcode, e.wind_speed_kt, "
+        "  e.pop_exposed AS gdacs_pop, "
+        "  e.gdacs_admin_code AS gdacs_admins, "
+        "  1 AS n_gdacs_admins, "
+        "  NULL::text AS gdacs_caveat_note "
+        "FROM event_rows e "
+        f"LEFT JOIN {gdacs_lookup_table} lk "
+        "  ON lk.iso3 = e.iso3 "
+        "  AND lk.admin_level = e.admin_level "
+        "  AND lk.gmi_admin = e.gdacs_admin_code "
+        "WHERE lk.fm_pcode IS NULL"
+    )
+
+    # ── NHC snap: last observed valid_time per (iso3, wind_speed_kt) ──
+    _nhc_sql = text(
+        "WITH event_atcf AS ("
         "  SELECT atcf_id FROM storms.storm_id_lookup "
         "  WHERE gdacs_eventid = :eid AND atcf_id IS NOT NULL"
-        "), latest_advisory AS ("
+        "), latest_obsv AS ("
         "  SELECT DISTINCT ON (n.atcf_id, n.iso3, n.wind_speed_kt) "
-        "    n.atcf_id, n.iso3, n.wind_speed_kt, n.issued_time "
-        "  FROM storms.nhc_tracks_fcast_exposure n "
+        "    n.atcf_id, n.iso3, n.wind_speed_kt, n.valid_time "
+        "  FROM storms.nhc_tracks_obsv_exposure n "
         "  JOIN event_atcf ea ON ea.atcf_id = n.atcf_id "
         "  WHERE n.admin_level = 0 "
         "  ORDER BY n.atcf_id, n.iso3, n.wind_speed_kt, "
-        "           n.issued_time DESC"
-        "), nhc_snap AS ("
-        "  SELECT n.iso3, n.pcode, n.admin_level, n.wind_speed_kt, "
-        "    MAX(n.pop_exposed) AS nhc_pop "
-        "  FROM storms.nhc_tracks_fcast_exposure n "
-        "  JOIN latest_advisory p "
-        "    ON p.atcf_id = n.atcf_id "
-        "    AND p.iso3 = n.iso3 "
-        "    AND p.wind_speed_kt = n.wind_speed_kt "
-        "    AND p.issued_time = n.issued_time "
-        "  GROUP BY n.iso3, n.pcode, n.admin_level, n.wind_speed_kt"
-        "), gdacs_side AS ("
-        "  SELECT e.admin_level, e.iso3, e.gdacs_admin_code, "
-        "    e.gdacs_admin_name, e.wind_speed_kt, "
-        "    e.pop_exposed AS gdacs_pop, "
-        "    lk.fm_pcode, lk.fm_name, lk.caveat_note, "
-        "    nm.nhc_pop "
-        "  FROM event_rows e "
-        "  LEFT JOIN storms.gdacs_fm_lookup lk "
-        "    ON lk.iso3 = e.iso3 "
-        "    AND lk.admin_level = e.admin_level "
-        "    AND lk.gmi_admin = e.gdacs_admin_code "
-        "  LEFT JOIN nhc_snap nm "
-        "    ON nm.pcode = lk.fm_pcode "
-        "    AND nm.admin_level = e.admin_level "
-        "    AND nm.wind_speed_kt = e.wind_speed_kt"
-        "), gdacs_keys AS ("
-        "  SELECT DISTINCT admin_level, fm_pcode, wind_speed_kt "
-        "  FROM gdacs_side WHERE fm_pcode IS NOT NULL"
-        "), fm_unit_lookup AS ("
-        "  SELECT DISTINCT admin_level, fm_pcode, fm_name "
-        "  FROM storms.gdacs_fm_lookup"
-        "), nhc_only AS ("
-        "  SELECT nm.admin_level, nm.iso3, "
-        "    NULL::text AS gdacs_admin_code, "
-        "    NULL::text AS gdacs_admin_name, "
-        "    nm.wind_speed_kt, "
-        "    NULL::numeric AS gdacs_pop, "
-        "    nm.pcode AS fm_pcode, "
-        "    fu.fm_name, "
-        "    NULL::text AS caveat_note, "
-        "    nm.nhc_pop "
-        "  FROM nhc_snap nm "
-        "  LEFT JOIN fm_unit_lookup fu "
-        "    ON fu.admin_level = nm.admin_level "
-        "    AND fu.fm_pcode = nm.pcode "
-        "  WHERE NOT EXISTS ("
-        "    SELECT 1 FROM gdacs_keys gk "
-        "    WHERE gk.admin_level = nm.admin_level "
-        "      AND gk.fm_pcode = nm.pcode"
-        "  ) AND nm.nhc_pop IS NOT NULL AND nm.nhc_pop > 0"
+        "           n.valid_time DESC"
         ") "
-        "SELECT * FROM gdacs_side "
-        "UNION ALL SELECT * FROM nhc_only "
-        "ORDER BY admin_level, iso3, fm_pcode NULLS LAST, "
-        "         gdacs_admin_code"
+        "SELECT n.iso3, n.pcode AS fm_pcode, n.admin_level, "
+        "  n.wind_speed_kt, MAX(n.pop_exposed) AS nhc_pop "
+        "FROM storms.nhc_tracks_obsv_exposure n "
+        "JOIN latest_obsv p "
+        "  ON p.atcf_id = n.atcf_id "
+        "  AND p.iso3 = n.iso3 "
+        "  AND p.wind_speed_kt = n.wind_speed_kt "
+        "  AND p.valid_time = n.valid_time "
+        "GROUP BY n.iso3, n.pcode, n.admin_level, n.wind_speed_kt"
     )
-    _df = pd.read_sql(_sql, engine, params={"eid": cmp_storm.value})
 
-    if _df.empty:
-        _out = mo.md("_no GDACS exposure rows for this event_")
+    # ── ADAM snap: aggregated to FM via the (toggle-driven) lookup ──
+    _adam_sql = text(
+        "WITH adam_event_rows AS ("
+        "  SELECT DISTINCT ON "
+        "    (ae.admin_level, ae.iso3, lower(ae.admin_name), ae.wind_speed_kt) "
+        "    ae.admin_level, ae.iso3, ae.admin_name, "
+        "    lower(ae.admin_name) AS admin_name_lc, "
+        "    ae.wind_speed_kt, ae.pop_exposed "
+        "  FROM storms.adam_exposure ae "
+        "  JOIN storms.storm_id_lookup sl "
+        "    ON sl.adam_eventid = ae.adam_eventid "
+        "  WHERE sl.gdacs_eventid = :eid "
+        "    AND ae.admin_level <= 1 "
+        "  ORDER BY ae.admin_level, ae.iso3, lower(ae.admin_name), "
+        "           ae.wind_speed_kt, ae.valid_time DESC"
+        ") "
+        "SELECT aer.admin_level, aer.iso3, lk.fm_pcode, "
+        "  aer.wind_speed_kt, "
+        "  SUM(aer.pop_exposed) AS adam_pop, "
+        "  string_agg(aer.admin_name, ', ' ORDER BY aer.admin_name) "
+        "    AS adam_admins, "
+        "  COUNT(DISTINCT aer.admin_name) AS n_adam_admins, "
+        "  string_agg(DISTINCT lk.caveat_note, ' | ' "
+        "    ORDER BY lk.caveat_note) AS adam_caveat_note "
+        "FROM adam_event_rows aer "
+        "JOIN storms.adam_fm_lookup lk "
+        "  ON lk.iso3 = aer.iso3 "
+        "  AND lk.admin_level = aer.admin_level "
+        "  AND lower(lk.adam_admin_name) = aer.admin_name_lc "
+        "WHERE lk.fm_pcode IS NOT NULL "
+        "GROUP BY aer.admin_level, aer.iso3, lk.fm_pcode, "
+        "         aer.wind_speed_kt"
+    )
+
+    # ── FM dim: pcode → name from the canonical FM lookup ──────────
+    _fm_dim_sql = text(
+        "SELECT DISTINCT admin_level, fm_pcode, fm_name "
+        f"FROM {gdacs_lookup_table}"
+    )
+
+    _g = pd.read_sql(_gdacs_sql, engine, params={"eid": _eid})
+    _n = pd.read_sql(_nhc_sql, engine, params={"eid": _eid})
+    _a = pd.read_sql(_adam_sql, engine, params={"eid": _eid})
+    _fm_dim = pd.read_sql(_fm_dim_sql, engine)
+
+    if _g.empty and _n.empty and _a.empty:
+        _out = mo.md("_no exposure rows from GDACS / NHC / ADAM for this event_")
     else:
-        # FM-CENTRIC VIEW: one row per (admin_level, iso3, fm_pcode,
-        # wind_speed_kt). gdacs_pop is SUMMED across all GDACS admins
-        # that aggregate to the same FM unit (e.g. PRI: 8 senatorial
-        # districts → single FM Puerto Rico polygon).
-        #
-        # Three row classes in _df coming back from SQL:
-        #   matched     gdacs_admin_code notna AND fm_pcode notna
-        #               → GDACS row with a clean FM match (aggregate
-        #                 in Python below by fm_pcode)
-        #   orphan      fm_pcode IS NULL
-        #               → GDACS row with no FM match in the lookup
-        #   nhc-only    gdacs_admin_code IS NULL (and fm_pcode notna)
-        #               → NHC has coverage for this FM unit but GDACS
-        #                 didn't report it for this storm
+        _key = ["admin_level", "iso3", "fm_pcode", "wind_speed_kt"]
 
-        _orphan = _df[_df["fm_pcode"].isna()].copy()
-        _nhc_only = _df[
-            _df["fm_pcode"].notna() & _df["gdacs_admin_code"].isna()
-        ].copy()
-        _matched = _df[
-            _df["fm_pcode"].notna() & _df["gdacs_admin_code"].notna()
-        ].copy()
-
-        if not _matched.empty:
-            _matched_agg = (
-                _matched.groupby(
-                    ["admin_level", "iso3", "fm_pcode", "fm_name",
-                     "wind_speed_kt"],
-                    dropna=False,
-                ).agg(
-                    n_gdacs_admins=("gdacs_admin_code", "nunique"),
-                    gdacs_admins=("gdacs_admin_code",
-                                  lambda s: ", ".join(sorted(s.unique()))),
-                    gdacs_pop=("gdacs_pop", "sum"),
-                    nhc_pop=("nhc_pop", "first"),
-                    caveat_note=(
-                        "caveat_note",
-                        lambda s: s.dropna().iloc[0]
-                        if s.notna().any() else None,
-                    ),
-                ).reset_index()
-            )
-            # ``sum`` on an all-NaN series gives 0; surface as NaN so
-            # the UI shows "no pop attributed" instead of a fake zero.
-            _all_null_mask = (
-                _matched.groupby(
-                    ["admin_level", "iso3", "fm_pcode", "fm_name",
-                     "wind_speed_kt"], dropna=False,
-                )["gdacs_pop"].apply(lambda s: s.isna().all())
-                .reset_index(name="_all_null")
-            )
-            _matched_agg = _matched_agg.merge(
-                _all_null_mask,
-                on=["admin_level", "iso3", "fm_pcode", "fm_name",
-                    "wind_speed_kt"],
-                how="left",
-            )
-            _matched_agg.loc[
-                _matched_agg["_all_null"], "gdacs_pop"
-            ] = pd.NA
-            _matched_agg = _matched_agg.drop(columns="_all_null")
-
-            def _status_matched(n, caveat):
-                if n > 1:
-                    return f"⚠️ aggregated ({n} GDACS→1 FM)"
-                if pd.notna(caveat):
-                    return "⚠️ pre-split caveat"
-                return "✅ clean 1:1"
-
-            _matched_agg["status"] = [
-                _status_matched(n, cv) for n, cv in zip(
-                    _matched_agg["n_gdacs_admins"],
-                    _matched_agg["caveat_note"],
-                )
-            ]
-        else:
-            _matched_agg = pd.DataFrame(columns=[
-                "admin_level", "iso3", "fm_pcode", "fm_name",
-                "wind_speed_kt", "n_gdacs_admins", "gdacs_admins",
-                "gdacs_pop", "nhc_pop", "caveat_note", "status",
-            ])
-
-        # Orphans: keep one row per (gdacs_admin_code, wind_speed_kt).
-        # No FM match → no NHC join possible. (Note: GDACS rows for
-        # fm_adm1_only countries at adm1 are filtered out in the SQL
-        # itself — the policy says "don't show GDACS at adm1", so we
-        # don't surface them here at all. Any orphan that reaches this
-        # block is a genuine data gap.)
-        if not _orphan.empty:
-            _orphan = _orphan.assign(
-                fm_pcode=pd.NA,
-                fm_name=pd.NA,
-                n_gdacs_admins=1,
-                gdacs_admins=_orphan["gdacs_admin_code"],
-                nhc_pop=pd.NA,
-                status="❌ orphan",
-            )[[
-                "admin_level", "iso3", "fm_pcode", "fm_name",
-                "wind_speed_kt", "n_gdacs_admins", "gdacs_admins",
-                "gdacs_pop", "nhc_pop", "caveat_note", "status",
-            ]]
-
-        # NHC-only coverage: NHC has data for an FM unit that GDACS
-        # didn't report at all this storm. No matching ambiguity
-        # (zero GDACS admins → one FM unit, trivially clean), so
-        # status="✅ clean". The missing GDACS data is already obvious
-        # from gdacs_pop being NaN; surfacing these rows keeps the
-        # adm0 / sum(adm1) check honest.
-        if not _nhc_only.empty:
-            _nhc_only = _nhc_only.assign(
-                n_gdacs_admins=0,
-                gdacs_admins="",
-                status="✅ clean 1:1",
-            )[[
-                "admin_level", "iso3", "fm_pcode", "fm_name",
-                "wind_speed_kt", "n_gdacs_admins", "gdacs_admins",
-                "gdacs_pop", "nhc_pop", "caveat_note", "status",
-            ]]
-
-        _df = pd.concat(
-            [_orphan, _matched_agg, _nhc_only], ignore_index=True,
+        # Outer merge: every FM key from any source surfaces as a row.
+        # Orphan rows (fm_pcode IS NULL) don't merge to NHC / ADAM —
+        # they stay as standalone rows on the GDACS-only side.
+        _df = (
+            _g.merge(_n, on=_key, how="outer")
+              .merge(_a, on=_key, how="outer")
+              .merge(_fm_dim, on=["admin_level", "fm_pcode"], how="left")
         )
+
+        def _row_status(r):
+            has_g = pd.notna(r.get("gdacs_pop")) or (
+                pd.notna(r.get("n_gdacs_admins"))
+                and r.get("n_gdacs_admins", 0) > 0
+            )
+            has_n = pd.notna(r.get("nhc_pop"))
+            has_a = pd.notna(r.get("adam_pop"))
+            if pd.isna(r["fm_pcode"]):
+                return "❌ orphan"
+            if has_g and r.get("n_gdacs_admins", 0) > 1:
+                return (
+                    f"⚠️ aggregated "
+                    f"({int(r['n_gdacs_admins'])} GDACS→1 FM)"
+                )
+            if has_g and pd.notna(r.get("gdacs_caveat_note")):
+                return "⚠️ caveat"
+            if has_g:
+                return "✅ clean 1:1"
+            if has_a and not has_n:
+                return "⚠️ ADAM-only"
+            if has_n:
+                return "✅ clean 1:1"
+            return "❓"
+
+        _df["status"] = _df.apply(_row_status, axis=1)
 
         _out_cols = [
             "status", "admin_level", "iso3", "fm_pcode", "fm_name",
             "n_gdacs_admins", "gdacs_admins", "wind_speed_kt",
-            "gdacs_pop", "nhc_pop", "caveat_note",
+            "gdacs_pop", "nhc_pop", "adam_pop",
+            "n_adam_admins", "adam_admins",
+            "gdacs_caveat_note", "adam_caveat_note",
         ]
-        _df = _df[_out_cols]
+        _df = _df.reindex(columns=_out_cols)
 
-        # Country-grouped sort: all rows for a country together
-        # (adm0 first then adm1s), then by fm_pcode, then wind speed.
-        # Status is shown in the leftmost column so issues remain
-        # easy to spot via the badge.
-        _df = (
-            _df.sort_values(
-                ["iso3", "admin_level", "fm_pcode", "wind_speed_kt"],
-                na_position="last",
-            ).reset_index(drop=True)
-        )
+        _df = _df.sort_values(
+            ["iso3", "admin_level", "fm_pcode", "wind_speed_kt"],
+            na_position="last",
+        ).reset_index(drop=True)
 
-        # Summary: count each status bucket. Orphans (❌) are counted
-        # by row; caveat (⚠️) and clean (✅) are counted per unique FM
-        # unit (each FM unit can have multiple wind-speed rows).
-        _matched_units = _df[
-            _df["status"].str.startswith(("⚠️", "✅"))
-        ][["admin_level", "iso3", "fm_pcode", "status"]].drop_duplicates()
-        _n_o = int(_df["status"].str.startswith("❌").sum())
-        _n_c = int(
-            _matched_units["status"].str.startswith("⚠️").sum()
+        _n_orphan = int((_df["status"] == "❌ orphan").sum())
+        _n_aggregated = int(
+            _df["status"].str.startswith("⚠️ aggregated").sum()
         )
-        _n_k = int(
-            (_matched_units["status"] == "✅ clean 1:1").sum()
-        )
+        _n_caveat = int((_df["status"] == "⚠️ caveat").sum())
+        _n_adam_only = int((_df["status"] == "⚠️ ADAM-only").sum())
+        _n_clean = int((_df["status"] == "✅ clean 1:1").sum())
+        _n_adam_attached = int(_df["adam_pop"].notna().sum())
 
         _out = mo.vstack([
             mo.md(
-                f"### FM ↔ GDACS matching — GDACS event "
+                f"### FM ↔ multi-source matching — GDACS event "
                 f"`{cmp_storm.value}`\n\n"
-                f"**{_n_o}** orphan (GDACS admin, no FM match)  ·  "
-                f"**{_n_c}** with caveat (aggregated or pre-split)  ·  "
-                f"**{_n_k}** clean 1:1  ·  {len(_df)} rows total\n\n"
-                f"_View is **FM-centric**: one row per "
-                f"`(admin_level, fm_pcode, wind_speed_kt)`. When "
-                f"multiple GDACS admins map to the same FM unit "
-                f"(`n_gdacs_admins > 1`), their pop_exposed values are "
-                f"**summed** into `gdacs_pop` and the contributing "
-                f"GDACS codes are listed in `gdacs_admins`. `gdacs_pop` "
-                f"may be NULL when GDACS includes admins in the buffer "
-                f"but attributes no population — data quirk, not a "
-                f"matching failure. `nhc_pop` is NULL when our NHC "
-                f"pipeline has no rows at this fm_pcode (older storm, "
-                f"non-Atlantic basin, or no NHC adm1 coverage)._"
+                f"**{_n_orphan}** orphan (GDACS admin, no FM match) · "
+                f"**{_n_aggregated}** aggregated (N GDACS→1 FM) · "
+                f"**{_n_caveat}** with GDACS caveat · "
+                f"**{_n_adam_only}** ADAM-only (no GDACS, no NHC) · "
+                f"**{_n_clean}** clean · "
+                f"**{_n_adam_attached}** rows with ADAM pop · "
+                f"{len(_df)} rows total\n\n"
+                f"_View is **FM-centric**, built by outer-merging the "
+                f"GDACS, NHC, and ADAM per-source snapshots on "
+                f"`(admin_level, iso3, fm_pcode, wind_speed_kt)`. "
+                f"Orphans (`fm_pcode = NULL`) are GDACS exposures with "
+                f"no FM lookup match. ADAM-only rows surface FM units "
+                f"where only ADAM reported — useful for validating "
+                f"the adam_fm_lookup caveats._"
             ),
             mo.ui.table(_df, page_size=80, selection=None),
         ])
