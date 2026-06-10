@@ -1020,7 +1020,7 @@ def generate_alert_html(
     if already_passed_pairs:
         _passed_by_storm: dict[str, list[str]] = {}
         for (_ap_aid, _ap_iso3), _ap_last_t in sorted(already_passed_pairs.items()):
-            _ap_t_str = _ap_last_t.strftime("%d %b %HZ")
+            _ap_t_str = _format_issued_et(_ap_last_t)
             _passed_by_storm.setdefault(_ap_aid, []).append(
                 f"{_cname(_ap_iso3)} ({_ap_t_str})"
             )
@@ -1070,7 +1070,7 @@ def generate_alert_html(
     intro_html = (
         f"<p style='{_p}'>Dear colleagues,</p>"
         f"<p style='{_p}'>NHC has issued their cyclone forecasts for "
-        f"{_format_issued_et(issued_time_dt)}. "
+        f"{_format_issued_et(issued_time_dt)} (NY time). "
         f"There {'is' if _n == 1 else 'are'} {_n} active "
         f"storm{'' if _n == 1 else 's'}: <b>{', '.join(storm_names)}</b>.</p>"
         f"<p style='{_p}'>This email consolidates exposure estimates from "
@@ -1080,14 +1080,17 @@ def generate_alert_html(
     )
 
     _hr = "<hr style='border:none;border-top:1px solid #e2e2e2;margin:26px 0'>"
-    summary_header = f"<h2 style='{_H2}'>Summary table</h2>"
-    rp_note = (
-        "<p style='font-size:0.82em;color:#777;font-style:italic;"
-        "margin:0 0 18px'>Return periods are calculated from the CHD exposure "
-        "estimates only — these have the longest historical record and ensure a "
-        "consistent methodology across storms and countries.</p>"
+    summary_header = f"<h2 style='{_H2}'>Summary</h2>"
+    links_note = (
+        "<p style='font-size:0.85em;color:#666;margin:0 0 18px'>"
+        "<a href='https://ocha-dap.github.io/ds-storms-alerts/guide.html' "
+        "style='color:#0645ad'>Methodology &amp; documentation</a>"
+        " &nbsp;|&nbsp; "
+        "<a href='https://ocha-dap.github.io/ds-storms-alerts/' "
+        "style='color:#0645ad'>Sign up for alerts</a>"
+        "</p>"
     )
-    body = intro_html + _hr + summary_header + toc_html + rp_note + already_passed_html
+    body = intro_html + _hr + summary_header + toc_html + links_note + already_passed_html
     if sections:
         body += _hr + _hr.join(sections)
     return body, all_render_iso3s, storm_names
