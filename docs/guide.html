@@ -301,6 +301,30 @@
     contributed and flags any that were not available.
   </p>
 
+  <h3>Subnational (admin 1) figures in the attached CSV</h3>
+  <p>
+    Each storm's attached CSV now includes <strong>subnational (admin 1)</strong> rows
+    in addition to the country (admin 0) rows, distinguished by an
+    <code>admin_level</code> column (with <code>pcode</code> and <code>adm1_name</code>
+    identifying each unit). The three sources report subnational areas differently, so
+    they are harmonized onto a common set of
+    <a href="https://fieldmaps.io/" target="_blank" rel="noopener">FieldMaps</a> admin-1
+    units before being combined.
+  </p>
+  <p>
+    As at the country level, each admin-1 figure is the <strong>maximum across the
+    available sources</strong> for that unit. The set of sources is held consistent
+    across all admin-1 units within a given storm and country, so the units are
+    directly comparable (rather than one area combining two sources and its neighbour
+    only one). Taking the highest credible estimate per
+    unit follows the convergence-of-evidence logic of the inter-agency
+    <a href="https://interagencystandingcommittee.org/operational-policy-and-advocacy-group/iasc-technical-manual-joint-and-intersectoral-analysis-framework-jiaf-20"
+       target="_blank" rel="noopener">Joint Intersectoral Analysis Framework (JIAF)</a>.
+    Because the maximum is taken independently for each unit (and different sources may
+    give the highest estimate in different places), the admin-1 figures will
+    <strong>not necessarily sum to the country total</strong>.
+  </p>
+
   <h2>Questions and feedback</h2>
   <p>
     These alerts are experimental. For questions or feedback, contact the

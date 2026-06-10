@@ -18,14 +18,19 @@ from src.constants import COUNTRY_LIST_TAG, LAC_ISO3S, TEST_LIST_IDS
 from src.data import (
     fetch_active_storm_meta,
     fetch_adam_current_exposure,
+    fetch_adam_current_exposure_adm1,
     fetch_adam_historical_exposure,
     fetch_admin_population,
     fetch_all_monitored_countries,
     fetch_all_prior_country_pairs,
     fetch_buffers,
     fetch_current_obsv_exposure,
+    fetch_current_obsv_exposure_adm1,
     fetch_fcast_exposure,
+    fetch_fcast_exposure_adm1,
+    fetch_fm_names,
     fetch_gdacs_current_exposure,
+    fetch_gdacs_current_exposure_adm1,
     fetch_gdacs_historical_exposure,
     fetch_historical_obsv_exposure,
     fetch_track_geo,
@@ -48,6 +53,14 @@ from src.plots import (
 
 _HIST_COLOR = "#888888"
 _SRC_LABELS = {"our": "CHD", "ADAM": "ADAM", "GDACS": "GDACS"}
+
+# Explicit column order for the per-storm exposure CSV (admin 0 + admin 1 rows).
+_CSV_COLS = [
+    "admin_level", "country", "iso3", "pcode", "adm1_name", "is_final_alert",
+    "pop_exposed_34kt", "pop_exposed_50kt", "pop_exposed_64kt",
+    "sources_34kt", "sources_50kt", "sources_64kt",
+    "caveat_34kt", "caveat_50kt", "caveat_64kt",
+]
 
 # WSP probability band midpoints (fraction) used to compute expected exposure.
 _WSP_BAND_MIDPOINT = {
@@ -1106,17 +1119,142 @@ def generate_alert_html(
     return body, all_render_iso3s, storm_names
 
 
+def _build_adm1_rows(
+    aid: str,
+    storm_iso3s: set[str],
+    final_update_pairs: set[tuple[str, str]],
+    iso3_to_name: dict[str, str],
+    fm_name_by_pcode: dict[str, str],
+    fcast_adm1_df,
+    obsv_adm1_df,
+    gdacs_adm1_df,
+    adam_adm1_df,
+) -> list[dict]:
+    """Build admin-1 CSV rows for one storm, MAX-combining the sources per FM unit.
+
+    Enumerates every (iso3, fm_pcode) seen in ANY adm1 source for this storm's
+    countries, then for each wind speed takes the MAX across CHD (fcast + obsv),
+    ADAM and GDACS — mirroring the admin-0 logic one level down.
+
+    The set of sources is held **consistent across all admin-1 units within a
+    storm-country** (per wind speed): a source counts as "used" for the country
+    if it covers any of that country's units at that wind speed, and then every
+    unit's figure is the MAX over that same set (a source that doesn't reach a
+    given unit simply contributes 0). This keeps the units directly comparable —
+    every row in a country reflects the same sources — rather than one unit being
+    max(CHD, ADAM) and its neighbour ADAM-only. The numeric MAX is unchanged by
+    this (adding zeros never changes a maximum); only the `sources_*` labels
+    become uniform per country. Returns only units with at least one positive
+    estimate.
+    """
+    import pandas as _pd
+
+    f1 = fcast_adm1_df[fcast_adm1_df["atcf_id"] == aid]
+    o1 = obsv_adm1_df[obsv_adm1_df["atcf_id"] == aid]
+    g1 = gdacs_adm1_df[gdacs_adm1_df["atcf_id"] == aid]
+    a1 = adam_adm1_df[adam_adm1_df["atcf_id"] == aid]
+
+    def _match(df, iso3: str, pcode: str, wsp: int):
+        if df.empty:
+            return None
+        sub = df[
+            (df["iso3"] == iso3)
+            & (df["fm_pcode"] == pcode)
+            & (df["wind_speed_kt"] == wsp)
+        ]
+        return sub if not sub.empty else None
+
+    def _num(df, iso3: str, pcode: str, wsp: int) -> int:
+        sub = _match(df, iso3, pcode, wsp)
+        return int(sub["pop_exposed"].iloc[0]) if sub is not None else 0
+
+    def _caveat(df, iso3: str, pcode: str, wsp: int):
+        sub = _match(df, iso3, pcode, wsp)
+        if sub is None:
+            return None
+        val = sub["caveat_note"].iloc[0]
+        return val if _pd.notna(val) else None
+
+    # Every FM unit seen in any source for this storm's countries.
+    adm1_keys: set[tuple[str, str]] = set()
+    for src in (f1, o1, g1, a1):
+        sub = src[src["iso3"].isin(storm_iso3s)]
+        adm1_keys |= {
+            (r.iso3, r.fm_pcode)
+            for r in sub.itertuples()
+            if _pd.notna(r.fm_pcode)
+        }
+
+    # First pass: per-unit source values, and the consistent set of sources used
+    # for each (iso3, wind speed) — a source is "used" for the country if it
+    # covers any unit there at that wind speed.
+    unit_vals: dict[tuple[str, str, int], dict[str, int]] = {}
+    sources_used: dict[tuple[str, int], set[str]] = {}
+    for iso3, pcode in adm1_keys:
+        for wsp in (34, 50, 64):
+            vals = {
+                "our": _num(f1, iso3, pcode, wsp) + _num(o1, iso3, pcode, wsp),
+                "ADAM": _num(a1, iso3, pcode, wsp),
+                "GDACS": _num(g1, iso3, pcode, wsp),
+            }
+            unit_vals[(iso3, pcode, wsp)] = vals
+            used = sources_used.setdefault((iso3, wsp), set())
+            used |= {k for k, v in vals.items() if v > 0}
+
+    # Second pass: build a row per unit, MAX over the country's consistent set.
+    out: list[dict] = []
+    for iso3, pcode in sorted(adm1_keys):
+        row: dict = {
+            "admin_level": 1,
+            "country": iso3_to_name.get(iso3, iso3),
+            "iso3": iso3,
+            "pcode": pcode,
+            "adm1_name": fm_name_by_pcode.get(pcode, pcode),
+            "is_final_alert": (aid, iso3) in final_update_pairs,
+        }
+        any_value = False
+        for wsp in (34, 50, 64):
+            vals = unit_vals[(iso3, pcode, wsp)]
+            used = sources_used.get((iso3, wsp), set())
+            # Iterate in canonical order so the source list is stable.
+            ordered = [k for k in ("our", "ADAM", "GDACS") if k in used]
+            row[f"pop_exposed_{wsp}kt"] = (
+                max(vals[k] for k in ordered) if ordered else 0
+            )
+            row[f"sources_{wsp}kt"] = ",".join(_SRC_LABELS[k] for k in ordered)
+            cavs = [
+                c for c in (
+                    _caveat(g1, iso3, pcode, wsp),
+                    _caveat(a1, iso3, pcode, wsp),
+                ) if c
+            ]
+            row[f"caveat_{wsp}kt"] = " | ".join(dict.fromkeys(cavs))
+            any_value = any_value or any(v > 0 for v in vals.values())
+        if any_value:
+            out.append(row)
+    return out
+
+
 def generate_exposure_csv(
     engine, issued_time_dt: datetime
 ) -> list[tuple[str, bytes]]:
     """Return a list of (filename, csv_bytes) — one per active or final-update storm.
 
-    Each CSV has one row per country with columns:
-        country, iso3, is_final_alert,
+    Each CSV has country (admin 0) rows AND subnational (admin 1) rows,
+    distinguished by an `admin_level` column. Columns:
+        admin_level, country, iso3, pcode, adm1_name, is_final_alert,
         pop_exposed_34kt, pop_exposed_50kt, pop_exposed_64kt,
-        sources_34kt, sources_50kt, sources_64kt
-    where pop_exposed is the MAX across available sources (CHD, ADAM, GDACS)
-    and sources_* lists which sources contributed (e.g. "CHD,ADAM,GDACS").
+        sources_34kt, sources_50kt, sources_64kt,
+        caveat_34kt, caveat_50kt, caveat_64kt
+    pop_exposed is the MAX across available sources (CHD, ADAM, GDACS) per unit,
+    and sources_* lists which sources were used (e.g. "CHD,ADAM,GDACS"). At
+    admin 1 the three sources are harmonized onto a common FieldMaps pcode
+    (`pcode`/`adm1_name`), and the source set is held consistent across all
+    admin-1 units within a storm-country (per wind speed) so the units are
+    directly comparable — see _build_adm1_rows. Because MAX is taken per unit
+    independently, admin 1 figures do NOT necessarily sum to the country total.
+    caveat_* carries any GDACS/ADAM matching caveat for that unit (e.g. a
+    pre-split boundary). admin 0 rows leave pcode/adm1_name/caveat_* blank.
     """
     import pandas as _pd
 
@@ -1143,6 +1281,31 @@ def generate_exposure_csv(
     gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_fetch_ids, issued_time_dt)
     adam_cur_df = fetch_adam_current_exposure(engine, all_fetch_ids, issued_time_dt)
 
+    # Admin-1 (subnational) exposure, harmonized onto FieldMaps pcodes.
+    fcast_adm1_df = fetch_fcast_exposure_adm1(engine, issued_time_dt)
+    obsv_adm1_df = fetch_current_obsv_exposure_adm1(engine, all_fetch_ids, issued_time_dt)
+    gdacs_adm1_df = fetch_gdacs_current_exposure_adm1(engine, all_fetch_ids, issued_time_dt)
+    adam_adm1_df = fetch_adam_current_exposure_adm1(engine, all_fetch_ids, issued_time_dt)
+
+    # GDACS adm1 units with no FieldMaps match arrive as fm_pcode=NaN "orphan"
+    # rows. Don't silently drop them — log a count + approximate population, then
+    # exclude them (they can't be combined with the other sources by FM unit).
+    # (ADAM orphans are dropped in SQL by fetch_adam_current_exposure_adm1.)
+    _orphans = gdacs_adm1_df[gdacs_adm1_df["fm_pcode"].isna()]
+    if not _orphans.empty:
+        _n_units = _orphans["gdacs_admins"].nunique()
+        _orphan_pop = int(
+            _orphans.drop_duplicates(
+                ["atcf_id", "iso3", "gdacs_admins", "wind_speed_kt"]
+            )["pop_exposed"].sum()
+        )
+        logger.warning(
+            "Dropping %d GDACS adm1 unit(s) with no FieldMaps match "
+            "(~%d pop summed across wind speeds) from the exposure CSV.",
+            _n_units, _orphan_pop,
+        )
+    gdacs_adm1_df = gdacs_adm1_df[gdacs_adm1_df["fm_pcode"].notna()].copy()
+
     # Storm metadata (name, season) for filenames
     meta: dict[str, tuple] = {}
     for _, row in fcast_df.drop_duplicates("atcf_id").iterrows():
@@ -1162,6 +1325,8 @@ def generate_exposure_csv(
     iso3_to_name = (
         adm1.drop_duplicates("iso_3").set_index("iso_3")["adm0_name"].to_dict()
     )
+    # FieldMaps pcode -> name for labelling adm1 rows (falls back to bare pcode).
+    fm_name_by_pcode = fetch_fm_names(engine, all_iso3s)
 
     def _obsv(aid: str, iso3: str, wsp: int) -> int:
         sub = obsv_df[
@@ -1178,11 +1343,15 @@ def generate_exposure_csv(
         filename = f"{storm_slug}_{aid}_issued_{issued_time_dt.strftime('%Y-%m-%dT%H')}.csv"
 
         rows = []
+        # --- admin 0 (country) rows ---
         for _, iso3 in sorted(storm_to_pairs[aid], key=lambda p: p[1]):
             is_final = (aid, iso3) in final_update_pairs
             row: dict = {
+                "admin_level": 0,
                 "country": iso3_to_name.get(iso3, iso3),
                 "iso3": iso3,
+                "pcode": "",
+                "adm1_name": "",
                 "is_final_alert": is_final,
             }
             for wsp in (34, 50, 64):
@@ -1221,10 +1390,30 @@ def generate_exposure_csv(
                 row[f"sources_{wsp}kt"] = (
                     ",".join(_SRC_LABELS.get(k, k) for k in active) if active else ""
                 )
+                row[f"caveat_{wsp}kt"] = ""  # caveats only apply at adm1
             rows.append(row)
 
+        # --- admin 1 (subnational) rows ---
+        rows.extend(
+            _build_adm1_rows(
+                aid,
+                {iso3 for _, iso3 in storm_to_pairs[aid]},
+                final_update_pairs,
+                iso3_to_name,
+                fm_name_by_pcode,
+                fcast_adm1_df,
+                obsv_adm1_df,
+                gdacs_adm1_df,
+                adam_adm1_df,
+            )
+        )
+
+        df_out = _pd.DataFrame(rows).reindex(columns=_CSV_COLS)
+        df_out = df_out.sort_values(
+            ["iso3", "admin_level", "pcode"], na_position="first"
+        )
         buf = io.StringIO()
-        _pd.DataFrame(rows).to_csv(buf, index=False)
+        df_out.to_csv(buf, index=False)
         results.append((filename, buf.getvalue().encode()))
 
     return results
