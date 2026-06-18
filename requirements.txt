@@ -1,6 +1,6 @@
 # Pinned from: uv export --no-dev --no-hashes
-# ocha-relay: install from GitHub branch (update to tag once PR #4 merges)
-git+https://github.com/OCHA-DAP/ocha-relay.git@add-upload-media
+# ocha-relay: pinned to release tag (PR #4 merged; add-upload-media branch deleted)
+git+https://github.com/OCHA-DAP/ocha-relay.git@v0.3.0
 
 affine==2.4.0
 aiohappyeyeballs==2.6.1
