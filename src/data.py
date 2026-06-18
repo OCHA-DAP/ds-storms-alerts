@@ -10,6 +10,8 @@ import ocha_stratus as stratus
 import pandas as pd
 from sqlalchemy import Engine, bindparam, text
 
+from src import fm_matching as fm
+
 logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(
     logging.WARNING
 )
@@ -32,6 +34,7 @@ _BLOB_ADM1_PREFIX = _BLOB_BASE + "adm1/"
 _BLOB_ADM0_PREFIX = _BLOB_BASE + "adm0/"
 
 _ADMIN_LEVEL = 0
+_ADMIN_LEVEL_1 = 1
 _WIND_SPEEDS_KT = (34, 50, 64)
 
 # Auxiliary products (WSP polygons/exposure, and the GDACS/ADAM exposure, whose
@@ -182,6 +185,232 @@ def fetch_adam_current_exposure(
             },
         )
         return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Admin-1 (subnational) exposure fetchers.
+#
+# These mirror the admin-0 fetchers above but harmonize each source onto a
+# common FieldMaps pcode (`fm_pcode`) so the three sources can be combined
+# per subnational unit. NHC/CHD exposure is already FM-keyed (its `pcode`
+# column IS the FM pcode at admin_level=1), so it needs no lookup. GDACS and
+# ADAM use their own admin codes/names and are mapped to FM via the canonical
+# `storms.gdacs_fm_lookup` / `storms.adam_fm_lookup` tables, then SUM-aggregated
+# to the FM unit. The same advisory-time window as the admin-0 fetchers applies
+# (valid_time IN (advisory, advisory - _ISSUED_OFFSET_HOURS)). Matching method
+# ported from the FM-to-source lookup work in the preview app / ds-storms-pipeline.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def fetch_fcast_exposure_adm1(
+    engine: Engine, issued_time: datetime
+) -> pd.DataFrame:
+    """Forecast-only adm1 exposure at issued_time (admin_level=1, > 0).
+
+    NHC `pcode` IS the FieldMaps pcode at adm1, so no lookup is needed. The table
+    grain is one row per (issued_time, atcf_id, iso3, pcode, wind_speed_kt,
+    admin_level), so a plain SELECT returns one row per FM unit — same as the
+    adm0 fetch_fcast_exposure (no dedup needed at either level).
+    Returns columns: atcf_id, iso3, fm_pcode, wind_speed_kt, pop_exposed.
+    """
+    sql = text("""
+        SELECT e.atcf_id, e.iso3, e.pcode AS fm_pcode, e.wind_speed_kt,
+               e.pop_exposed
+        FROM storms.nhc_tracks_fcastonly_exposure e
+        WHERE e.issued_time = :issued_time
+          AND e.admin_level = :admin_level
+          AND e.pop_exposed > 0
+    """)
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql,
+            {"issued_time": issued_time, "admin_level": _ADMIN_LEVEL_1},
+        )
+        return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+
+
+def fetch_current_obsv_exposure_adm1(
+    engine: Engine, atcf_ids: list[str], issued_time: datetime
+) -> pd.DataFrame:
+    """Latest cumulative observed adm1 exposure per (atcf_id, iso3, fm_pcode, wsp).
+
+    Uses valid_time <= issued_time. NHC `pcode` IS the FieldMaps pcode at adm1.
+    Returns columns: atcf_id, iso3, fm_pcode, wind_speed_kt, pop_exposed.
+    """
+    cols = ["atcf_id", "iso3", "fm_pcode", "wind_speed_kt", "pop_exposed"]
+    if not atcf_ids:
+        return pd.DataFrame(columns=cols)
+    sql = text("""
+        SELECT DISTINCT ON (e.atcf_id, e.iso3, e.pcode, e.wind_speed_kt)
+          e.atcf_id, e.iso3, e.pcode AS fm_pcode, e.wind_speed_kt, e.pop_exposed
+        FROM storms.nhc_tracks_obsv_exposure e
+        WHERE e.atcf_id IN :atcf_ids
+          AND e.admin_level = :admin_level
+          AND e.valid_time <= :issued_time
+        ORDER BY e.atcf_id, e.iso3, e.pcode, e.wind_speed_kt, e.valid_time DESC
+    """).bindparams(bindparam("atcf_ids", expanding=True))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql,
+            {
+                "atcf_ids": atcf_ids,
+                "issued_time": issued_time,
+                "admin_level": _ADMIN_LEVEL_1,
+            },
+        )
+        return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+
+
+def _fetch_gdacs_adm1_window_rows(
+    engine: Engine, atcf_ids: list[str], issued_time: datetime
+) -> pd.DataFrame:
+    """Advisory-window pick-by-time only: the latest snapshot per GDACS admin
+    within valid_time IN (:t_exact, :t_prev). FM matching is done separately by
+    fm_matching.match_gdacs. `admin_name` is aliased to the GDACS code so the
+    matcher's rolled-up `gdacs_admins`/orphan ids stay code-based (matching the
+    prior SQL). Columns: atcf_id, iso3, gdacs_admin_code, admin_name,
+    wind_speed_kt, pop_exposed."""
+    sql = text("""
+        SELECT DISTINCT ON (lk0.atcf_id, g.gdacs_admin_code, g.wind_speed_kt)
+            lk0.atcf_id, g.iso3, g.gdacs_admin_code,
+            g.gdacs_admin_code AS admin_name, g.wind_speed_kt, g.pop_exposed
+        FROM storms.gdacs_exposure g
+        JOIN storms.storm_id_lookup lk0 ON lk0.gdacs_eventid = g.gdacs_eventid
+        WHERE lk0.atcf_id IN :atcf_ids
+          AND g.admin_level = :admin_level
+          AND g.pop_exposed > 0
+          AND g.valid_time IN (:t_exact, :t_prev)
+        ORDER BY lk0.atcf_id, g.gdacs_admin_code, g.wind_speed_kt,
+                 g.valid_time DESC
+    """).bindparams(bindparam("atcf_ids", expanding=True))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql,
+            {
+                "atcf_ids": atcf_ids,
+                "admin_level": _ADMIN_LEVEL_1,
+                "t_exact": issued_time,
+                "t_prev": issued_time - timedelta(hours=_ISSUED_OFFSET_HOURS),
+            },
+        )
+        return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+
+
+def fetch_gdacs_current_exposure_adm1(
+    engine: Engine, atcf_ids: list[str], issued_time: datetime
+) -> pd.DataFrame:
+    """GDACS adm1 exposure aggregated to FieldMaps pcode for the given advisory.
+
+    Advisory-window pick-by-time (valid_time IN (t_exact, t_prev)) is done here;
+    the GDACS admin -> FieldMaps matching + SUM-aggregation is delegated to the
+    shared, validated fm_matching module (so this repo and
+    ds-storm-impact-harmonisation match admins identically). Countries GDACS only
+    covers nationally are excluded; GDACS admins with no FM match surface as
+    fm_pcode = NULL "orphan" rows for the caller to log + drop.
+
+    Returns columns: atcf_id, iso3, fm_pcode, wind_speed_kt, pop_exposed,
+        n_gdacs_admins, gdacs_admins, caveat_note.
+    """
+    cols = [
+        "atcf_id", "iso3", "fm_pcode", "wind_speed_kt", "pop_exposed",
+        "n_gdacs_admins", "gdacs_admins", "caveat_note",
+    ]
+    if not atcf_ids:
+        return pd.DataFrame(columns=cols)
+    raw = _fetch_gdacs_adm1_window_rows(engine, atcf_ids, issued_time)
+    matched = fm.match_gdacs(raw, fm.load_gdacs_lookup(engine))
+    return matched.rename(columns={
+        "n_src_admins": "n_gdacs_admins", "src_admins": "gdacs_admins"})[cols]
+
+
+def _fetch_adam_adm1_window_rows(
+    engine: Engine, atcf_ids: list[str], issued_time: datetime
+) -> pd.DataFrame:
+    """Advisory-window pick-by-time only: the latest snapshot per ADAM admin
+    within valid_time IN (:t_exact, :t_prev). FM matching (by case-insensitive
+    name) is done separately by fm_matching.match_adam. Columns: atcf_id, iso3,
+    admin_name, wind_speed_kt, pop_exposed."""
+    sql = text("""
+        SELECT DISTINCT ON (lk0.atcf_id, a.iso3, lower(a.admin_name),
+                            a.wind_speed_kt)
+            lk0.atcf_id, a.iso3, a.admin_name, a.wind_speed_kt, a.pop_exposed
+        FROM storms.adam_exposure a
+        JOIN storms.storm_id_lookup lk0 ON lk0.adam_eventid = a.adam_eventid
+        WHERE lk0.atcf_id IN :atcf_ids
+          AND a.admin_level = :admin_level
+          AND a.pop_exposed > 0
+          AND a.valid_time IN (:t_exact, :t_prev)
+        ORDER BY lk0.atcf_id, a.iso3, lower(a.admin_name), a.wind_speed_kt,
+                 a.valid_time DESC
+    """).bindparams(bindparam("atcf_ids", expanding=True))
+    with engine.connect() as conn:
+        result = conn.execute(
+            sql,
+            {
+                "atcf_ids": atcf_ids,
+                "admin_level": _ADMIN_LEVEL_1,
+                "t_exact": issued_time,
+                "t_prev": issued_time - timedelta(hours=_ISSUED_OFFSET_HOURS),
+            },
+        )
+        return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
+
+
+def fetch_adam_current_exposure_adm1(
+    engine: Engine, atcf_ids: list[str], issued_time: datetime
+) -> pd.DataFrame:
+    """ADAM adm1 exposure aggregated to FieldMaps pcode for the given advisory.
+
+    Advisory-window pick-by-time is done here; the ADAM admin -> FieldMaps
+    matching (case-insensitive name) + SUM-aggregation is delegated to the shared
+    fm_matching module. ADAM admins with no FM match are dropped (no orphan row
+    for ADAM), preserving the prior behavior.
+
+    Returns columns: atcf_id, iso3, fm_pcode, wind_speed_kt, pop_exposed,
+        n_adam_admins, adam_admins, caveat_note.
+    """
+    cols = [
+        "atcf_id", "iso3", "fm_pcode", "wind_speed_kt", "pop_exposed",
+        "n_adam_admins", "adam_admins", "caveat_note",
+    ]
+    if not atcf_ids:
+        return pd.DataFrame(columns=cols)
+    raw = _fetch_adam_adm1_window_rows(engine, atcf_ids, issued_time)
+    matched = fm.match_adam(raw, fm.load_adam_lookup(engine))
+    matched = matched[matched["fm_pcode"].notna()].copy()   # ADAM drops orphans
+    return matched.rename(columns={
+        "n_src_admins": "n_adam_admins", "src_admins": "adam_admins"})[cols]
+
+
+def fetch_fm_names(engine: Engine, iso3s: list[str]) -> dict[str, str]:
+    """Return {fm_pcode: fm_name} at admin_level=1, UNIONed across the GDACS and
+    ADAM lookups (scoped to `iso3s`).
+
+    Used to label adm1 CSV rows. UNIONing both lookups (mirroring
+    fm_matching.fm_names) means a unit named in only one of them — e.g. an
+    ADAM-only match absent from the GDACS lookup — still resolves to a real name.
+    FM units that only NHC/CHD reports (in neither lookup) won't appear here; the
+    caller falls back to the bare pcode.
+    """
+    if not iso3s:
+        return {}
+    sql = text("""
+        SELECT fm_pcode, MAX(fm_name) AS fm_name FROM (
+            SELECT fm_pcode, fm_name FROM storms.gdacs_fm_lookup
+            WHERE admin_level = :admin_level
+              AND iso3 IN :iso3s AND fm_pcode IS NOT NULL
+            UNION ALL
+            SELECT fm_pcode, fm_name FROM storms.adam_fm_lookup
+            WHERE admin_level = :admin_level
+              AND iso3 IN :iso3s AND fm_pcode IS NOT NULL
+        ) z
+        GROUP BY fm_pcode
+    """).bindparams(bindparam("iso3s", expanding=True))
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sql, {"admin_level": _ADMIN_LEVEL_1, "iso3s": iso3s}
+        ).fetchall()
+    return {r[0]: r[1] for r in rows if r[1] is not None}
 
 
 def fetch_adam_historical_exposure(
