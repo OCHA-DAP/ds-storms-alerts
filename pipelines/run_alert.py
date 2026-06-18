@@ -1218,10 +1218,15 @@ def _build_adm1_rows(
             used = sources_used.get((iso3, wsp), set())
             # Iterate in canonical order so the source list is stable.
             ordered = [k for k in ("our", "ADAM", "GDACS") if k in used]
-            row[f"pop_exposed_{wsp}kt"] = (
-                max(vals[k] for k in ordered) if ordered else 0
+            unit_val = max(vals[k] for k in ordered) if ordered else 0
+            row[f"pop_exposed_{wsp}kt"] = unit_val
+            # Blank the source list when this unit has no exposure at this wind
+            # speed, mirroring admin 0 — otherwise the consistent-per-country set
+            # would list sources next to a 0 here (they cover the country
+            # elsewhere but not this unit), reading inconsistently across levels.
+            row[f"sources_{wsp}kt"] = (
+                ",".join(_SRC_LABELS[k] for k in ordered) if unit_val > 0 else ""
             )
-            row[f"sources_{wsp}kt"] = ",".join(_SRC_LABELS[k] for k in ordered)
             cavs = [
                 c for c in (
                     _caveat(g1, iso3, pcode, wsp),
@@ -1294,14 +1299,18 @@ def generate_exposure_csv(
     _orphans = gdacs_adm1_df[gdacs_adm1_df["fm_pcode"].isna()]
     if not _orphans.empty:
         _n_units = _orphans["gdacs_admins"].nunique()
+        # Wind-speed bands nest (everyone exposed at 64kt is also in the 34kt
+        # band), so don't sum across them — that double/triple-counts. Take the
+        # widest band per unit (max over wind speeds = the 34kt figure for
+        # cumulative exposure) as a truer headcount.
         _orphan_pop = int(
-            _orphans.drop_duplicates(
-                ["atcf_id", "iso3", "gdacs_admins", "wind_speed_kt"]
-            )["pop_exposed"].sum()
+            _orphans.groupby(["atcf_id", "iso3", "gdacs_admins"])["pop_exposed"]
+            .max()
+            .sum()
         )
         logger.warning(
             "Dropping %d GDACS adm1 unit(s) with no FieldMaps match "
-            "(~%d pop summed across wind speeds) from the exposure CSV.",
+            "(~%d pop in the widest wind band) from the exposure CSV.",
             _n_units, _orphan_pop,
         )
     gdacs_adm1_df = gdacs_adm1_df[gdacs_adm1_df["fm_pcode"].notna()].copy()

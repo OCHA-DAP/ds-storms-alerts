@@ -207,17 +207,19 @@ def fetch_fcast_exposure_adm1(
 ) -> pd.DataFrame:
     """Forecast-only adm1 exposure at issued_time (admin_level=1, > 0).
 
-    NHC `pcode` IS the FieldMaps pcode at adm1, so no lookup is needed.
+    NHC `pcode` IS the FieldMaps pcode at adm1, so no lookup is needed. The table
+    grain is one row per (issued_time, atcf_id, iso3, pcode, wind_speed_kt,
+    admin_level), so a plain SELECT returns one row per FM unit — same as the
+    adm0 fetch_fcast_exposure (no dedup needed at either level).
     Returns columns: atcf_id, iso3, fm_pcode, wind_speed_kt, pop_exposed.
     """
     sql = text("""
         SELECT e.atcf_id, e.iso3, e.pcode AS fm_pcode, e.wind_speed_kt,
-               MAX(e.pop_exposed) AS pop_exposed
+               e.pop_exposed
         FROM storms.nhc_tracks_fcastonly_exposure e
         WHERE e.issued_time = :issued_time
           AND e.admin_level = :admin_level
           AND e.pop_exposed > 0
-        GROUP BY e.atcf_id, e.iso3, e.pcode, e.wind_speed_kt
     """)
     with engine.connect() as conn:
         result = conn.execute(
@@ -381,19 +383,28 @@ def fetch_adam_current_exposure_adm1(
 
 
 def fetch_fm_names(engine: Engine, iso3s: list[str]) -> dict[str, str]:
-    """Return {fm_pcode: fm_name} at admin_level=1 from storms.gdacs_fm_lookup.
+    """Return {fm_pcode: fm_name} at admin_level=1, UNIONed across the GDACS and
+    ADAM lookups (scoped to `iso3s`).
 
-    Used to label adm1 CSV rows. FM units that only NHC/CHD reports (absent from
-    the GDACS lookup) won't appear here; the caller falls back to the bare pcode.
+    Used to label adm1 CSV rows. UNIONing both lookups (mirroring
+    fm_matching.fm_names) means a unit named in only one of them — e.g. an
+    ADAM-only match absent from the GDACS lookup — still resolves to a real name.
+    FM units that only NHC/CHD reports (in neither lookup) won't appear here; the
+    caller falls back to the bare pcode.
     """
     if not iso3s:
         return {}
     sql = text("""
-        SELECT DISTINCT fm_pcode, fm_name
-        FROM storms.gdacs_fm_lookup
-        WHERE admin_level = :admin_level
-          AND iso3 IN :iso3s
-          AND fm_pcode IS NOT NULL
+        SELECT fm_pcode, MAX(fm_name) AS fm_name FROM (
+            SELECT fm_pcode, fm_name FROM storms.gdacs_fm_lookup
+            WHERE admin_level = :admin_level
+              AND iso3 IN :iso3s AND fm_pcode IS NOT NULL
+            UNION ALL
+            SELECT fm_pcode, fm_name FROM storms.adam_fm_lookup
+            WHERE admin_level = :admin_level
+              AND iso3 IN :iso3s AND fm_pcode IS NOT NULL
+        ) z
+        GROUP BY fm_pcode
     """).bindparams(bindparam("iso3s", expanding=True))
     with engine.connect() as conn:
         rows = conn.execute(
