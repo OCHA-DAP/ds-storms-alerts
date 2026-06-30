@@ -1,4 +1,5 @@
 import base64
+import html as _html
 import io
 from dataclasses import dataclass
 from datetime import datetime
@@ -7,6 +8,12 @@ from zoneinfo import ZoneInfo
 import geopandas as gpd
 import matplotlib
 matplotlib.use("Agg")  # must be before pyplot import
+from PIL import Image
+
+# Email content width (matches the body max-width in run_alert.py). Image width
+# attributes are capped here so Outlook desktop — which ignores max-width CSS —
+# never renders a chart wider than the layout.
+_EMAIL_CONTENT_WIDTH_PX = 900
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -397,7 +404,7 @@ def _strip_chart(
                 annotation_clip=False,
             )
 
-    return _fig_to_img_tag(fig)
+    return _fig_to_img_tag(fig, alt=title)
 
 
 def wind_speed_color(wind_speed_kt: int) -> str:
@@ -775,7 +782,11 @@ def track_plot_buffers(
         ("Tracks", _track_legend_handles(tracks)),
     ])
     _add_time_note(ax, tracks)
-    return _fig_to_img_tag(fig)
+    return _fig_to_img_tag(
+        fig,
+        alt=(f"{storm_name}: forecast track and wind swaths map" if storm_name
+             else "Storm tracks and forecast wind swaths map"),
+    )
 
 
 def track_plot_wsp(
@@ -824,14 +835,28 @@ def track_plot_wsp(
         ("Tracks", _track_legend_handles(tracks)),
     ])
     _add_time_note(ax, tracks)
-    return _fig_to_img_tag(fig)
+    return _fig_to_img_tag(fig, alt=title)
 
 
-def _fig_to_img_tag(fig: plt.Figure) -> str:
+def _fig_to_img_tag(fig: plt.Figure, alt: str = "") -> str:
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
-    img_b64 = base64.b64encode(buf.read()).decode("utf-8")
-    style = "max-width:100%;display:block;margin-bottom:8px"
-    return f'<img src="data:image/png;base64,{img_b64}" style="{style}">'
+    png = buf.read()
+    # Emit explicit width/height + alt. Outlook desktop (Word engine) ignores
+    # max-width CSS and otherwise renders at the raw pixel size, so without a
+    # width attribute the legends-widened maps overflow; with one it scales
+    # correctly. Gmail/Apple Mail/mobile keep scaling responsively via
+    # max-width:100%;height:auto. alt gives a graceful state while loading or if
+    # an image ever fails to load.
+    nat_w, nat_h = Image.open(io.BytesIO(png)).size
+    w = min(nat_w, _EMAIL_CONTENT_WIDTH_PX)
+    h = max(1, round(w * nat_h / nat_w))
+    img_b64 = base64.b64encode(png).decode("utf-8")
+    alt_attr = _html.escape(alt, quote=True)
+    style = f"width:{w}px;max-width:100%;height:auto;display:block;margin-bottom:8px"
+    return (
+        f'<img src="data:image/png;base64,{img_b64}" '
+        f'width="{w}" height="{h}" alt="{alt_attr}" style="{style}">'
+    )
