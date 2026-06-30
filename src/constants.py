@@ -1,7 +1,10 @@
 PROJECT_PREFIX = "ds-storms-alerts"
 
-TRISTAN_ONLY_LIST_ID = 5
-TEST_LIST_IDS = [TRISTAN_ONLY_LIST_ID]
+# "Storm Alerts - Internal Test" — private Listmonk list (id 110), members:
+# tristan.downing@un.org, downing.tristan@gmail.com, leonardo.milano@un.org.
+# Test/preview sends go here instead of the live country lists.
+TEST_LIST_ID = 110
+TEST_LIST_IDS = [TEST_LIST_ID]
 
 COUNTRY_LIST_TAG = "ds-storms-alerts"
 COUNTRY_LIST_NAME_PREFIX = "Storm Alerts"  # list display name: "Storm Alerts - Haiti"
