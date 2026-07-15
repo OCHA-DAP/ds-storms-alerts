@@ -56,6 +56,7 @@ _SRC_LABELS = {"our": "CHD", "ADAM": "ADAM", "GDACS": "GDACS"}
 
 # Explicit column order for the per-storm exposure CSV (admin 0 + admin 1 rows).
 _CSV_COLS = [
+    "atcf_id",
     "admin_level", "country", "iso3", "pcode", "adm1_name", "is_final_alert",
     "pop_exposed_34kt", "pop_exposed_50kt", "pop_exposed_64kt",
     "sources_34kt", "sources_50kt", "sources_64kt",
@@ -1205,6 +1206,7 @@ def _build_adm1_rows(
     out: list[dict] = []
     for iso3, pcode in sorted(adm1_keys):
         row: dict = {
+            "atcf_id": aid,
             "admin_level": 1,
             "country": iso3_to_name.get(iso3, iso3),
             "iso3": iso3,
@@ -1225,7 +1227,7 @@ def _build_adm1_rows(
             # would list sources next to a 0 here (they cover the country
             # elsewhere but not this unit), reading inconsistently across levels.
             row[f"sources_{wsp}kt"] = (
-                ",".join(_SRC_LABELS[k] for k in ordered) if unit_val > 0 else ""
+                "|".join(_SRC_LABELS[k] for k in ordered) if unit_val > 0 else ""
             )
             cavs = [
                 c for c in (
@@ -1247,12 +1249,14 @@ def generate_exposure_csv(
 
     Each CSV has country (admin 0) rows AND subnational (admin 1) rows,
     distinguished by an `admin_level` column. Columns:
-        admin_level, country, iso3, pcode, adm1_name, is_final_alert,
+        atcf_id, admin_level, country, iso3, pcode, adm1_name, is_final_alert,
         pop_exposed_34kt, pop_exposed_50kt, pop_exposed_64kt,
         sources_34kt, sources_50kt, sources_64kt,
         caveat_34kt, caveat_50kt, caveat_64kt
+    atcf_id is the NHC ATCF storm identifier (e.g. AL132025) — also in the
+    filename, but carried as a column so concatenated CSVs keep storm identity.
     pop_exposed is the MAX across available sources (CHD, ADAM, GDACS) per unit,
-    and sources_* lists which sources were used (e.g. "CHD,ADAM,GDACS"). At
+    and sources_* lists which sources were used (e.g. "CHD|ADAM|GDACS"). At
     admin 1 the three sources are harmonized onto a common FieldMaps pcode
     (`pcode`/`adm1_name`), and the source set is held consistent across all
     admin-1 units within a storm-country (per wind speed) so the units are
@@ -1356,6 +1360,7 @@ def generate_exposure_csv(
         for _, iso3 in sorted(storm_to_pairs[aid], key=lambda p: p[1]):
             is_final = (aid, iso3) in final_update_pairs
             row: dict = {
+                "atcf_id": aid,
                 "admin_level": 0,
                 "country": iso3_to_name.get(iso3, iso3),
                 "iso3": iso3,
@@ -1397,7 +1402,7 @@ def generate_exposure_csv(
                     max(active.values()) if active else 0
                 )
                 row[f"sources_{wsp}kt"] = (
-                    ",".join(_SRC_LABELS.get(k, k) for k in active) if active else ""
+                    "|".join(_SRC_LABELS.get(k, k) for k in active) if active else ""
                 )
                 row[f"caveat_{wsp}kt"] = ""  # caveats only apply at adm1
             rows.append(row)
