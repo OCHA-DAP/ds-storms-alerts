@@ -1291,8 +1291,8 @@ def _email_readme_blocks(storm_label, aid, issued_time_dt, adm0, adm1, cav):
         B("gap", ""),
         B("h2", "Tabs"),
         B("bullet", f"adm0_exposure — country level ({len(adm0)} rows): one "
-          f"row per country. The storm key on every tab is atcf_id, the NHC "
-          f"ATCF identifier (e.g. {aid})."),
+          f"row per country. The storm key on both exposure tabs is atcf_id, "
+          f"the NHC ATCF identifier (e.g. {aid})."),
         B("bullet", f"adm1_exposure — subnational FieldMaps units "
           f"({len(adm1)} rows): one row per admin-1 unit with any exposure."),
         B("bullet", f"caveats — GDACS/ADAM admin-1 alignment policy and "
