@@ -382,6 +382,39 @@ def fetch_adam_current_exposure_adm1(
         "n_src_admins": "n_adam_admins", "src_admins": "adam_admins"})[cols]
 
 
+def fetch_lookup_caveats(engine: Engine, iso3s: list[str]) -> pd.DataFrame:
+    """Caveat rows for the workbook's `caveats` tab, scoped to `iso3s`:
+    country-level adm1 policy (adm0 rows carrying a caveat) plus the per-unit
+    adm1 rows that carry a reviewer `note`. Straight from the GDACS/ADAM
+    FieldMaps lookups' own caveat system — the same query as the historical
+    archive workbook (ds-storm-impact-harmonisation queries.lookup_caveats),
+    filtered to the storm's countries.
+
+    Columns: source, iso3, admin_level, scope, caveat_kind, caveat_note, note.
+    """
+    cols = ["source", "iso3", "admin_level", "scope",
+            "caveat_kind", "caveat_note", "note"]
+    if not iso3s:
+        return pd.DataFrame(columns=cols)
+    frames = []
+    for src, t in (("GDACS", "gdacs_fm_lookup"), ("ADAM", "adam_fm_lookup")):
+        sql = text(f"""
+            SELECT DISTINCT iso3, admin_level,
+                   CASE WHEN admin_level = 0 THEN '(country policy)'
+                        ELSE fm_name END AS scope,
+                   caveat_kind, caveat_note, note
+            FROM storms.{t}
+            WHERE iso3 IN :iso3s
+              AND ((admin_level = 0
+                    AND (caveat_kind IS NOT NULL OR caveat_note IS NOT NULL))
+                   OR (admin_level = 1 AND note IS NOT NULL))
+        """).bindparams(bindparam("iso3s", expanding=True))
+        df = pd.read_sql(sql, engine, params={"iso3s": iso3s})
+        df.insert(0, "source", src)
+        frames.append(df)
+    return pd.concat(frames, ignore_index=True)[cols]
+
+
 def fetch_fm_names(engine: Engine, iso3s: list[str]) -> dict[str, str]:
     """Return {fm_pcode: fm_name} at admin_level=1, UNIONed across the GDACS and
     ADAM lookups (scoped to `iso3s`).

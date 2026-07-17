@@ -33,6 +33,7 @@ from src.data import (
     fetch_gdacs_current_exposure_adm1,
     fetch_gdacs_historical_exposure,
     fetch_historical_obsv_exposure,
+    fetch_lookup_caveats,
     fetch_track_geo,
     fetch_prev_any_pairs,
     fetch_wsp_fcastonly_exposure,
@@ -40,6 +41,8 @@ from src.data import (
     load_adm1_boundaries,
     load_background_countries,
 )
+from src import fm_matching as fm
+from src.xlsx_style import build_readme, style_data_sheet
 from src.plots import (
     StormMark,
     WspPdf,
@@ -54,14 +57,36 @@ from src.plots import (
 _HIST_COLOR = "#888888"
 _SRC_LABELS = {"our": "CHD", "ADAM": "ADAM", "GDACS": "GDACS"}
 
-# Explicit column order for the per-storm exposure CSV (admin 0 + admin 1 rows).
-_CSV_COLS = [
-    "atcf_id",
-    "admin_level", "country", "iso3", "pcode", "adm1_name", "is_final_alert",
+# Column order for the per-storm exposure workbook tabs. Identity columns match
+# the historical archive workbook (ds-storm-impact-harmonisation
+# build_exposure); only the exposure block differs — wide across wind
+# thresholds with MAX-across-sources, vs the archive's long
+# wind_speed_kt + per-source columns.
+_WIDE_COLS = [
     "pop_exposed_34kt", "pop_exposed_50kt", "pop_exposed_64kt",
     "sources_34kt", "sources_50kt", "sources_64kt",
-    "caveat_34kt", "caveat_50kt", "caveat_64kt",
 ]
+_CAVEAT_COLS = ["caveat_34kt", "caveat_50kt", "caveat_64kt"]
+_ADM0_COLS = [
+    "atcf_id", "storm_name", "season", "admin_level", "iso3", "admin_name",
+    "is_final_alert", *_WIDE_COLS,
+]
+_ADM1_COLS = [
+    "atcf_id", "storm_name", "season", "admin_level", "iso3", "country_name",
+    "admin_pcode", "admin_name", "is_final_alert", *_WIDE_COLS, *_CAVEAT_COLS,
+]
+
+# caveat_kind → readable adm1 alignment policy for the caveats tab (same
+# controlled vocabulary as the archive workbook's build_caveats).
+_ALIGN = {
+    "country_only": "national-only (adm1 from CHD)",
+    "no_fm_source": "national-only (no FieldMaps boundary)",
+    "no_adam_source": "national-only (no FieldMaps boundary)",
+    "fm_adm1_only": "national-only (source has no comparable adm1)",
+    "needs_manual_mapping": "partial / manual (boundary-vintage mismatch)",
+}
+_CAVEAT_TAB_COLS = ["source", "iso3", "country_name", "scope",
+                    "adm1_alignment", "caveat_kind", "caveat_note", "note"]
 
 # WSP probability band midpoints (fraction) used to compute expected exposure.
 _WSP_BAND_MIDPOINT = {
@@ -1131,7 +1156,7 @@ def _build_adm1_rows(
     gdacs_adm1_df,
     adam_adm1_df,
 ) -> list[dict]:
-    """Build admin-1 CSV rows for one storm, MAX-combining the sources per FM unit.
+    """Build admin-1 workbook rows for one storm, MAX-combining the sources per FM unit.
 
     Enumerates every (iso3, fm_pcode) seen in ANY adm1 source for this storm's
     countries, then for each wind speed takes the MAX across CHD (fcast + obsv),
@@ -1208,10 +1233,10 @@ def _build_adm1_rows(
         row: dict = {
             "atcf_id": aid,
             "admin_level": 1,
-            "country": iso3_to_name.get(iso3, iso3),
+            "country_name": iso3_to_name.get(iso3, iso3),
             "iso3": iso3,
-            "pcode": pcode,
-            "adm1_name": fm_name_by_pcode.get(pcode, pcode),
+            "admin_pcode": pcode,
+            "admin_name": fm_name_by_pcode.get(pcode, pcode),
             "is_final_alert": (aid, iso3) in final_update_pairs,
         }
         any_value = False
@@ -1242,28 +1267,113 @@ def _build_adm1_rows(
     return out
 
 
-def generate_exposure_csv(
+def _email_readme_blocks(storm_label, aid, issued_time_dt, adm0, adm1, cav):
+    """README cover-sheet blocks for one storm's exposure workbook — the
+    same block vocabulary as the archive workbook's README (see
+    src/xlsx_style.build_readme)."""
+    B = lambda k, t: (k, t)  # noqa: E731 (terse block builder)
+    issued = issued_time_dt.strftime("%Y-%m-%d %H:00")
+    return [
+        B("title", f"Tropical Cyclone Population Exposure — {storm_label}"),
+        B("subtitle", "Forecast-based estimates from CHD, GDACS and ADAM — "
+          "admin 0 & admin 1"),
+        B("meta", f"OCHA Data Science Unit  ·  storm {aid}  ·  NHC advisory "
+          f"issued {issued} UTC"),
+        B("gap", ""),
+        B("h2", "What this file is"),
+        B("body", "Live, forecast-based population-exposure estimates for this "
+          "storm as of the advisory above: people inside the forecast wind "
+          "footprint plus the track observed so far. Figures update with every "
+          "advisory and can move up or down. The companion historical archive "
+          "workbook (ds-storm-impact-harmonisation) reports each storm's FINAL "
+          "observed footprint in the same layout, with the three sources side "
+          "by side."),
+        B("gap", ""),
+        B("h2", "Tabs"),
+        B("bullet", f"adm0_exposure — country level ({len(adm0)} rows): one "
+          f"row per country. The storm key on every tab is atcf_id, the NHC "
+          f"ATCF identifier (e.g. {aid})."),
+        B("bullet", f"adm1_exposure — subnational FieldMaps units "
+          f"({len(adm1)} rows): one row per admin-1 unit with any exposure."),
+        B("bullet", f"caveats — GDACS/ADAM admin-1 alignment policy and "
+          f"reviewer notes for this storm's countries ({len(cav)} rows), from "
+          f"the FieldMaps lookups' own caveat system."),
+        B("gap", ""),
+        B("h2", "Reading the values"),
+        B("bullet", "pop_exposed_{34,50,64}kt is the MAX across the sources "
+          "reporting a positive value at that wind threshold (bias to action) "
+          "— NOT a sum or mean. sources_* lists the contributing sources "
+          "(e.g. CHD|ADAM|GDACS); blank means no source reports exposure "
+          "there."),
+        B("bullet", "CHD is our NHC-derived estimate: the current forecast "
+          "footprint plus the track observed so far. GDACS (JRC) and ADAM "
+          "(WFP) are those sources' live event estimates. GDACS has no 50 kt "
+          "threshold."),
+        B("bullet", "Admin-1 figures take the MAX per unit independently, so "
+          "they do NOT necessarily sum to the country total. caveat_*kt flags "
+          "GDACS/ADAM boundary-matching caveats for that unit."),
+        B("bullet", "is_final_alert = TRUE marks the last update for that "
+          "country: the storm no longer poses a forecast threat there and the "
+          "figures reflect observed exposure."),
+    ]
+
+
+def _workbook_bytes(adm0_df, adm1_df, cav_df, readme_blocks) -> bytes:
+    """Write the styled four-tab xlsx (README first) and return its bytes."""
+    import pandas as _pd
+
+    money = ["pop_exposed_34kt", "pop_exposed_50kt", "pop_exposed_64kt"]
+    widths = {"storm_name": 16, "admin_name": 26, "country_name": 22,
+              "caveat_34kt": 30, "caveat_50kt": 30, "caveat_64kt": 30,
+              "scope": 24, "adm1_alignment": 40, "caveat_kind": 22,
+              "caveat_note": 60, "note": 90}
+    buf = io.BytesIO()
+    with _pd.ExcelWriter(buf, engine="openpyxl") as xl:
+        adm0_df.to_excel(xl, sheet_name="adm0_exposure", index=False)
+        adm1_df.to_excel(xl, sheet_name="adm1_exposure", index=False)
+        cav_df.to_excel(xl, sheet_name="caveats", index=False)
+        wb = xl.book
+        readme = wb.create_sheet("README", 0)
+        build_readme(readme, readme_blocks)
+        for tab in ("adm0_exposure", "adm1_exposure"):
+            style_data_sheet(
+                wb[tab], money_cols=money, plain_cols=["season"],
+                widths=widths, hidden=["admin_level"])
+        style_data_sheet(wb["caveats"], widths=widths)
+        wb.active = 0
+    return buf.getvalue()
+
+
+def generate_exposure_workbook(
     engine, issued_time_dt: datetime
 ) -> list[tuple[str, bytes]]:
-    """Return a list of (filename, csv_bytes) — one per active or final-update storm.
+    """Return a list of (filename, xlsx_bytes) — one styled Excel workbook per
+    active or final-update storm.
 
-    Each CSV has country (admin 0) rows AND subnational (admin 1) rows,
-    distinguished by an `admin_level` column. Columns:
-        atcf_id, admin_level, country, iso3, pcode, adm1_name, is_final_alert,
-        pop_exposed_34kt, pop_exposed_50kt, pop_exposed_64kt,
-        sources_34kt, sources_50kt, sources_64kt,
-        caveat_34kt, caveat_50kt, caveat_64kt
+    The workbook mirrors the historical archive workbook from
+    ds-storm-impact-harmonisation — same tabs (README, adm0_exposure,
+    adm1_exposure, caveats), same styling, same identity columns:
+        adm0: atcf_id, storm_name, season, admin_level, iso3, admin_name
+        adm1: + country_name, admin_pcode, admin_name
+    It differs from the archive only where the products genuinely differ:
+    it is wide across wind thresholds with the sources combined —
+        pop_exposed_{34,50,64}kt (MAX across sources, bias to action),
+        sources_{34,50,64}kt ("CHD|ADAM|GDACS"), caveat_{34,50,64}kt (adm1) —
+    it is per storm per issued_time (so has no storms tab), and it is based
+    on the current forecast (forecast footprint + track observed so far),
+    whereas the archive reports each storm's final observed footprint, long
+    by wind_speed_kt with one column per source.
+
     atcf_id is the NHC ATCF storm identifier (e.g. AL132025) — also in the
-    filename, but carried as a column so concatenated CSVs keep storm identity.
-    pop_exposed is the MAX across available sources (CHD, ADAM, GDACS) per unit,
-    and sources_* lists which sources were used (e.g. "CHD|ADAM|GDACS"). At
-    admin 1 the three sources are harmonized onto a common FieldMaps pcode
-    (`pcode`/`adm1_name`), and the source set is held consistent across all
-    admin-1 units within a storm-country (per wind speed) so the units are
-    directly comparable — see _build_adm1_rows. Because MAX is taken per unit
-    independently, admin 1 figures do NOT necessarily sum to the country total.
-    caveat_* carries any GDACS/ADAM matching caveat for that unit (e.g. a
-    pre-split boundary). admin 0 rows leave pcode/adm1_name/caveat_* blank.
+    filename, but carried as a column so concatenated tabs keep storm
+    identity. At admin 1 the three sources are harmonized onto a common
+    FieldMaps pcode (admin_pcode/admin_name), and the source set is held
+    consistent across all admin-1 units within a storm-country (per wind
+    speed) so the units are directly comparable — see _build_adm1_rows.
+    Because MAX is taken per unit independently, admin 1 figures do NOT
+    necessarily sum to the country total. The caveats tab carries the
+    GDACS/ADAM admin-1 alignment policy + reviewer notes for this storm's
+    countries, straight from the FM lookups' own caveat system.
     """
     import pandas as _pd
 
@@ -1314,7 +1424,7 @@ def generate_exposure_csv(
         )
         logger.warning(
             "Dropping %d GDACS adm1 unit(s) with no FieldMaps match "
-            "(~%d pop in the widest wind band) from the exposure CSV.",
+            "(~%d pop in the widest wind band) from the exposure workbook.",
             _n_units, _orphan_pop,
         )
     gdacs_adm1_df = gdacs_adm1_df[gdacs_adm1_df["fm_pcode"].notna()].copy()
@@ -1335,8 +1445,12 @@ def generate_exposure_csv(
     # Country name lookup
     all_iso3s = sorted({iso3 for pairs in storm_to_pairs.values() for _, iso3 in pairs})
     adm1 = load_adm1_boundaries(all_iso3s)
+    # Modal adm0_name per iso3 — NOT the first row's: FieldMaps gives some
+    # outlying units their own adm0_name (JAM's first row is "Pedro Bank
+    # (Jam.)", which used to label the whole country).
     iso3_to_name = (
-        adm1.drop_duplicates("iso_3").set_index("iso_3")["adm0_name"].to_dict()
+        adm1.groupby("iso_3")["adm0_name"]
+        .agg(lambda s: s.mode().iat[0]).to_dict()
     )
     # FieldMaps pcode -> name for labelling adm1 rows (falls back to bare pcode).
     fm_name_by_pcode = fetch_fm_names(engine, all_iso3s)
@@ -1350,22 +1464,23 @@ def generate_exposure_csv(
         return int(sub["pop_exposed"].sum()) if not sub.empty else 0
 
     results: list[tuple[str, bytes]] = []
+    cav_all = fetch_lookup_caveats(engine, all_iso3s)
     for aid in sorted(storm_to_pairs.keys()):
         nm, ssn = meta.get(aid, (None, None))
         storm_slug = _storm_label(nm, ssn).lower().replace(" ", "_")
-        filename = f"{storm_slug}_{aid}_issued_{issued_time_dt.strftime('%Y-%m-%dT%H')}.csv"
+        filename = f"{storm_slug}_{aid}_issued_{issued_time_dt.strftime('%Y-%m-%dT%H')}.xlsx"
 
         rows = []
         # --- admin 0 (country) rows ---
         for _, iso3 in sorted(storm_to_pairs[aid], key=lambda p: p[1]):
             is_final = (aid, iso3) in final_update_pairs
+            # adm0: admin_name is the country name; admin_pcode == iso3 is
+            # dropped as redundant (mirroring the archive workbook).
             row: dict = {
                 "atcf_id": aid,
                 "admin_level": 0,
-                "country": iso3_to_name.get(iso3, iso3),
+                "admin_name": iso3_to_name.get(iso3, iso3),
                 "iso3": iso3,
-                "pcode": "",
-                "adm1_name": "",
                 "is_final_alert": is_final,
             }
             for wsp in (34, 50, 64):
@@ -1404,31 +1519,46 @@ def generate_exposure_csv(
                 row[f"sources_{wsp}kt"] = (
                     "|".join(_SRC_LABELS.get(k, k) for k in active) if active else ""
                 )
-                row[f"caveat_{wsp}kt"] = ""  # caveats only apply at adm1
             rows.append(row)
 
         # --- admin 1 (subnational) rows ---
-        rows.extend(
-            _build_adm1_rows(
-                aid,
-                {iso3 for _, iso3 in storm_to_pairs[aid]},
-                final_update_pairs,
-                iso3_to_name,
-                fm_name_by_pcode,
-                fcast_adm1_df,
-                obsv_adm1_df,
-                gdacs_adm1_df,
-                adam_adm1_df,
-            )
+        adm1_rows = _build_adm1_rows(
+            aid,
+            {iso3 for _, iso3 in storm_to_pairs[aid]},
+            final_update_pairs,
+            iso3_to_name,
+            fm_name_by_pcode,
+            fcast_adm1_df,
+            obsv_adm1_df,
+            gdacs_adm1_df,
+            adam_adm1_df,
         )
 
-        df_out = _pd.DataFrame(rows).reindex(columns=_CSV_COLS)
-        df_out = df_out.sort_values(
-            ["iso3", "admin_level", "pcode"], na_position="first"
-        )
-        buf = io.StringIO()
-        df_out.to_csv(buf, index=False)
-        results.append((filename, buf.getvalue().encode()))
+        adm0_df = _pd.DataFrame(rows).reindex(columns=_ADM0_COLS)
+        adm1_df = _pd.DataFrame(adm1_rows).reindex(columns=_ADM1_COLS)
+        try:
+            season = int(ssn)
+        except (TypeError, ValueError):
+            season = ssn
+        for df in (adm0_df, adm1_df):
+            df["storm_name"] = nm if nm else aid
+            df["season"] = season
+        adm0_df = adm0_df.sort_values("iso3")
+        adm1_df = adm1_df.sort_values(["iso3", "admin_pcode"])
+
+        # caveats tab: this storm's countries only (the archive workbook
+        # carries the full global set).
+        storm_iso3s = sorted({i for _, i in storm_to_pairs[aid]})
+        cav = cav_all[cav_all["iso3"].isin(storm_iso3s)].copy()
+        cav["country_name"] = cav["iso3"].map(lambda i: iso3_to_name.get(i, i))
+        cav["adm1_alignment"] = cav["caveat_kind"].map(
+            lambda k: _ALIGN.get(k) or fm.CAVEAT_LABELS.get(k) or "see note")
+        cav = cav.sort_values(
+            ["source", "iso3", "admin_level", "scope"])[_CAVEAT_TAB_COLS]
+
+        blocks = _email_readme_blocks(
+            _storm_label(nm, ssn), aid, issued_time_dt, adm0_df, adm1_df, cav)
+        results.append((filename, _workbook_bytes(adm0_df, adm1_df, cav, blocks)))
 
     return results
 
@@ -1475,9 +1605,9 @@ def send_test_alert(engine, issued_time_dt: datetime) -> str:
 
     media_ids: list[int] = []
     if not is_monitoring:
-        csv_files = generate_exposure_csv(engine, issued_time_dt)
-        for filename, csv_bytes in csv_files:
-            media_ids.append(client.upload_attachment(csv_bytes, filename))
+        attachments = generate_exposure_workbook(engine, issued_time_dt)
+        for filename, xlsx_bytes in attachments:
+            media_ids.append(client.upload_attachment(xlsx_bytes, filename))
 
     cid = client.create_campaign(
         name=campaign_name,
@@ -1597,10 +1727,10 @@ if __name__ == "__main__":
 
         media_ids: list[int] = []
         if not is_monitoring:
-            logger.info("Generating and uploading CSV attachments...")
-            csv_files = generate_exposure_csv(engine, issued_time_dt)
-            for filename, csv_bytes in csv_files:
-                media_ids.append(client.upload_attachment(csv_bytes, filename))
+            logger.info("Generating and uploading exposure workbook attachments...")
+            attachments = generate_exposure_workbook(engine, issued_time_dt)
+            for filename, xlsx_bytes in attachments:
+                media_ids.append(client.upload_attachment(xlsx_bytes, filename))
                 logger.info(f"  Attached {filename}")
 
         cid = client.create_campaign(
