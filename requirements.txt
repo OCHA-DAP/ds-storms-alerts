@@ -24,6 +24,7 @@ cycler==0.12.1
 dask==2026.3.0
 docutils==0.22.4
 duckdb==1.5.2
+et-xmlfile==2.0.0
 fonttools==4.62.1
 frozenlist==1.8.0
 fsspec==2026.4.0
@@ -48,6 +49,7 @@ multidict==6.7.1
 narwhals==2.21.0
 numpy==2.4.4
 ocha-stratus==0.1.7
+openpyxl==3.1.5
 packaging==26.2
 pandas==3.0.2
 parso==0.8.7
