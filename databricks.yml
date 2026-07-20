@@ -99,6 +99,14 @@ resources:
 
       max_concurrent_runs: 1
 
+      # Failure alerting: the Jul 2026 openpyxl incident ran 12 consecutive
+      # silent failures (~3 days, through an active storm) before anyone
+      # noticed. Every failed run now emails immediately.
+      email_notifications:
+        on_failure:
+          - tristan.downing@un.org
+        no_alert_for_skipped_runs: true
+
       parameters:
         - name: issued_time      # YYYY-MM-DDTHH backfill override; "" → realtime
           default: ""
