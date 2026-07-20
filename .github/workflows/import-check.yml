@@ -1,0 +1,37 @@
+# Guard against the Jul 2026 openpyxl incident class: a dependency added to
+# pyproject/uv.lock but not to requirements.txt (or not installed on the DBX
+# cluster) crashes the pipeline at import, silently killing every alert email.
+#
+# This job recreates the CLUSTER's environment — install from requirements.txt,
+# NOT uv sync — and import-loads pipelines/run_alert.py exactly as the DBX
+# wrapper does. Any import-time breakage (missing dep, syntax error, moved
+# module) fails the PR instead of the 21:30 UTC production run.
+name: Import check (cluster env parity)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  import-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install from requirements.txt (what the DBX cluster gets)
+        run: pip install -r requirements.txt
+      - name: Import the pipeline as the DBX wrapper does
+        run: |
+          python - <<'EOF'
+          import importlib.util, sys
+          sys.path.insert(0, ".")
+          spec = importlib.util.spec_from_file_location(
+              "run_alert", "pipelines/run_alert.py")
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          print("pipelines/run_alert.py imports cleanly")
+          EOF
