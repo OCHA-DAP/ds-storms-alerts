@@ -57,23 +57,19 @@ from src.plots import (
 _HIST_COLOR = "#888888"
 _SRC_LABELS = {"our": "CHD", "ADAM": "ADAM", "GDACS": "GDACS"}
 
-# Column order for the per-storm exposure workbook tabs. Identity columns match
+# Column order for the per-storm exposure workbook tabs. Long format, one row
+# per (admin unit, wind threshold) — the same layout and identity columns as
 # the historical archive workbook (ds-storm-impact-harmonisation
-# build_exposure); only the exposure block differs — wide across wind
-# thresholds with MAX-across-sources, vs the archive's long
-# wind_speed_kt + per-source columns.
-_WIDE_COLS = [
-    "pop_exposed_34kt", "pop_exposed_50kt", "pop_exposed_64kt",
-    "sources_34kt", "sources_50kt", "sources_64kt",
-]
-_CAVEAT_COLS = ["caveat_34kt", "caveat_50kt", "caveat_64kt"]
+# build_exposure); only the value block differs: a single MAX-across-sources
+# pop_exposed (+ sources/caveat), vs the archive's three per-source columns.
 _ADM0_COLS = [
     "atcf_id", "storm_name", "season", "admin_level", "iso3", "admin_name",
-    "is_final_alert", *_WIDE_COLS,
+    "is_final_alert", "wind_speed_kt", "sources", "pop_exposed",
 ]
 _ADM1_COLS = [
     "atcf_id", "storm_name", "season", "admin_level", "iso3", "country_name",
-    "admin_pcode", "admin_name", "is_final_alert", *_WIDE_COLS, *_CAVEAT_COLS,
+    "admin_pcode", "admin_name", "is_final_alert", "wind_speed_kt", "sources",
+    "pop_exposed", "caveat",
 ]
 
 # caveat_kind → readable adm1 alignment policy for the caveats tab (same
@@ -1158,9 +1154,10 @@ def _build_adm1_rows(
 ) -> list[dict]:
     """Build admin-1 workbook rows for one storm, MAX-combining the sources per FM unit.
 
-    Enumerates every (iso3, fm_pcode) seen in ANY adm1 source for this storm's
-    countries, then for each wind speed takes the MAX across CHD (fcast + obsv),
-    ADAM and GDACS — mirroring the admin-0 logic one level down.
+    Long format: one row per (iso3, fm_pcode, wind_speed_kt). Enumerates every
+    (iso3, fm_pcode) seen in ANY adm1 source for this storm's countries, then
+    for each wind speed takes the MAX across CHD (fcast + obsv), ADAM and
+    GDACS — mirroring the admin-0 logic one level down.
 
     The set of sources is held **consistent across all admin-1 units within a
     storm-country** (per wind speed): a source counts as "used" for the country
@@ -1169,7 +1166,7 @@ def _build_adm1_rows(
     given unit simply contributes 0). This keeps the units directly comparable —
     every row in a country reflects the same sources — rather than one unit being
     max(CHD, ADAM) and its neighbour ADAM-only. The numeric MAX is unchanged by
-    this (adding zeros never changes a maximum); only the `sources_*` labels
+    this (adding zeros never changes a maximum); only the `sources` labels
     become uniform per country. Returns only units with at least one positive
     estimate.
     """
@@ -1227,43 +1224,48 @@ def _build_adm1_rows(
             used = sources_used.setdefault((iso3, wsp), set())
             used |= {k for k, v in vals.items() if v > 0}
 
-    # Second pass: build a row per unit, MAX over the country's consistent set.
+    # Second pass: one row per (unit, wind threshold), MAX over the country's
+    # consistent set. Units with no positive value at ANY threshold are
+    # dropped entirely; kept units emit all three thresholds (zero rows
+    # included, matching the archive workbook's keep-zeros convention).
     out: list[dict] = []
     for iso3, pcode in sorted(adm1_keys):
-        row: dict = {
-            "atcf_id": aid,
-            "admin_level": 1,
-            "country_name": iso3_to_name.get(iso3, iso3),
-            "iso3": iso3,
-            "admin_pcode": pcode,
-            "admin_name": fm_name_by_pcode.get(pcode, pcode),
-            "is_final_alert": (aid, iso3) in final_update_pairs,
-        }
-        any_value = False
+        if not any(v > 0 for wsp in (34, 50, 64)
+                   for v in unit_vals[(iso3, pcode, wsp)].values()):
+            continue
         for wsp in (34, 50, 64):
             vals = unit_vals[(iso3, pcode, wsp)]
             used = sources_used.get((iso3, wsp), set())
             # Iterate in canonical order so the source list is stable.
             ordered = [k for k in ("our", "ADAM", "GDACS") if k in used]
             unit_val = max(vals[k] for k in ordered) if ordered else 0
-            row[f"pop_exposed_{wsp}kt"] = unit_val
-            # Blank the source list when this unit has no exposure at this wind
-            # speed, mirroring admin 0 — otherwise the consistent-per-country set
-            # would list sources next to a 0 here (they cover the country
-            # elsewhere but not this unit), reading inconsistently across levels.
-            row[f"sources_{wsp}kt"] = (
-                "|".join(_SRC_LABELS[k] for k in ordered) if unit_val > 0 else ""
-            )
             cavs = [
                 c for c in (
                     _caveat(g1, iso3, pcode, wsp),
                     _caveat(a1, iso3, pcode, wsp),
                 ) if c
             ]
-            row[f"caveat_{wsp}kt"] = " | ".join(dict.fromkeys(cavs))
-            any_value = any_value or any(v > 0 for v in vals.values())
-        if any_value:
-            out.append(row)
+            out.append({
+                "atcf_id": aid,
+                "admin_level": 1,
+                "country_name": iso3_to_name.get(iso3, iso3),
+                "iso3": iso3,
+                "admin_pcode": pcode,
+                "admin_name": fm_name_by_pcode.get(pcode, pcode),
+                "is_final_alert": (aid, iso3) in final_update_pairs,
+                "wind_speed_kt": wsp,
+                # Blank the source list when this unit has no exposure at this
+                # wind speed, mirroring admin 0 — otherwise the consistent-
+                # per-country set would list sources next to a 0 here (they
+                # cover the country elsewhere but not this unit), reading
+                # inconsistently across levels.
+                "sources": (
+                    "|".join(_SRC_LABELS[k] for k in ordered)
+                    if unit_val > 0 else ""
+                ),
+                "pop_exposed": unit_val,
+                "caveat": " | ".join(dict.fromkeys(cavs)),
+            })
     return out
 
 
@@ -1291,18 +1293,20 @@ def _email_readme_blocks(storm_label, aid, issued_time_dt, adm0, adm1, cav):
         B("gap", ""),
         B("h2", "Tabs"),
         B("bullet", f"adm0_exposure — country level ({len(adm0)} rows): one "
-          f"row per country. The storm key on both exposure tabs is atcf_id, "
-          f"the NHC ATCF identifier (e.g. {aid})."),
+          f"row per country × wind threshold (34/50/64 kt). The storm key on "
+          f"both exposure tabs is atcf_id, the NHC ATCF identifier "
+          f"(e.g. {aid})."),
         B("bullet", f"adm1_exposure — subnational FieldMaps units "
-          f"({len(adm1)} rows): one row per admin-1 unit with any exposure."),
+          f"({len(adm1)} rows): one row per admin-1 unit × wind threshold, "
+          f"for units with any exposure."),
         B("bullet", f"caveats — GDACS/ADAM admin-1 alignment policy and "
           f"reviewer notes for this storm's countries ({len(cav)} rows), from "
           f"the FieldMaps lookups' own caveat system."),
         B("gap", ""),
         B("h2", "Reading the values"),
-        B("bullet", "pop_exposed_{34,50,64}kt is the MAX across the sources "
-          "reporting a positive value at that wind threshold (bias to action) "
-          "— NOT a sum or mean. sources_* lists the contributing sources "
+        B("bullet", "pop_exposed is the MAX across the sources reporting a "
+          "positive value at that row's wind threshold (bias to action) — "
+          "NOT a sum or mean. sources lists the contributing sources "
           "(e.g. CHD|ADAM|GDACS); blank means no source reports exposure "
           "there."),
         B("bullet", "CHD is our NHC-derived estimate: the current forecast "
@@ -1310,8 +1314,8 @@ def _email_readme_blocks(storm_label, aid, issued_time_dt, adm0, adm1, cav):
           "(WFP) are those sources' live event estimates. GDACS has no 50 kt "
           "threshold."),
         B("bullet", "Admin-1 figures take the MAX per unit independently, so "
-          "they do NOT necessarily sum to the country total. caveat_*kt flags "
-          "GDACS/ADAM boundary-matching caveats for that unit."),
+          "they do NOT necessarily sum to the country total. The caveat "
+          "column flags GDACS/ADAM boundary-matching caveats for that unit."),
         B("bullet", "is_final_alert = TRUE marks the last update for that "
           "country: the storm no longer poses a forecast threat there and the "
           "figures reflect observed exposure."),
@@ -1322,9 +1326,9 @@ def _workbook_bytes(adm0_df, adm1_df, cav_df, readme_blocks) -> bytes:
     """Write the styled four-tab xlsx (README first) and return its bytes."""
     import pandas as _pd
 
-    money = ["pop_exposed_34kt", "pop_exposed_50kt", "pop_exposed_64kt"]
+    money = ["pop_exposed"]
     widths = {"storm_name": 16, "admin_name": 26, "country_name": 22,
-              "caveat_34kt": 30, "caveat_50kt": 30, "caveat_64kt": 30,
+              "sources": 17, "caveat": 30,
               "scope": 24, "adm1_alignment": 40, "caveat_kind": 22,
               "caveat_note": 60, "note": 90}
     buf = io.BytesIO()
@@ -1337,7 +1341,8 @@ def _workbook_bytes(adm0_df, adm1_df, cav_df, readme_blocks) -> bytes:
         build_readme(readme, readme_blocks)
         for tab in ("adm0_exposure", "adm1_exposure"):
             style_data_sheet(
-                wb[tab], money_cols=money, plain_cols=["season"],
+                wb[tab], money_cols=money,
+                plain_cols=["season", "wind_speed_kt"],
                 widths=widths, hidden=["admin_level"])
         style_data_sheet(wb["caveats"], widths=widths)
         wb.active = 0
@@ -1352,17 +1357,17 @@ def generate_exposure_workbook(
 
     The workbook mirrors the historical archive workbook from
     ds-storm-impact-harmonisation — same tabs (README, adm0_exposure,
-    adm1_exposure, caveats), same styling, same identity columns:
+    adm1_exposure, caveats), same styling, same long layout (one row per
+    admin unit × wind_speed_kt), same identity columns:
         adm0: atcf_id, storm_name, season, admin_level, iso3, admin_name
         adm1: + country_name, admin_pcode, admin_name
     It differs from the archive only where the products genuinely differ:
-    it is wide across wind thresholds with the sources combined —
-        pop_exposed_{34,50,64}kt (MAX across sources, bias to action),
-        sources_{34,50,64}kt ("CHD|ADAM|GDACS"), caveat_{34,50,64}kt (adm1) —
-    it is per storm per issued_time (so has no storms tab), and it is based
-    on the current forecast (forecast footprint + track observed so far),
-    whereas the archive reports each storm's final observed footprint, long
-    by wind_speed_kt with one column per source.
+    the value block is a single pop_exposed (MAX across sources, bias to
+    action) with `sources` ("CHD|ADAM|GDACS") and, at adm1, a `caveat`
+    column — vs the archive's three per-source exposure columns; it is per
+    storm per issued_time (so has no storms tab); and it is based on the
+    current forecast (forecast footprint + track observed so far), whereas
+    the archive reports each storm's final observed footprint.
 
     atcf_id is the NHC ATCF storm identifier (e.g. AL132025) — also in the
     filename, but carried as a column so concatenated tabs keep storm
@@ -1471,18 +1476,9 @@ def generate_exposure_workbook(
         filename = f"{storm_slug}_{aid}_issued_{issued_time_dt.strftime('%Y-%m-%dT%H')}.xlsx"
 
         rows = []
-        # --- admin 0 (country) rows ---
+        # --- admin 0 (country) rows: one per (country, wind threshold) ---
         for _, iso3 in sorted(storm_to_pairs[aid], key=lambda p: p[1]):
             is_final = (aid, iso3) in final_update_pairs
-            # adm0: admin_name is the country name; admin_pcode == iso3 is
-            # dropped as redundant (mirroring the archive workbook).
-            row: dict = {
-                "atcf_id": aid,
-                "admin_level": 0,
-                "admin_name": iso3_to_name.get(iso3, iso3),
-                "iso3": iso3,
-                "is_final_alert": is_final,
-            }
             for wsp in (34, 50, 64):
                 tr = fcast_df[
                     (fcast_df["atcf_id"] == aid)
@@ -1511,15 +1507,23 @@ def generate_exposure_workbook(
                     {"our": our_val, "ADAM": adam_val, "GDACS": gdacs_val}.items()
                     if v > 0
                 }
+                # adm0: admin_name is the country name; admin_pcode == iso3 is
+                # dropped as redundant (mirroring the archive workbook).
                 # MAX across sources, not mean (bias to action — see the alert
                 # ToC loop for the rationale).
-                row[f"pop_exposed_{wsp}kt"] = (
-                    max(active.values()) if active else 0
-                )
-                row[f"sources_{wsp}kt"] = (
-                    "|".join(_SRC_LABELS.get(k, k) for k in active) if active else ""
-                )
-            rows.append(row)
+                rows.append({
+                    "atcf_id": aid,
+                    "admin_level": 0,
+                    "admin_name": iso3_to_name.get(iso3, iso3),
+                    "iso3": iso3,
+                    "is_final_alert": is_final,
+                    "wind_speed_kt": wsp,
+                    "sources": (
+                        "|".join(_SRC_LABELS.get(k, k) for k in active)
+                        if active else ""
+                    ),
+                    "pop_exposed": max(active.values()) if active else 0,
+                })
 
         # --- admin 1 (subnational) rows ---
         adm1_rows = _build_adm1_rows(
@@ -1543,8 +1547,8 @@ def generate_exposure_workbook(
         for df in (adm0_df, adm1_df):
             df["storm_name"] = nm if nm else aid
             df["season"] = season
-        adm0_df = adm0_df.sort_values("iso3")
-        adm1_df = adm1_df.sort_values(["iso3", "admin_pcode"])
+        adm0_df = adm0_df.sort_values(["iso3", "wind_speed_kt"])
+        adm1_df = adm1_df.sort_values(["iso3", "admin_pcode", "wind_speed_kt"])
 
         # caveats tab: this storm's countries only (the archive workbook
         # carries the full global set).
