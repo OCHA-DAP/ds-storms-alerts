@@ -55,15 +55,6 @@ _WIND_RAMP = {
 }
 _NHC_WIND_COLOR = {k: v[1] for k, v in _WIND_RAMP.items()}
 
-# Six steps of the same hue per threshold, light to dark, for shading the WSP
-# probability bands. Sequential, one hue, monotonic in lightness — the bands are
-# an ordered magnitude (how likely), not categories.
-_WSP_SHADES = {
-    34: ["#fbf4ea", "#f6e9d4", "#eed2aa", "#e5bc7f", "#dda555", "#d48f2a"],
-    50: ["#f9eceb", "#f3dad7", "#e7b5af", "#dc8f86", "#d06a5e", "#c44536"],
-    64: ["#f3dad7", "#e7b5af", "#dc8f86", "#d06a5e", "#c44536", "#9d372b"],
-}
-
 # Wind-speed probability: the HDX primary (blue) ramp, pale to deep.
 #
 # This replaces NHC's own green-lime-yellow-tan-brown-orange-red-purple scale.
@@ -194,45 +185,6 @@ def _pdf_polygon(pdf: WspPdf) -> tuple[list[float], list[float]]:
         ys.extend([density, density])
         cum += pop
     return xs, ys
-
-
-def _pdf_segments(pdf: WspPdf) -> list[tuple[float, float, float, int]]:
-    """The same bands as :func:`_pdf_polygon`, but kept separate.
-
-    Returns (x_start, x_end, density, percentage) per band, left to right.
-    Drawing the strip band-by-band is what lets each carry its own probability
-    shade — as one merged polygon the strip reads as a solid bar, which is the
-    single biggest reason these charts looked like blocks rather than spreads.
-    """
-    bands = [(p, n) for p, n in pdf.bands if n > 0]
-    if not bands:
-        return []
-    max_pop = max(n for _, n in bands)
-    min_pop = max(max_pop * 0.001, 50)
-    bands = [(p, n) for p, n in bands if n >= min_pop]
-    if not bands:
-        return []
-    bands.sort(key=lambda b: b[0], reverse=True)
-
-    out: list[tuple[float, float, float, int]] = []
-    cum = pdf.x_offset
-    for pct, pop in bands:
-        bw = _WSP_BAND_WIDTH_FRAC.get(int(pct), 0.05)
-        out.append((cum, cum + pop, bw / pop, int(pct)))
-        cum += pop
-    return out
-
-
-def _wsp_shade(pct: int, ramp: list[str]) -> str:
-    """Pick a step of the threshold's sequential ramp for a probability band.
-
-    Light to dark = less to more likely, monotonic in lightness by construction
-    — the one rule a sequential encoding has to obey.
-    """
-    for cut, i in ((70, 5), (50, 4), (30, 3), (10, 2), (5, 1)):
-        if pct >= cut:
-            return ramp[i]
-    return ramp[0]
 
 
 # ---------------------------------------------------------------------------
@@ -475,35 +427,6 @@ def _draw_tier(
                 ])
 
 
-def _wsp_legend(ax, shades: list[str]) -> str:
-    """Swatch strip in the top-right decoding the shading.
-
-    A sequential fill has to say what it encodes or it is just decoration, and
-    the reading here is not guessable: the shade is NHC's wind-speed probability
-    for that slice of the population, not how many people are in it.
-
-    The swatches run DARK to LIGHT left to right, because that is the order the
-    bands appear in on the chart — `_pdf_segments` sorts highest-probability
-    first so the near-certain core sits nearest the origin. A conventionally
-    light-to-dark key would point the opposite way to the thing it decodes.
-    """
-    x0, y0, w, h = 0.795, 0.955, 0.017, 0.055
-    for i, c in enumerate(reversed(shades)):
-        ax.add_patch(plt.Rectangle(
-            (x0 + i * w, y0), w, h, transform=ax.transAxes,
-            facecolor=c, edgecolor=PANEL, linewidth=0.5,
-            zorder=7, clip_on=False,
-        ))
-    ax.text(x0 - 0.006, y0 + h / 2, "more likely", transform=ax.transAxes,
-            ha="right", va="center", fontsize=6.2, color=INK_3, zorder=7)
-    ax.text(x0 + len(shades) * w + 0.006, y0 + h / 2, "less likely",
-            transform=ax.transAxes, ha="left", va="center", fontsize=6.2,
-            color=INK_3, zorder=7)
-    ax.text(x0 + len(shades) * w / 2, y0 + h + 0.035,
-            "NHC wind-speed probability", transform=ax.transAxes,
-            ha="center", va="bottom", fontsize=6.2, color=INK_3, zorder=7)
-
-
 def _strip_chart(
     title: str,
     x_label: str,
@@ -512,9 +435,7 @@ def _strip_chart(
     pdf: WspPdf | None = None,
     pdf_fill_color: str = GREY_FILL,
     pdf_edge_color: str = GREY_EDGE,
-    pdf_shades: list[str] | None = None,
     total_pop: int | None = None,
-    show_legend: bool = True,
 ) -> str:
     # Drop marks that would be outside the chart's x range — their ax.text
     # objects at large data coordinates expand bbox_inches="tight" to data
@@ -568,23 +489,20 @@ def _strip_chart(
     # alongside the tall high-density spike; area no longer equals probability,
     # the shape conveys "where the WSP mass lives".
     if has_pdf:
-        pdf_shades = pdf_shades or [pdf_fill_color] * 6
-        segs = _pdf_segments(pdf)
-        top = max((d for _, _, d, _ in segs), default=0.0) ** 0.3
-        if segs and top > 0:
-            for x0, x1, dens, pct in segs:
-                h = (dens ** 0.3) * _Y_PDF_TOP / top
-                ax.add_patch(plt.Rectangle(
-                    (x0, 0), x1 - x0, h,
-                    facecolor=_wsp_shade(pct, pdf_shades),
-                    edgecolor=PANEL, linewidth=0.7, zorder=1,
-                ))
-            # A defined top edge is what makes the strip read as one spread
-            # rather than a row of unrelated blocks.
-            xs, ys = _pdf_polygon(pdf)
-            ys_s = [(y ** 0.3) * _Y_PDF_TOP / top for y in ys]
-            ax.plot(xs, ys_s, color=pdf_edge_color, lw=1.0, alpha=0.85,
-                    zorder=2)
+        xs, ys = _pdf_polygon(pdf)
+        if xs:
+            ys_c = [y ** 0.3 for y in ys]
+            top = max(ys_c)
+            if top > 0:
+                ys_s = [y * _Y_PDF_TOP / top for y in ys_c]
+                # One flat colour: the strip marks WHERE the probabilistic
+                # forecast mass lies, nothing more. Shading its blocks by band
+                # probability implied a per-slice reading the data doesn't
+                # support, so the blocks are gone.
+                ax.fill_between(xs, ys_s, 0, facecolor=pdf_fill_color,
+                                linewidth=0, zorder=1)
+                ax.plot(xs, ys_s, color=pdf_edge_color, lw=1.0, alpha=0.85,
+                        zorder=2)
 
     hist = [m for m in nonzero if m.short]
     bold = [m for m in _tall if m.bold or m.bold_prefix]
@@ -623,9 +541,6 @@ def _strip_chart(
     for side in ("top", "right", "left"):
         ax.spines[side].set_visible(False)
     ax.spines["bottom"].set_color(LINE)
-
-    if has_pdf and show_legend:
-        _wsp_legend(ax, pdf_shades)
 
     if total_pop is not None and total_pop > 0:
         xfrac = (total_pop - x_lo) / (x_hi - x_lo)
@@ -667,7 +582,6 @@ def country_strip_chart(
     x_max: float | None = None,
     pdf: WspPdf | None = None,
     total_pop: int | None = None,
-    show_legend: bool = True,
 ) -> str:
     # Title omitted — surrounding HTML headings carry country / source.
     return _strip_chart(
@@ -678,9 +592,7 @@ def country_strip_chart(
         pdf=pdf,
         pdf_fill_color=wind_speed_fill(wind_speed_kt),
         pdf_edge_color=wind_speed_color(wind_speed_kt),
-        pdf_shades=_WSP_SHADES.get(int(wind_speed_kt)),
         total_pop=total_pop,
-        show_legend=show_legend,
     )
 
 
@@ -712,8 +624,8 @@ def adam_strip_chart(
     )
 
 
-# Tile basemap. CartoDB Positron: light, low-chroma, and carries coastlines and
-# place names, so the wind swaths stay the loudest thing on the map. Everything
+# Tile basemap. CartoDB Voyager: light, but with a real ocean blue and place
+# names, while the wind swaths stay the loudest thing on the map. Everything
 # here is plotted in EPSG:4326; contextily warps the tiles rather than us
 # reprojecting the storm geometry.
 _BASEMAP_CRS = "EPSG:4326"
@@ -741,8 +653,13 @@ def _add_basemap(ax) -> bool:
         ctx.add_basemap(
             ax,
             crs=_BASEMAP_CRS,
-            source=ctx.providers.CartoDB.Positron,
-            zoom_adjust=None,
+            # Voyager over Positron: proper light-blue ocean and warmer land,
+            # so sea reads as sea instead of a grey void.
+            source=ctx.providers.CartoDB.Voyager,
+            # One zoom level deeper than contextily's choice: the maps render
+            # at 150 dpi (see _fig_to_img_tag), so the auto zoom — picked for
+            # the 100 dpi canvas — comes out soft.
+            zoom_adjust=1,
             zorder=0,
             attribution_size=5,
         )
@@ -1083,14 +1000,15 @@ def track_plot_exposure(
     adm0_gdf: gpd.GeoDataFrame | None = None,
     storm_name: str = "",
 ) -> str:
-    """The single storm map for the condensed email: track + swath edges +
-    population exposed shaded by admin-1.
+    """The single storm map for the condensed email: track, observed and
+    forecast wind swaths, and population exposed shaded by admin-1.
 
     This replaces the deterministic/probabilistic map PAIR in the email — the
     reader's question is "who is in the path", which neither map answered
-    directly. The swaths become outlines rather than fills so the exposure
-    shading underneath stays readable; severity still comes through in the
-    outline colours (34/50/64 kt) and the exposure magnitudes themselves.
+    directly. The swaths keep their familiar translucent fills from the
+    deterministic map; the exposure choropleth is painted OVER them, so the
+    fills read at full strength over open water while land carries the
+    exposure shading — each surface answers the question it is best at.
 
     adm1_exp: rows of (iso3, fm_pcode, pop_exposed) — consolidated 34 kt MAX
     across sources, same numbers as the attached workbook. adm0_exp covers
@@ -1109,6 +1027,12 @@ def track_plot_exposure(
     ax.set_ylim(*ylim)
     on_basemap = _add_basemap(ax)
     _draw_countries(ax, background, on_basemap)
+
+    # Swath fills go down FIRST; the exposure choropleth (also zorder 2, drawn
+    # later) covers them on shaded land. Net effect: swaths show over water and
+    # unshaded land, exposure wins where it exists.
+    obsv_proxies = _draw_obsv_buffers(ax, buffers)
+    fcast_proxies = _draw_fcast_buffers(ax, buffers)
 
     # --- exposure shading -------------------------------------------------
     shaded_iso3s: set[str] = set()
@@ -1181,20 +1105,6 @@ def track_plot_exposure(
             )
             marked_any = True
 
-    # --- forecast swath edges --------------------------------------------
-    swath_handles: list = []
-    if not _fcast_buf.empty:
-        valid = _fcast_buf[
-            ~(_fcast_buf.geometry.is_empty | _fcast_buf.geometry.isna())
-        ].sort_values("wind_speed_kt")
-        for wsp_v, grp in valid.groupby("wind_speed_kt"):
-            c = _NHC_WIND_COLOR.get(int(wsp_v), INK_2)
-            grp.plot(ax=ax, facecolor="none", edgecolor=c, linewidth=1.6,
-                     zorder=3, path_effects=[_TRACK_CASING])
-            swath_handles.append(
-                Line2D([0], [0], color=c, lw=2, label=f"{int(wsp_v)} kt")
-            )
-
     _draw_tracks(ax, tracks)
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
@@ -1219,7 +1129,8 @@ def track_plot_exposure(
         ))
     _add_stacked_legends(ax, fig, [
         ("Population\nexposed", exp_handles),
-        ("Forecast swath\n(edge)", swath_handles),
+        ("Forecasted\nwind swaths", fcast_proxies),
+        ("Observed\nwind swaths", obsv_proxies),
         ("Tracks", _track_legend_handles(tracks)),
     ])
     _add_time_note(ax, tracks)
@@ -1233,6 +1144,7 @@ def track_plot_exposure(
         fig,
         alt=(f"{storm_name}: forecast track and population exposed map"
              if storm_name else "Forecast track and population exposed map"),
+        dpi=150,
     )
 
 
@@ -1293,6 +1205,7 @@ def track_plot_buffers(
         fig,
         alt=(f"{storm_name}: forecast track and wind swaths map" if storm_name
              else "Storm tracks and forecast wind swaths map"),
+        dpi=150,
     )
 
 
@@ -1349,12 +1262,12 @@ def track_plot_wsp(
         ("Tracks", _track_legend_handles(tracks)),
     ])
     _add_time_note(ax, tracks)
-    return _fig_to_img_tag(fig, alt=title)
+    return _fig_to_img_tag(fig, alt=title, dpi=150)
 
 
-def _fig_to_img_tag(fig: plt.Figure, alt: str = "") -> str:
+def _fig_to_img_tag(fig: plt.Figure, alt: str = "", dpi: int = 100) -> str:
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     png = buf.read()

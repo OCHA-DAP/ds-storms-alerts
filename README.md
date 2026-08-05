@@ -77,7 +77,7 @@ lifted into `src/plots.py` as hex constants (matplotlib can't import the CSS
 bundle). Wind thresholds use the status ramp (amber → deep red); wind-speed
 probability uses the primary blue ramp, pale to deep.
 
-The maps draw a **CartoDB Positron** tile basemap via `contextily`, which is the
+The maps draw a **CartoDB Voyager** tile basemap via `contextily`, which is the
 one runtime network call in the pipeline. It is not load-bearing: on any tile
 failure the first attempt latches and every map falls back to the packaged
 Natural Earth boundary layer under `data/`, with a warning in the log.

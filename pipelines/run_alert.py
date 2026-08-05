@@ -793,7 +793,6 @@ def generate_alert_html(
 
         toc_countries: list[dict] = []
         country_sections: list[str] = []
-        storm_notices: list[str] = []
         adm0_exp_34: dict[str, int] = {}
         for iso3 in sorted(storm_to_iso3s[aid], key=lambda c: -_country_rp_score(aid, c)):
             # Final update notice for this (storm, country) pair.
@@ -907,18 +906,15 @@ def generate_alert_html(
                     "similar": _similar,
                 })
 
-            if not full:
-                # Condensed email: no per-country chart sections. The notice is
-                # the only per-country content worth an email's space; it
-                # surfaces under the storm map instead.
-                if notice_html:
-                    storm_notices.append(notice_html)
-                continue
+            # Condensed email: one chart per country — the source comparison
+            # at the HIGHEST active wind threshold (active_wsps is ordered
+            # 64 -> 34, so [0] is it). All thresholds render in full mode.
+            wsps_to_render = active_wsps if full else active_wsps[:1]
 
             combined_blocks: list[str] = []
             _total_pop = iso3_to_total_pop.get(iso3, 0)
 
-            for wsp in active_wsps:
+            for wsp in wsps_to_render:
                 wsp_color = wind_speed_color(wsp)
                 obsv_floor = _obsv_for(obsv_df, aid, iso3, wsp)
 
@@ -1026,10 +1022,6 @@ def generate_alert_html(
                     x_max=_chart_xmax,
                     pdf=pdf,
                     total_pop=_chart_total_pop,
-                    # The probability key only goes on the first chart of a
-                    # country block. The charts stack directly under one shared
-                    # heading, so repeating it on all three reads as clutter.
-                    show_legend=not combined_blocks,
                 )
                 _rp = _rp_text(float(our_val), iso3, wsp)
                 _rp_html = (
@@ -1037,8 +1029,11 @@ def generate_alert_html(
                     f"margin:-4px 0 10px;padding-left:2px'>{_rp}</p>"
                     if _rp else ""
                 )
+                # In the email the chart's own x-label already names the one
+                # threshold shown; a bare "64 kt" heading would just repeat it.
+                _wsp_heading = f"<h5 style='{_H5}'>{wsp} kt</h5>" if full else ""
                 combined_blocks.append(
-                    f"<h5 style='{_H5}'>{wsp} kt</h5>{combined_img}{_rp_html}"
+                    f"{_wsp_heading}{combined_img}{_rp_html}"
                 )
 
             country_sections.append(
@@ -1086,101 +1081,106 @@ def generate_alert_html(
             if exp_m:
                 storm_map_parts.append(exp_m)
 
-        if storm_map_parts or country_sections or storm_notices:
+        if storm_map_parts or country_sections:
             sections.append(
                 f"<h2 id='storm-{aid}' style='{_H2}'>{storm_h2_label}</h2>"
-                + "".join(storm_notices)
                 + "".join(storm_map_parts)
                 + "".join(country_sections)
             )
 
-    _TD = "padding:6px 10px;border:1px solid #ddd;vertical-align:top"
+    # Summary table, styled to the HDX tokens: horizontal hairlines only (no
+    # cell borders), uppercase muted header, and the return period as a colour
+    # pill instead of tinting whole cells — the old full-cell washes made the
+    # table read like a heatmap of everything.
+    _TD = "padding:9px 12px;vertical-align:top;border-bottom:1px solid #ebeff0"
     _TH = (
-        "padding:6px 10px;border:1px solid #ddd;background:#f0f0f0;"
-        "text-align:left;font-weight:600;white-space:nowrap"
+        "padding:10px 12px;text-align:left;font-weight:600;font-size:0.76em;"
+        "color:#5e6a6b;text-transform:uppercase;letter-spacing:0.05em;"
+        "border-bottom:2px solid #d8e0e1;white-space:nowrap"
     )
+
+    def _rp_pill(rp: float | None) -> str:
+        """Return period as a rounded pill; plain muted text when unremarkable.
+
+        An RP under a year (most storms exceed this value) is real but
+        "0-year" is not a meaningful display of it.
+        """
+        if rp is None:
+            return "<span style='color:#9db1b3'>&mdash;</span>"
+        label = "&lt;1-year" if rp < 1 else f"{rp:.0f}-year"
+        color = _rp_color(rp)
+        if not color:
+            return f"<span style='color:#5e6a6b'>{label}</span>"
+        return (
+            f"<span style='display:inline-block;padding:2px 10px;"
+            f"border-radius:999px;background:{color};color:#1f2324;"
+            f"font-size:0.9em;white-space:nowrap'>{label}</span>"
+        )
+
     tbl_rows: list[str] = []
     for _st in toc_storms:
         _st_total_rows = sum(len(_c["wsps"]) for _c in _st["countries"])
-        _st_max_rp = max(
-            (_w["rp"] for _c in _st["countries"] for _w in _c["wsps"] if _w["rp"]),
-            default=None,
-        )
-        _st_color = _rp_color(_st_max_rp)
         _st_first = True
         for _c in _st["countries"]:
             _c_rows = len(_c["wsps"])
-            _c_max_rp = max((_w["rp"] for _w in _c["wsps"] if _w["rp"]), default=None)
-            _c_color = _rp_color(_c_max_rp)
             _c_name = _c["name"]
             if _c["is_final"]:
                 _c_name += (
-                    " <em style='font-weight:normal;color:#888;"
+                    " <em style='font-weight:normal;color:#9db1b3;"
                     "font-size:0.85em'>(final)</em>"
                 )
             _c_first = True
             for _w in _c["wsps"]:
-                _rc = _rp_color(_w["rp"])
-                # An RP under a year (most storms exceed this value) is real
-                # but "0-year" is not a meaningful display of it.
-                if _w["rp"] and _w["rp"] < 1:
-                    _rp_str = "<1-year"
-                elif _w["rp"]:
-                    _rp_str = f"{_w['rp']:.0f}-year"
-                else:
-                    _rp_str = "—"
                 _row = "<tr>"
                 if _st_first:
-                    _bg = _st_color or "#fafafa"
                     _st_link = (
                         f"<a href='#storm-{_st['aid']}' "
-                        f"style='color:inherit;text-decoration:underline'>"
+                        f"style='color:#1f2324;text-decoration:underline'>"
                         f"{_st['label']}</a>"
                     )
                     _row += (
                         f"<td rowspan='{_st_total_rows}' style='{_TD};"
-                        f"background:{_bg};font-weight:600'>"
-                        f"{_st_link}</td>"
+                        f"font-weight:700'>{_st_link}</td>"
                     )
                     _st_first = False
                 if _c_first:
-                    _bg = _c_color or "#fff"
                     _row += (
                         f"<td rowspan='{_c_rows}' style='{_TD};"
-                        f"background:{_bg}'>{_c_name}</td>"
+                        f"font-weight:600;color:#1f2324'>{_c_name}</td>"
                     )
                     _sim_html = "<br>".join(_c.get("similar", [])) or "—"
                     _row += (
                         f"<td rowspan='{_c_rows}' style='{_TD};font-size:0.82em;"
-                        f"color:#555;vertical-align:top'>{_sim_html}</td>"
+                        f"color:#7e8e8f'>{_sim_html}</td>"
                     )
                     _c_first = False
-                _cell_bg = _rc or "#fff"
                 _pct_part = ""
                 if _w.get("pct") is not None:
                     _pct_int = min(int(round(_w["pct"])), 100)
                     _pct_part = (
-                        f" <span style='color:#aaa;font-size:0.85em'>"
+                        f" <span style='color:#9db1b3;font-size:0.85em'>"
                         f"({_pct_int}%)</span>"
                     )
                 _row += (
-                    f"<td style='{_TD};text-align:center'>{_w['wsp']} kt</td>"
-                    f"<td style='{_TD};background:{_cell_bg};"
-                    f"text-align:right'>{_fmt_pop_toc(_w['total'])}{_pct_part}</td>"
-                    f"<td style='{_TD};background:{_cell_bg}'>{_rp_str}</td>"
+                    f"<td style='{_TD};text-align:center;color:#5e6a6b;"
+                    f"white-space:nowrap'>{_w['wsp']} kt</td>"
+                    f"<td style='{_TD};text-align:right;white-space:nowrap'>"
+                    f"<b style='color:#1f2324'>{_fmt_pop_toc(_w['total'])}</b>"
+                    f"{_pct_part}</td>"
+                    f"<td style='{_TD}'>{_rp_pill(_w['rp'])}</td>"
                     f"</tr>"
                 )
                 tbl_rows.append(_row)
 
     toc_html = (
         f"<table style='width:100%;border-collapse:collapse;"
-        f"margin:0 0 10px;font-size:0.88em'>"
+        f"margin:0 0 10px;font-size:0.9em;background:#fff'>"
         f"<thead><tr>"
         f"<th style='{_TH}'>Storm</th>"
         f"<th style='{_TH}'>Country</th>"
         f"<th style='{_TH}'>Similar storms</th>"
         f"<th style='{_TH}'>Wind</th>"
-        f"<th style='{_TH}'>Exposure [% pop.]</th>"
+        f"<th style='{_TH};text-align:right'>Exposure [% pop.]</th>"
         f"<th style='{_TH}'>Return period</th>"
         f"</tr></thead>"
         f"<tbody>{''.join(tbl_rows)}</tbody>"
@@ -1774,7 +1774,10 @@ if __name__ == "__main__":
                 )
         if html is None:
             style = "font-family:sans-serif;max-width:900px;margin:auto"
-            html = f"<html><body style='{style}'>{body}</body></html>"
+            html = (
+                "<html><head><meta charset='utf-8'></head>"
+                f"<body style='{style}'>{body}</body></html>"
+            )
 
         if args.out:
             path = Path(args.out).expanduser()
