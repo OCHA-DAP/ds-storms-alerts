@@ -84,6 +84,7 @@
   <span class="nav-brand">Storm Alerts</span>
   <a href="index.html">Subscribe</a>
   <a href="guide.html" class="active">About the alerts</a>
+  <a href="alerts/index.html">Example alerts</a>
 </nav>
 
 <div class="wrap">
@@ -216,10 +217,23 @@
     accordingly.)</p>
   </div>
 
-  <h3>Strip charts</h3>
+  <h3>Map</h3>
   <p>
-    Below the summary table, each storm and country has a set of horizontal strip charts —
-    one per active wind speed. The x-axis shows population exposed.
+    Below the summary table, each storm has one map: the observed and forecast
+    track, the edges of the forecast wind swaths (34 / 50 / 64 kt), and the
+    population exposed shaded by admin-1 unit (darker = more people exposed;
+    small island territories that would be invisible at map scale are shown as
+    a colour-coded ring). The shading uses the same consolidated 34 kt figures
+    as the attached spreadsheet.
+  </p>
+
+  <h3>Full-detail pages and strip charts</h3>
+  <p>
+    The email is deliberately short. Everything else — the probabilistic
+    wind-speed-probability map and the per-country, per-threshold strip
+    charts — lives on the online full-detail layout, shown for a set of
+    historical storms on the <a href="alerts/index.html">example alerts</a>
+    page. The strip charts read as follows; the x-axis is population exposed.
   </p>
   <ul>
     <li><strong>Grey marks</strong> — comparable historical storms since 2002, for scale.</li>
@@ -228,7 +242,11 @@
     <li><strong>CHD / ADAM / GDACS</strong> — individual source estimates (forecast plus observed combined). See data sources below.</li>
     <li><strong>Forecasted final exposure</strong> (bold mark) — the maximum across available sources; the headline figure for this advisory.</li>
     <li><strong>Estimated final exposure</strong> (bold mark, final updates only) — same as above but for final-update advisories where all exposure is observed.</li>
-    <li><strong>Shaded area</strong> — when present, shows the probabilistic WSP forecast distribution: the spread of possible outcomes rather than a single deterministic value.</li>
+    <li><strong>Shaded strip</strong> — when present, the probabilistic WSP forecast
+      spread rather than a single deterministic value. Each block is one NHC
+      wind-speed-probability band, shaded light to dark by how likely it is; the
+      darker blocks nearest the left are the near-certain core. A key appears on the
+      first chart of each country.</li>
   </ul>
   <div class="callout">
     <p><strong>Comparing the bold mark to history.</strong> The grey historical
@@ -241,8 +259,7 @@
     period); the bold mark is the consolidated operational headline.</p>
   </div>
 
-  <h3>Maps</h3>
-  <p>Up to two maps are included per storm when the relevant data is available:</p>
+  <h3>Maps on the full-detail pages</h3>
   <ul>
     <li><strong>Deterministic forecast</strong> — the observed and forecast track with
       the wind-radius swaths (34 / 50 / 64 kt) along it: where tropical-storm- to
@@ -250,8 +267,17 @@
     <li><strong>Probabilistic forecast</strong> — the NHC wind-speed-probability (WSP)
       model at the 34 kt threshold: the probability of tropical-storm-force winds
       across the forecast, capturing track and intensity uncertainty rather than a
-      single line. Omitted when no WSP data is available for the advisory.</li>
+      single line. Omitted when no WSP data is available for the advisory.
+      Probability is shaded on a single blue ramp, pale to deep — deeper means
+      more likely.</li>
   </ul>
+  <p style="font-size:0.9em;color:#555">
+    Basemap tiles &copy; <a href="https://carto.com/attributions">CARTO</a>, data
+    &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>
+    contributors. If the tile service is unreachable when an alert is generated,
+    the maps fall back to a plain boundary background — the storm layers are
+    unaffected.
+  </p>
 
   <h3>Data sources</h3>
   <p>All exposure estimates are derived from <a href="https://www.nhc.noaa.gov">NOAA NHC</a>

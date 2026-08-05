@@ -21,7 +21,6 @@ from src.data import (
     fetch_adam_current_exposure_adm1,
     fetch_adam_historical_exposure,
     fetch_admin_population,
-    fetch_all_monitored_countries,
     fetch_all_prior_country_pairs,
     fetch_buffers,
     fetch_current_obsv_exposure,
@@ -38,18 +37,19 @@ from src.data import (
     fetch_prev_any_pairs,
     fetch_wsp_fcastonly_exposure,
     fetch_wsp_fcastonly_polygons,
+    load_adm0_boundaries,
     load_adm1_boundaries,
     load_background_countries,
 )
 from src import fm_matching as fm
+from src.preview import PreviewUnavailable, render_with_template
 from src.xlsx_style import build_readme, style_data_sheet
 from src.plots import (
     StormMark,
     WspPdf,
-    adam_strip_chart,
     country_strip_chart,
-    gdacs_strip_chart,
     track_plot_buffers,
+    track_plot_exposure,
     track_plot_wsp,
     wind_speed_color,
 )
@@ -202,7 +202,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--preview",
         action="store_true",
-        help="Generate HTML and open in browser; skip email entirely.",
+        help=(
+            "Generate the HTML, render it through the real Listmonk campaign "
+            "template, and open it in the browser. Sends nothing; reuses one "
+            "parked draft campaign rather than creating one per preview."
+        ),
+    )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help=(
+            "With --preview: render the FULL layout (both maps + all "
+            "per-threshold strip charts) instead of the condensed email."
+        ),
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help=(
+            "With --preview: skip the Listmonk round-trip and show the bare "
+            "body. Faster, works offline, but without the email chrome."
+        ),
+    )
+    parser.add_argument(
+        "--out",
+        default=None,
+        help=(
+            "With --preview: write the HTML here instead of a temp file. "
+            "A stable path means the browser tab reloads onto the new render."
+        ),
+    )
+    parser.add_argument(
+        "--no-open",
+        action="store_true",
+        help="With --preview: write the file but do not open a browser.",
+    )
+    parser.add_argument(
+        "--send-test",
+        action="store_true",
+        help=(
+            f"Send the alert to the test list ({TEST_LIST_IDS}) and exit. "
+            "Ignores TEST_EMAIL/DRY_RUN."
+        ),
     )
     parser.add_argument(
         "--stage",
@@ -346,9 +387,20 @@ def generate_monitoring_html(
 
 
 def generate_alert_html(
-    engine, issued_time_dt: datetime
+    engine, issued_time_dt: datetime, full: bool = False
 ) -> tuple[str, list[str]] | None:
-    """Run the full pipeline and return (html_body, iso3s).
+    """Run the full pipeline and return (html_body, iso3s, storm_names).
+
+    Two layouts share one data pass:
+
+    - ``full=False`` (the email, and the default): letter, summary table, ONE
+      map per storm (track + swath edges + admin-1 exposure choropleth), and
+      any final-update notices. No per-country strip charts, no probabilistic
+      map — the numbers live in the table and the attached workbook, the full
+      charts live online. This is the condensed layout the alert ships with.
+    - ``full=True``: the everything version — deterministic + probabilistic
+      maps and the per-country, per-threshold strip charts. Rendered to the
+      online example pages, not emailed.
 
     Returns None if there are no countries with any forecasted exposure and no
     storm-country pairs eligible for a final update notice.
@@ -488,6 +540,25 @@ def generate_alert_html(
 
     def _cname(iso3: str) -> str:
         return iso3_to_name.get(iso3, iso3)
+
+    # Admin-1 exposure feeds the combined email map — the same consolidated
+    # 34 kt MAX per FieldMaps unit as the attached workbook's adm1 tab, so the
+    # map and the spreadsheet can never disagree. Skipped in full mode, which
+    # renders the original map pair instead.
+    if not full:
+        import pandas as _pd
+
+        logger.info("Fetching admin-1 exposure for the email map...")
+        fcast_adm1_df = fetch_fcast_exposure_adm1(engine, issued_time_dt)
+        obsv_adm1_df = fetch_current_obsv_exposure_adm1(
+            engine, all_fetch_atcf_ids, issued_time_dt)
+        gdacs_adm1_df = fetch_gdacs_current_exposure_adm1(
+            engine, all_fetch_atcf_ids, issued_time_dt)
+        adam_adm1_df = fetch_adam_current_exposure_adm1(
+            engine, all_fetch_atcf_ids, issued_time_dt)
+        # GDACS units with no FieldMaps match can't be drawn (no geometry key).
+        gdacs_adm1_df = gdacs_adm1_df[gdacs_adm1_df["fm_pcode"].notna()].copy()
+        fm_name_by_pcode = fetch_fm_names(engine, all_render_iso3s)
 
     logger.info("Generating plots...")
 
@@ -666,8 +737,9 @@ def generate_alert_html(
             (hist_df["iso3"] == iso3) & (hist_df["wind_speed_kt"] == wsp)
         ]["pop_exposed"].tolist()
         exceedances = sum(1 for v in hist_vals if v >= forecast_val)
+        rp_part = "<1-year RP" if rp < 1 else f"≈{rp:.0f}-year RP"
         return (
-            f"≈{rp:.0f}-year RP "
+            f"{rp_part} "
             f"({exceedances} storms since 2002 had ≥ this exposure)"
         )
 
@@ -681,7 +753,6 @@ def generate_alert_html(
         storm_h2_label = _storm_label(s_name, s_season)
 
         # Pre-filter DataFrames to this storm for per-storm mark computation.
-        aid_obsv_df = obsv_df[obsv_df["atcf_id"] == aid]
         aid_gdacs_cur = (
             gdacs_cur_df[gdacs_cur_df["atcf_id"] == aid]
             if "atcf_id" in gdacs_cur_df.columns else gdacs_cur_df
@@ -692,7 +763,6 @@ def generate_alert_html(
         )
         tr_storm = fcast_df[fcast_df["atcf_id"] == aid]
         name_aid = tr_storm["name"].iloc[0] if not tr_storm.empty else s_name
-        season_aid = tr_storm["season"].iloc[0] if not tr_storm.empty else s_season
 
         # Per-storm maps (WSP + buffers filtered to this storm only).
         aid_tracks = tracks_gdf[tracks_gdf["atcf_id"] == aid]
@@ -700,25 +770,31 @@ def generate_alert_html(
         aid_wsp_poly = wsp_gdf[wsp_gdf["atcf_id"] == aid]
         aid_adm1 = adm1_gdf[adm1_gdf["iso_3"].isin(storm_to_iso3s[aid])]
         storm_map_parts: list[str] = []
-        buf_m = track_plot_buffers(
-            aid_tracks, aid_buffers, background_gdf,
-            adm1_gdf=aid_adm1, storm_name=storm_h2_label,
-        )
-        if buf_m:
-            storm_map_parts.append(
-                f"<h3 style='{_H3}'>Deterministic forecast</h3>{buf_m}"
+        if full:
+            buf_m = track_plot_buffers(
+                aid_tracks, aid_buffers, background_gdf,
+                adm1_gdf=aid_adm1, storm_name=storm_h2_label,
             )
-        wsp_m = track_plot_wsp(
-            aid_tracks, aid_buffers, aid_wsp_poly, background_gdf,
-            wind_threshold_kt=34, adm1_gdf=aid_adm1, storm_name=storm_h2_label,
-        )
-        if wsp_m:
-            storm_map_parts.append(
-                f"<h3 style='{_H3}'>Probabilistic forecast</h3>{wsp_m}"
+            if buf_m:
+                storm_map_parts.append(
+                    f"<h3 style='{_H3}'>Deterministic forecast</h3>{buf_m}"
+                )
+            wsp_m = track_plot_wsp(
+                aid_tracks, aid_buffers, aid_wsp_poly, background_gdf,
+                wind_threshold_kt=34, adm1_gdf=aid_adm1,
+                storm_name=storm_h2_label,
             )
+            if wsp_m:
+                storm_map_parts.append(
+                    f"<h3 style='{_H3}'>Probabilistic forecast</h3>{wsp_m}"
+                )
+        # Email mode: the single combined map is built AFTER the country loop —
+        # it needs the consolidated per-country 34 kt totals collected there.
 
         toc_countries: list[dict] = []
         country_sections: list[str] = []
+        storm_notices: list[str] = []
+        adm0_exp_34: dict[str, int] = {}
         for iso3 in sorted(storm_to_iso3s[aid], key=lambda c: -_country_rp_score(aid, c)):
             # Final update notice for this (storm, country) pair.
             notice_html = ""
@@ -786,6 +862,9 @@ def generate_alert_html(
                 # highest credible estimate across CHD/ADAM/GDACS is the
                 # operationally relevant figure, even when one source is conservative.
                 _tot = max(_toc_active.values()) if _toc_active else 0
+                if _tw == 34:
+                    # Feeds the combined email map's national-fallback shading.
+                    adm0_exp_34[iso3] = _tot
                 if _tot > 0:
                     _tp = iso3_to_total_pop.get(iso3, 0)
                     _toc_wsps.append({
@@ -827,6 +906,14 @@ def generate_alert_html(
                     "wsps": _toc_wsps,
                     "similar": _similar,
                 })
+
+            if not full:
+                # Condensed email: no per-country chart sections. The notice is
+                # the only per-country content worth an email's space; it
+                # surfaces under the storm map instead.
+                if notice_html:
+                    storm_notices.append(notice_html)
+                continue
 
             combined_blocks: list[str] = []
             _total_pop = iso3_to_total_pop.get(iso3, 0)
@@ -939,6 +1026,10 @@ def generate_alert_html(
                     x_max=_chart_xmax,
                     pdf=pdf,
                     total_pop=_chart_total_pop,
+                    # The probability key only goes on the first chart of a
+                    # country block. The charts stack directly under one shared
+                    # heading, so repeating it on all three reads as clutter.
+                    show_legend=not combined_blocks,
                 )
                 _rp = _rp_text(float(our_val), iso3, wsp)
                 _rp_html = (
@@ -961,9 +1052,44 @@ def generate_alert_html(
                 {"label": storm_h2_label, "aid": aid, "countries": toc_countries}
             )
 
-        if storm_map_parts or country_sections:
+        if not full:
+            _adm1_rows = _build_adm1_rows(
+                aid, storm_to_iso3s[aid], final_update_pairs, iso3_to_name,
+                fm_name_by_pcode, fcast_adm1_df, obsv_adm1_df,
+                gdacs_adm1_df, adam_adm1_df,
+            )
+            adm1_exp = _pd.DataFrame(
+                [
+                    {"iso3": r["iso3"], "fm_pcode": r["admin_pcode"],
+                     "pop_exposed": r["pop_exposed"]}
+                    for r in _adm1_rows
+                    if r["wind_speed_kt"] == 34 and r["pop_exposed"] > 0
+                ],
+                columns=["iso3", "fm_pcode", "pop_exposed"],
+            )
+            # adm0 geometry only for countries that need the national fallback
+            # (exposure but no shaded adm1 unit) — loading it for every country
+            # would be wasted blob reads.
+            _fallback_iso3s = sorted(
+                {k for k, v in adm0_exp_34.items() if v > 0}
+                - set(adm1_exp["iso3"])
+            )
+            _adm0_gdf = (
+                load_adm0_boundaries(_fallback_iso3s) if _fallback_iso3s
+                else None
+            )
+            exp_m = track_plot_exposure(
+                aid_tracks, aid_buffers, background_gdf, aid_adm1,
+                adm1_exp, adm0_exp_34, adm0_gdf=_adm0_gdf,
+                storm_name=storm_h2_label,
+            )
+            if exp_m:
+                storm_map_parts.append(exp_m)
+
+        if storm_map_parts or country_sections or storm_notices:
             sections.append(
                 f"<h2 id='storm-{aid}' style='{_H2}'>{storm_h2_label}</h2>"
+                + "".join(storm_notices)
                 + "".join(storm_map_parts)
                 + "".join(country_sections)
             )
@@ -995,7 +1121,14 @@ def generate_alert_html(
             _c_first = True
             for _w in _c["wsps"]:
                 _rc = _rp_color(_w["rp"])
-                _rp_str = f"{_w['rp']:.0f}-year" if _w["rp"] else "—"
+                # An RP under a year (most storms exceed this value) is real
+                # but "0-year" is not a meaningful display of it.
+                if _w["rp"] and _w["rp"] < 1:
+                    _rp_str = "<1-year"
+                elif _w["rp"]:
+                    _rp_str = f"{_w['rp']:.0f}-year"
+                else:
+                    _rp_str = "—"
                 _row = "<tr>"
                 if _st_first:
                     _bg = _st_color or "#fafafa"
@@ -1112,6 +1245,15 @@ def generate_alert_html(
         "font-family:sans-serif;color:#333;font-size:0.95em;"
         "line-height:1.55;margin:0 0 14px"
     )
+    _detail_sentence = (
+        "" if full else (
+            " Full admin-1 figures are in the attached spreadsheet; "
+            "<a href='https://ocha-dap.github.io/ds-storms-alerts/alerts/' "
+            "style='color:#0645ad'>example alerts with the full charts</a> "
+            "and <a href='https://ocha-dap.github.io/ds-storms-alerts/guide.html' "
+            "style='color:#0645ad'>the methodology</a> are online."
+        )
+    )
     intro_html = (
         f"<p style='{_p}'>Dear colleagues,</p>"
         f"<p style='{_p}'>NHC has issued their cyclone forecasts for "
@@ -1119,7 +1261,7 @@ def generate_alert_html(
         f"There {'is' if _n == 1 else 'are'} {_n} active "
         f"storm{'' if _n == 1 else 's'}: <b>{', '.join(storm_names)}</b>.</p>"
         f"<p style='{_p}'>This email consolidates exposure estimates from "
-        f"{_oxford(_present)}.{_missing_sentence}</p>"
+        f"{_oxford(_present)}.{_missing_sentence}{_detail_sentence}</p>"
         f"<p style='{_p};margin-bottom:22px'>"
         f"Best regards,<br>OCHA Centre for Humanitarian Data</p>"
     )
@@ -1133,6 +1275,9 @@ def generate_alert_html(
         " &nbsp;|&nbsp; "
         "<a href='https://ocha-dap.github.io/ds-storms-alerts/' "
         "style='color:#0645ad'>Sign up for alerts</a>"
+        " &nbsp;|&nbsp; "
+        "<a href='https://ocha-dap.github.io/ds-storms-alerts/alerts/' "
+        "style='color:#0645ad'>Example alerts</a>"
         "</p>"
     )
     body = intro_html + _hr + summary_header + toc_html + links_note + already_passed_html
@@ -1387,7 +1532,6 @@ def generate_exposure_workbook(
 
     prev_any_rows = fetch_prev_any_pairs(engine, issued_time_dt)
     prev_any_pairs = {(r["atcf_id"], r["iso3"]) for r in prev_any_rows}
-    prev_atcf_ids = sorted({r["atcf_id"] for r in prev_any_rows})
 
     current_any_pairs = {(r.atcf_id, r.iso3) for r in fcast_df.itertuples()}
     final_update_pairs: set[tuple[str, str]] = prev_any_pairs - current_any_pairs
@@ -1567,63 +1711,6 @@ def generate_exposure_workbook(
     return results
 
 
-def send_test_alert(engine, issued_time_dt: datetime) -> str:
-    """Generate and send a test email for the given issued time.
-
-    Uses TEST_LIST_IDS. Returns a human-readable status string.
-    Raises on failure (caller should catch for UI display).
-    """
-    import base64
-    import re as _re
-
-    from ocha_relay.listmonk import ListmonkClient
-
-    issued_time = issued_time_dt.strftime("%Y-%m-%dT%H")
-    result = generate_alert_html(engine, issued_time_dt)
-    if result is None:
-        active_meta = fetch_active_storm_meta(engine, issued_time_dt)
-        if not active_meta:
-            return "No active storms for this issued time — nothing to send."
-        body = generate_monitoring_html(engine, issued_time_dt, active_meta)
-        _names = [_storm_label(m["name"], None) for m in active_meta]
-        subject = _build_subject(issued_time_dt, _names, prefix="[TEST] ")
-        campaign_name = f"[TEST] ds-storms-alerts_monitoring_{issued_time}"
-        is_monitoring = True
-    else:
-        body, _, _names = result
-        subject = _build_subject(issued_time_dt, _names, prefix="[TEST] ")
-        campaign_name = f"[TEST] ds-storms-alerts_{issued_time}"
-        is_monitoring = False
-
-    client = ListmonkClient.from_env()
-
-    _uploaded: dict[str, str] = {}
-
-    def _upload_image(m: _re.Match) -> str:
-        b64 = m.group(1)
-        if b64 not in _uploaded:
-            _uploaded[b64] = client.upload_media(base64.b64decode(b64), "chart.png")
-        return _uploaded[b64]
-
-    body = _re.sub(r'data:image/png;base64,([A-Za-z0-9+/=]+)', _upload_image, body)
-
-    media_ids: list[int] = []
-    if not is_monitoring:
-        attachments = generate_exposure_workbook(engine, issued_time_dt)
-        for filename, xlsx_bytes in attachments:
-            media_ids.append(client.upload_attachment(xlsx_bytes, filename))
-
-    cid = client.create_campaign(
-        name=campaign_name,
-        subject=subject,
-        body=body,
-        list_ids=TEST_LIST_IDS,
-        media_ids=media_ids,
-    )
-    client.send_campaign(cid, skip_confirmation=True)
-    return f"Sent campaign {cid}: {campaign_name!r}"
-
-
 if __name__ == "__main__":
     args = parse_args()
     if args.issued_time:
@@ -1638,13 +1725,18 @@ if __name__ == "__main__":
 
     preview = args.preview
     stage = args.stage
+    if args.send_test:
+        # An explicit --send-test overrides the env switches rather than
+        # requiring the caller to set two of them consistently; getting
+        # TEST_EMAIL=False here would mail the live country lists.
+        TEST_EMAIL, DRY_RUN = True, False
     logger.info(
         f"Starting alert pipeline: {issued_time=} {stage=} "
         f"{TEST_EMAIL=} {DRY_RUN=} {preview=}"
     )
 
     engine = stratus.get_engine(stage=stage)
-    result = generate_alert_html(engine, issued_time_dt)
+    result = generate_alert_html(engine, issued_time_dt, full=args.full)
 
     if result is None:
         active_meta = fetch_active_storm_meta(engine, issued_time_dt)
@@ -1670,19 +1762,37 @@ if __name__ == "__main__":
         campaign_name = f"{prefix}ds-storms-alerts_{issued_time}"
 
     if preview:
-        style = "font-family:sans-serif;max-width:900px;margin:auto"
-        html = f"<html><body style='{style}'>{body}</body></html>"
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".html",
-            prefix=f"storms_preview_{issued_time}_",
-            delete=False,
-            encoding="utf-8",
-        ) as f:
-            f.write(html)
-        path = Path(f.name)
-        webbrowser.open(path.as_uri())
-        logger.info(f"Preview opened: {path}")
+        html = None
+        if not args.raw:
+            try:
+                html = render_with_template(body, subject, campaign_name)
+                logger.info("Rendered through the Listmonk campaign template.")
+            except PreviewUnavailable as exc:
+                logger.warning(
+                    f"Listmonk template unavailable ({exc}); "
+                    f"falling back to the bare body."
+                )
+        if html is None:
+            style = "font-family:sans-serif;max-width:900px;margin:auto"
+            html = f"<html><body style='{style}'>{body}</body></html>"
+
+        if args.out:
+            path = Path(args.out).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(html, encoding="utf-8")
+        else:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".html",
+                prefix=f"storms_preview_{issued_time}_",
+                delete=False,
+                encoding="utf-8",
+            ) as f:
+                f.write(html)
+            path = Path(f.name)
+        if not args.no_open:
+            webbrowser.open(path.as_uri())
+        logger.info(f"Preview written: {path}")
         sys.exit(0)
 
     if DRY_RUN:
@@ -1699,7 +1809,12 @@ if __name__ == "__main__":
 
         client = ListmonkClient.from_env()
 
-        if is_monitoring:
+        if args.send_test:
+            # --send-test means the test list and nothing else. Falling through
+            # to the monitoring branch here would mail the whole DSci monitoring
+            # list from what the operator asked for as a test of one advisory.
+            list_ids = TEST_LIST_IDS
+        elif is_monitoring:
             list_ids = _fetch_monitoring_list_ids(client)
             if not list_ids:
                 logger.info("No aggregate:monitoring list — skipping send.")

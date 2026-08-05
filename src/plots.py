@@ -1,6 +1,8 @@
 import base64
 import html as _html
 import io
+import logging
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -15,38 +17,91 @@ from PIL import Image
 # never renders a chart wider than the layout.
 _EMAIL_CONTENT_WIDTH_PX = 900
 import matplotlib.patches as mpatches
+import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.lines import Line2D
-_HIST_COLOR = "#444444"
-_OBSV_COLOR = "#1e8449"
-_FCAST_COLOR = "#b9651b"
 
-# NHC-style wind-radii colors by wind speed (R34 / R50 / R64),
-# matched to the ds-storm-impact-harmonisation app.
-_NHC_WIND_COLOR = {
-    34: "#f5c842",  # gold — tropical storm force
-    50: "#f5a623",  # orange — strong tropical storm
-    64: "#e8320a",  # red — hurricane force
+# ---------------------------------------------------------------------------
+# HDX v2 design tokens (ds-knowledge-base methods/style-guide.md; full mirror in
+# ds-knowledge-base-internal/style-reference/tokens.md). Values are lifted
+# rather than imported because matplotlib and email HTML cannot pull the HDX
+# CSS bundle — the style guide sanctions exactly this for outputs that can't
+# import wholesale.
+# ---------------------------------------------------------------------------
+INK = "#1f2324"        # --hdx-neutral-9   primary text
+INK_2 = "#5e6a6b"      # --hdx-neutral-7   secondary text
+INK_3 = "#7e8e8f"      # --hdx-neutral-6   muted text
+LINE = "#e2e8e8"       # --hdx-neutral-15  hairlines, grid
+GREY_FILL = "#d8e0e1"  # --hdx-neutral-2
+GREY_EDGE = "#9db1b3"  # --hdx-neutral-5
+PANEL = "#ffffff"      # --hdx-neutral-0
+
+# Chart text. Roboto per the style guide; the stack degrades to the nearest
+# grotesque rather than matplotlib's DejaVu default when Roboto isn't installed
+# (it is not, on the Databricks runner).
+_FONT_STACK = ["Roboto", "Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"]
+
+_HIST_COLOR = GREY_EDGE
+
+# Wind thresholds are an ordered severity scale, so each gets one step of the
+# HDX status ramp — amber at tropical-storm force through deep red at hurricane
+# force — paired with a pale step of the same hue for the distribution fill.
+# Status colors are reserved for exactly this (state, not series identity).
+_WIND_RAMP = {
+    34: ("#f6e9d4", "#d48f2a"),  # --hdx-warning-1 / --hdx-warning-5
+    50: ("#f3dad7", "#d06a5e"),  # --hdx-error-1   / --hdx-error-4
+    64: ("#e7b5af", "#9d372b"),  # --hdx-error-2   / --hdx-error-6
+}
+_NHC_WIND_COLOR = {k: v[1] for k, v in _WIND_RAMP.items()}
+
+# Six steps of the same hue per threshold, light to dark, for shading the WSP
+# probability bands. Sequential, one hue, monotonic in lightness — the bands are
+# an ordered magnitude (how likely), not categories.
+_WSP_SHADES = {
+    34: ["#fbf4ea", "#f6e9d4", "#eed2aa", "#e5bc7f", "#dda555", "#d48f2a"],
+    50: ["#f9eceb", "#f3dad7", "#e7b5af", "#dc8f86", "#d06a5e", "#c44536"],
+    64: ["#f3dad7", "#e7b5af", "#dc8f86", "#d06a5e", "#c44536", "#9d372b"],
 }
 
-# NHC WSP categorical colour scale, matched to the harmonisation app.
+# Wind-speed probability: the HDX primary (blue) ramp, pale to deep.
+#
+# This replaces NHC's own green-lime-yellow-tan-brown-orange-red-purple scale.
+# That scale is a rainbow: it is not monotonic in lightness, so a reader cannot
+# tell which of two bands is the higher probability without consulting the key,
+# and several adjacent pairs collapse under common colour-vision deficiencies.
+# One hue, light to dark, encodes an ordered quantity correctly by construction.
+#
+# Blue rather than the amber/red used elsewhere: the same map also carries the
+# observed wind swaths on the severity ramp, and probability is a different
+# quantity that must not read as another severity band.
 _NHC_WSP_COLOR = {
-    0:  "#ffffff",  # white (needs grey outline)
-    5:  "#00a000",  # dark green
-    10: "#64c832",  # medium green
-    20: "#b4e600",  # lime
-    30: "#e8dc00",  # yellow
-    40: "#c8a832",  # tan
-    50: "#a07828",  # brown
-    60: "#e06400",  # orange
-    70: "#c82800",  # red
-    80: "#901828",  # dark red
-    90: "#641464",  # purple
+    0:  "#ffffff",  # --hdx-neutral-0   (needs an outline to be visible)
+    5:  "#e8effb",  # --hdx-primary-05
+    10: "#d1e0f7",  # --hdx-primary-1
+    20: "#bad0f3",  # --hdx-primary-15
+    30: "#a3c0ef",  # --hdx-primary-2
+    40: "#74a1e8",  # --hdx-primary-3
+    50: "#4681e0",  # --hdx-primary-4
+    60: "#1862d8",  # --hdx-primary-5
+    70: "#134ead",  # --hdx-primary-6
+    80: "#0e3b82",  # --hdx-primary-7
+    90: "#0a2756",  # --hdx-primary-8
 }
 
-_OBSV_BUFFER_ALPHA = 0.22
-_FCAST_BUFFER_ALPHA = 0.65
+# Swath opacity. Both are lower than they were: over a tile basemap an opaque
+# swath hides the coastlines and place names that are the reason for having one.
+_OBSV_BUFFER_ALPHA = 0.20
+_FCAST_BUFFER_ALPHA = 0.45
+# The probability bands nest, so the visible colour of an inner band is its own
+# fill over everything outside it. Keep this high enough that the stack does not
+# drift far from the legend swatches, low enough to read the coastline through.
+_WSP_ALPHA = 0.72
+
+# White casing under the track lines. Over the deepest probability bands a dark
+# track on dark navy is invisible, and the track is the one thing on the map
+# that must always read.
+_TRACK_CASING = path_effects.withStroke(linewidth=3.4, foreground=PANEL)
 
 _UTC = ZoneInfo("UTC")
 _NY = ZoneInfo("America/New_York")
@@ -141,78 +196,312 @@ def _pdf_polygon(pdf: WspPdf) -> tuple[list[float], list[float]]:
     return xs, ys
 
 
-# y-axis layout (data units; matched to ylim below)
-_Y_HIST_TOP = 0.06        # short historical lines stop here
-_Y_HIST_LABEL = 0.08      # historical labels start here
-_Y_PDF_TOP = 0.92         # PDF shaded area scaled to fit below this
-_Y_SHIFT_TOP = 0.60       # tick height when a label is shifted (diagonal leader)
-_Y_TALL_TOP = 0.95        # source/observed lines stop here (no shift)
-_Y_BOLD_TOP = 1.05        # mean-mark (bold) line stops here (no shift)
-_Y_TALL_LABEL = 1.12      # tall labels start here (above _Y_BOLD_TOP + gap)
-_Y_TOP = 2.20             # ylim upper bound (headroom for multi-line labels)
+def _pdf_segments(pdf: WspPdf) -> list[tuple[float, float, float, int]]:
+    """The same bands as :func:`_pdf_polygon`, but kept separate.
 
-
-def _label_half_width(label: str, x_max: float) -> float:
-    """Estimate half the horizontal footprint of a 90°-rotated label in data units.
-
-    With fontsize 7.5pt and axes 8.64 in wide spanning x_max*1.05 data units,
-    each line of text is ~13 px tall → ~0.009 * x_max data units per line.
+    Returns (x_start, x_end, density, percentage) per band, left to right.
+    Drawing the strip band-by-band is what lets each carry its own probability
+    shade — as one merged polygon the strip reads as a solid bar, which is the
+    single biggest reason these charts looked like blocks rather than spreads.
     """
-    n_lines = label.count("\n") + 1
-    return n_lines * x_max * 0.009
+    bands = [(p, n) for p, n in pdf.bands if n > 0]
+    if not bands:
+        return []
+    max_pop = max(n for _, n in bands)
+    min_pop = max(max_pop * 0.001, 50)
+    bands = [(p, n) for p, n in bands if n >= min_pop]
+    if not bands:
+        return []
+    bands.sort(key=lambda b: b[0], reverse=True)
+
+    out: list[tuple[float, float, float, int]] = []
+    cum = pdf.x_offset
+    for pct, pop in bands:
+        bw = _WSP_BAND_WIDTH_FRAC.get(int(pct), 0.05)
+        out.append((cum, cum + pop, bw / pop, int(pct)))
+        cum += pop
+    return out
 
 
-def _center_rotated_label_at(text_obj, target_x_data: float, ax, renderer) -> None:
-    """Shift text_obj so its rotated bbox is horizontally centred at target_x_data.
+def _wsp_shade(pct: int, ramp: list[str]) -> str:
+    """Pick a step of the threshold's sequential ramp for a probability band.
 
-    For ha="left", va="bottom", rotation=90 the anchor is the rotated label's right
-    edge; we shift the anchor right by half the bbox width so the bbox midpoint sits
-    at target_x_data. Computed and applied in DATA coords, so it survives the later
-    bbox_inches="tight" rescale at savefig.
+    Light to dark = less to more likely, monotonic in lightness by construction
+    — the one rule a sequential encoding has to obey.
     """
-    bbox = text_obj.get_window_extent(renderer=renderer)
-    bbox_mid_disp = (bbox.x0 + bbox.x1) / 2
-    bbox_mid_data = ax.transData.inverted().transform((bbox_mid_disp, 0))[0]
-    delta = target_x_data - bbox_mid_data
-    text_obj.set_x(text_obj.get_position()[0] + delta)
+    for cut, i in ((70, 5), (50, 4), (30, 3), (10, 2), (5, 1)):
+        if pct >= cut:
+            return ramp[i]
+    return ramp[0]
 
 
-def _place_tall_labels(
-    marks: list[StormMark], x_max: float
-) -> list[tuple[StormMark, float]]:
-    """Assign non-overlapping label x positions for tall marks.
+# ---------------------------------------------------------------------------
+# Vertical layout, in data units (ylim is 0 .. _Y_TOP).
+#
+# The chart is a number line read bottom-up: the probabilistic forecast spread
+# is a low density strip on the baseline, marks rise out of it, and every label
+# is HORIZONTAL above its mark. Rotated labels were the previous design and the
+# reason the charts were unreadable — 90-degree text at 6pt is decoration, not
+# information.
+#
+# Each tier gets its own label band so the anti-collision pass only ever has to
+# separate a handful of labels at a time, rather than every label in the chart.
+# ---------------------------------------------------------------------------
+_Y_PDF_TOP = 0.30         # WSP density strip occupies 0 .. here
+_Y_HIST_TOP = 0.22        # historical ticks stop just inside the strip
+_Y_HIST_LABEL = 0.34      # historical label band (2 staggered rows)
+_Y_HIST_ROW_GAP = 0.20
+_Y_SRC_TOP = 0.78         # source ticks (CHD / ADAM / GDACS)
+_Y_SRC_LABEL = 0.83       # their label band
+_Y_BOLD_TOP = 1.30        # the headline estimate rises above everything
+_Y_BOLD_LABEL = 1.38      # and is labelled last, at the top
+_Y_TOP = 2.05             # ylim (headroom for two-line bold labels)
 
-    Uses a centroid-preserving iterative algorithm: when an adjacent pair
-    overlaps, both are pushed equally in opposite directions so the group
-    centroid stays at the marks' mean value. This produces symmetric
-    placement — e.g. three clustered marks land at [mean-s, mean, mean+s].
+_HIST_FONTSIZE = 6.8
+_SRC_FONTSIZE = 7.2
+_BOLD_FONTSIZE = 8.4
+
+_FIG_W_IN = 9.0
+
+
+def _label_half_widths(
+    ax, fig, labels: list[str], fontsize: float, bold: bool = False
+) -> list[float]:
+    """Half the horizontal footprint of each label, in data units.
+
+    Measured with the real renderer rather than estimated from a character
+    count: a per-character width guess is wrong by enough on all-caps source
+    names ("GDACS") to let labels touch, which is the specific defect this
+    layout exists to fix. The caller must have set the final x-limits first,
+    because data-per-pixel is what the display-to-data conversion depends on.
+    """
+    renderer = fig.canvas.get_renderer()
+    inv = ax.transData.inverted()
+    out: list[float] = []
+    for label in labels:
+        probe = ax.text(
+            0, 0, label, fontsize=fontsize, ha="center",
+            fontweight="bold" if bold else "normal",
+        )
+        bb = probe.get_window_extent(renderer=renderer)
+        probe.remove()
+        x0 = inv.transform((bb.x0, 0))[0]
+        x1 = inv.transform((bb.x1, 0))[0]
+        out.append(abs(x1 - x0) / 2.0)
+    return out
+
+
+def _place_labels(
+    items: list[tuple[float, float]], x_lo: float, x_hi: float, pad: float,
+    droppable: bool = False,
+) -> tuple[list[float], list[bool]]:
+    """Spread labels so they stop overlapping, keeping the group centred.
+
+    `items` is (anchor_value, half_width) in data units, in the caller's order.
+    Returns (placed_x, keep) in that same order. When an adjacent pair collides
+    both are pushed equally in opposite directions, so a cluster resolves
+    symmetrically about its own centre instead of drifting one way.
+
+    Separation and edge-clamping have to ALTERNATE, not run once each. Clamping
+    after a single separation pass is what produced "Paloma 2008Gustav 2008":
+    two labels near x=0 were pushed apart, then both clamped back to the left
+    edge, silently undoing the separation. Each clamp is followed by another
+    separation pass so the group settles inside the frame.
+
+    `droppable` allows the last resort — when a row genuinely has more label
+    than axis, the lower-valued labels are marked `keep=False`. Their ticks
+    still draw; only the text is withheld, so the distribution stays honest and
+    nothing overprints.
+    """
+    if not items:
+        return [], []
+    order = sorted(range(len(items)), key=lambda i: items[i][0])
+    hw = [items[i][1] for i in order]
+    keep = [True] * len(order)
+    margin = pad * 0.4
+
+    def _settle(idx: list[int]) -> list[float]:
+        pos = [float(items[order[i]][0]) for i in idx]
+        for _ in range(6):
+            for _ in range(200):
+                moved = False
+                for k in range(len(pos) - 1):
+                    needed = hw[idx[k]] + hw[idx[k + 1]] + pad
+                    gap = pos[k + 1] - pos[k]
+                    if gap < needed:
+                        push = (needed - gap) / 2
+                        pos[k] -= push
+                        pos[k + 1] += push
+                        moved = True
+                if not moved:
+                    break
+            clamped = False
+            for k, p in enumerate(pos):
+                # `margin` past the half-width: a label clamped to exactly
+                # x_lo + hw sits flush on the axis and its first glyph gets
+                # shaved, because the measured extent excludes side bearing.
+                lo = x_lo + hw[idx[k]] + margin
+                hi = x_hi - hw[idx[k]] - margin
+                c = min(max(p, lo), hi) if lo <= hi else (lo + hi) / 2
+                if c != p:
+                    pos[k], clamped = c, True
+            if not clamped:
+                break
+        return pos
+
+    live = list(range(len(order)))
+    pos = _settle(live)
+    if droppable:
+        # Whatever the settle could not resolve is a genuine overflow. Drop the
+        # smallest-valued offender and retry; bigger storms are the ones a
+        # reader is comparing against.
+        while len(live) > 1:
+            clash = next(
+                (k for k in range(len(pos) - 1)
+                 if pos[k + 1] - pos[k] < hw[live[k]] + hw[live[k + 1]] + pad * 0.5),
+                None,
+            )
+            if clash is None:
+                break
+            keep[live[clash]] = False
+            live.pop(clash)
+            pos = _settle(live)
+
+    out = [0.0] * len(items)
+    out_keep = [False] * len(items)
+    for k, i in enumerate(live):
+        out[order[i]] = pos[k]
+        out_keep[order[i]] = True
+    # Dropped labels still need a position for the (unused) leader calculation.
+    for i, o in enumerate(order):
+        if not out_keep[o]:
+            out[o] = float(items[o][0])
+    return out, out_keep
+
+
+def _leader(ax, x_from: float, y_from: float, x_to: float, y_to: float,
+            color: str) -> None:
+    """Hairline from a displaced label back to the mark it belongs to.
+
+    Only drawn when the label actually moved: a leader under an unshifted label
+    is noise.
+    """
+    ax.plot([x_from, x_to], [y_from, y_to], color=color, lw=0.6, alpha=0.55,
+            zorder=3, solid_capstyle="butt", clip_on=False)
+
+
+def _draw_tier(
+    ax, fig, marks: list[StormMark], x_lo: float, x_hi: float, *,
+    tick_top: float, label_y: float, fontsize: float, linewidth: float,
+    color: str | None, text_color: str, rows: int = 1, row_gap: float = 0.0,
+    bold: bool = False, marker: bool = False, halo: bool = False,
+    droppable: bool = False,
+) -> None:
+    """Draw one tier of marks: a tick per mark, plus its horizontal label.
+
+    `rows` > 1 staggers labels over that many bands, which is what keeps a long
+    run of historical storms legible without shrinking the type. Collision is
+    resolved within a row, so staggering roughly halves how far anything has to
+    move away from its true value.
     """
     if not marks:
-        return []
-    sorted_m = sorted(marks, key=lambda m: float(m.value))
-    n = len(sorted_m)
-    hw = [
-        _label_half_width(
-            f"{m.bold_prefix}\n{m.label}" if m.bold_prefix else m.label,
-            x_max,
-        )
-        for m in sorted_m
+        return
+    x_range = x_hi - x_lo
+    ordered = sorted(marks, key=lambda m: float(m.value))
+    labels = [
+        (f"{m.bold_prefix}\n{m.label}" if m.bold_prefix else m.label)
+        for m in ordered
     ]
-    pad = x_max * 0.002
-    pos = [float(m.value) for m in sorted_m]
-    for _ in range(200):
-        changed = False
-        for i in range(n - 1):
-            needed = hw[i] + hw[i + 1] + pad
-            gap = pos[i + 1] - pos[i]
-            if gap < needed:
-                push = (needed - gap) / 2
-                pos[i] -= push
-                pos[i + 1] += push
-                changed = True
-        if not changed:
-            break
-    return list(zip(sorted_m, pos))
+    half = _label_half_widths(ax, fig, labels, fontsize, bold=bold)
+    # Minimum gap between labels, measured rather than taken as a fraction of
+    # the axis. A fraction is wrong at both ends: on a 12M-wide axis 0.4% is
+    # 48k data units, far less than a space, so labels ended up touching.
+    pad = _label_half_widths(ax, fig, ["nn"], fontsize)[0] * 2
+
+    # Place each row independently: labels in different rows cannot collide, so
+    # forcing them apart horizontally would displace them for nothing.
+    placed = [0.0] * len(ordered)
+    show = [True] * len(ordered)
+    for row in range(rows):
+        idx = [i for i in range(len(ordered)) if i % rows == row]
+        if not idx:
+            continue
+        row_pos, row_keep = _place_labels(
+            [(float(ordered[i].value), half[i]) for i in idx],
+            x_lo, x_hi, pad, droppable=droppable,
+        )
+        for i, p, k in zip(idx, row_pos, row_keep, strict=True):
+            placed[i], show[i] = p, k
+
+    for i, (m, lb, px) in enumerate(zip(ordered, labels, placed, strict=True)):
+        c = color or m.color
+        actual = float(m.value)
+        row_y = label_y + (i % rows) * row_gap if rows > 1 else label_y
+        ax.plot([actual, actual], [0, tick_top], color=c, lw=linewidth,
+                zorder=4, solid_capstyle="butt")
+        if marker:
+            ax.plot([actual], [tick_top], marker="o", ms=6.5, mfc=c,
+                    mec=PANEL, mew=1.3, zorder=6, clip_on=False)
+        if not show[i]:
+            # No room for the text; the tick above still carries the value.
+            continue
+        if abs(px - actual) > x_range * 0.004:
+            _leader(ax, px, row_y - 0.035, actual,
+                    tick_top + (0.06 if marker else 0.02), c)
+        if m.bold_prefix:
+            # Two texts on one anchor: the name in the tier colour and bold, the
+            # qualifier under it in muted ink. A single string can't carry two
+            # weights, and the qualifier in full colour competes with the mark.
+            n_sub = m.label.count("\n") + 1
+            ax.text(px, row_y, m.bold_prefix + "\n" * n_sub, ha="center",
+                    va="bottom", fontsize=fontsize, color=c,
+                    fontweight="bold", zorder=5, clip_on=False,
+                    linespacing=1.25)
+            ax.text(px, row_y, "\n" + m.label, ha="center", va="bottom",
+                    fontsize=fontsize - 0.6, color=text_color, zorder=5,
+                    clip_on=False, linespacing=1.25)
+        else:
+            t = ax.text(px, row_y, lb, ha="center", va="bottom",
+                        fontsize=fontsize, color=text_color,
+                        fontweight="bold" if bold else "normal",
+                        zorder=5, clip_on=False, linespacing=1.25)
+            if halo:
+                # Historical labels sit low, where the taller source and
+                # headline ticks pass through them. A surface-coloured stroke
+                # keeps the text readable at a crossing instead of relying on
+                # the upstream spacing filter never leaving one.
+                t.set_path_effects([
+                    path_effects.withStroke(linewidth=2.2, foreground=PANEL)
+                ])
+
+
+def _wsp_legend(ax, shades: list[str]) -> str:
+    """Swatch strip in the top-right decoding the shading.
+
+    A sequential fill has to say what it encodes or it is just decoration, and
+    the reading here is not guessable: the shade is NHC's wind-speed probability
+    for that slice of the population, not how many people are in it.
+
+    The swatches run DARK to LIGHT left to right, because that is the order the
+    bands appear in on the chart — `_pdf_segments` sorts highest-probability
+    first so the near-certain core sits nearest the origin. A conventionally
+    light-to-dark key would point the opposite way to the thing it decodes.
+    """
+    x0, y0, w, h = 0.795, 0.955, 0.017, 0.055
+    for i, c in enumerate(reversed(shades)):
+        ax.add_patch(plt.Rectangle(
+            (x0 + i * w, y0), w, h, transform=ax.transAxes,
+            facecolor=c, edgecolor=PANEL, linewidth=0.5,
+            zorder=7, clip_on=False,
+        ))
+    ax.text(x0 - 0.006, y0 + h / 2, "more likely", transform=ax.transAxes,
+            ha="right", va="center", fontsize=6.2, color=INK_3, zorder=7)
+    ax.text(x0 + len(shades) * w + 0.006, y0 + h / 2, "less likely",
+            transform=ax.transAxes, ha="left", va="center", fontsize=6.2,
+            color=INK_3, zorder=7)
+    ax.text(x0 + len(shades) * w / 2, y0 + h + 0.035,
+            "NHC wind-speed probability", transform=ax.transAxes,
+            ha="center", va="bottom", fontsize=6.2, color=INK_3, zorder=7)
 
 
 def _strip_chart(
@@ -221,11 +510,15 @@ def _strip_chart(
     marks: list[StormMark],
     x_max: float | None = None,
     pdf: WspPdf | None = None,
-    pdf_fill_color: str = "#888888",
+    pdf_fill_color: str = GREY_FILL,
+    pdf_edge_color: str = GREY_EDGE,
+    pdf_shades: list[str] | None = None,
     total_pop: int | None = None,
+    show_legend: bool = True,
 ) -> str:
-    # Drop marks that would be outside the chart's x range — their ax.text objects
-    # at large data coordinates expand bbox_inches="tight" to data scale.
+    # Drop marks that would be outside the chart's x range — their ax.text
+    # objects at large data coordinates expand bbox_inches="tight" to data
+    # scale.
     nonzero = [
         m for m in marks
         if m.value > 0 and (x_max is None or x_max <= 0 or m.value <= x_max * 1.05)
@@ -234,182 +527,137 @@ def _strip_chart(
     if not nonzero and not has_pdf and x_max is None:
         return ""
 
-    fig, ax = plt.subplots(figsize=(9, 2.1))
-    fig.subplots_adjust(left=0.01, right=0.97, top=0.95, bottom=0.28)
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = _FONT_STACK
 
-    # PDF as a single contiguous shaded area, scaled to sit under the tall marks.
-    # Heights use a compressive ^0.3 so the long flat tail of low-density bands
-    # stays visible alongside the tall high-density spike. Area no longer equals
-    # probability; the shape conveys "where the WSP mass lives".
+    # Height follows the tiers that actually have marks. A country with no
+    # current estimate (historical context only) otherwise gets the full
+    # headline-tier headroom rendered as a band of empty white, and there are
+    # a lot of those charts in a multi-country email.
+    _tall = [m for m in nonzero if not m.short]
+    _has_bold = any(m.bold or m.bold_prefix for m in _tall)
+    _has_src = any(not (m.bold or m.bold_prefix) for m in _tall)
+    if _has_bold:
+        y_top, fig_h = _Y_TOP, 2.35
+    elif _has_src:
+        y_top, fig_h = _Y_SRC_LABEL + 0.42, 1.80
+    else:
+        y_top, fig_h = _Y_HIST_LABEL + _Y_HIST_ROW_GAP + 0.30, 1.45
+
+    fig, ax = plt.subplots(figsize=(_FIG_W_IN, fig_h))
+    fig.patch.set_facecolor(PANEL)
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.97, bottom=0.20)
+
+    # Fix the x range up front: label widths are computed in data units, so the
+    # scale has to be final before anything is placed. The old code placed first
+    # and re-centred after set_xlim, which is what made the label geometry so
+    # hard to follow.
+    # The headroom is generous on purpose: the headline mark usually sits at or
+    # near the maximum, and its label is the widest on the chart, so a tight
+    # right edge would either clip it or shove it away from its own tick.
+    if x_max is not None and x_max > 0:
+        x_hi = x_max * 1.12
+    else:
+        x_hi = max([float(m.value) for m in nonzero] or [1.0]) * 1.20
+    x_lo = 0.0
+    ax.set_xlim(x_lo, x_hi)
+    ax.set_ylim(0, y_top)
+
+    # The WSP spread as a low density strip on the baseline. Heights use a
+    # compressive ^0.3 so the long flat tail of low-density bands stays visible
+    # alongside the tall high-density spike; area no longer equals probability,
+    # the shape conveys "where the WSP mass lives".
     if has_pdf:
-        xs, ys = _pdf_polygon(pdf)
-        if xs:
-            ys_compressed = [y ** 0.3 for y in ys]
-            max_y = max(ys_compressed)
-            if max_y > 0:
-                scale = _Y_PDF_TOP / max_y
-                ys_scaled = [y * scale for y in ys_compressed]
-                ax.fill_between(
-                    xs, ys_scaled, 0,
-                    facecolor=pdf_fill_color, alpha=0.45,
-                    linewidth=0,
-                    zorder=2,
-                )
+        pdf_shades = pdf_shades or [pdf_fill_color] * 6
+        segs = _pdf_segments(pdf)
+        top = max((d for _, _, d, _ in segs), default=0.0) ** 0.3
+        if segs and top > 0:
+            for x0, x1, dens, pct in segs:
+                h = (dens ** 0.3) * _Y_PDF_TOP / top
+                ax.add_patch(plt.Rectangle(
+                    (x0, 0), x1 - x0, h,
+                    facecolor=_wsp_shade(pct, pdf_shades),
+                    edgecolor=PANEL, linewidth=0.7, zorder=1,
+                ))
+            # A defined top edge is what makes the strip read as one spread
+            # rather than a row of unrelated blocks.
+            xs, ys = _pdf_polygon(pdf)
+            ys_s = [(y ** 0.3) * _Y_PDF_TOP / top for y in ys]
+            ax.plot(xs, ys_s, color=pdf_edge_color, lw=1.0, alpha=0.85,
+                    zorder=2)
 
-    short_marks = [m for m in nonzero if m.short]
-    tall_marks = [m for m in nonzero if not m.short]
+    hist = [m for m in nonzero if m.short]
+    bold = [m for m in _tall if m.bold or m.bold_prefix]
+    srcs = [m for m in _tall if not (m.bold or m.bold_prefix)]
 
-    # Short marks (historical): thin line + small label inside the chart.
-    for m in short_marks:
-        ax.plot(
-            [m.value, m.value], [0, _Y_HIST_TOP],
-            color=m.color, linewidth=0.9, alpha=0.85,
-            zorder=4, solid_capstyle="butt",
-        )
-        ax.text(
-            m.value, _Y_HIST_LABEL, m.label,
-            rotation=90, ha="center", va="bottom",
-            fontsize=6.0, color=m.color, alpha=0.85,
-            fontweight="normal", zorder=5,
-        )
+    _draw_tier(
+        ax, fig, hist, x_lo, x_hi,
+        tick_top=_Y_HIST_TOP, label_y=_Y_HIST_LABEL,
+        fontsize=_HIST_FONTSIZE, linewidth=0.9, color=INK_3,
+        text_color=INK_3, rows=2, row_gap=_Y_HIST_ROW_GAP, halo=True,
+        # Historical context is the only tier that may lose a label to crowding.
+        # The source ticks and the headline are the point of the chart.
+        droppable=True,
+    )
+    _draw_tier(
+        ax, fig, srcs, x_lo, x_hi,
+        tick_top=_Y_SRC_TOP, label_y=_Y_SRC_LABEL,
+        fontsize=_SRC_FONTSIZE, linewidth=1.4, color=None, text_color=INK_2,
+    )
+    _draw_tier(
+        ax, fig, bold, x_lo, x_hi,
+        tick_top=_Y_BOLD_TOP, label_y=_Y_BOLD_LABEL,
+        fontsize=_BOLD_FONTSIZE, linewidth=2.2, color=None, text_color=INK_2,
+        bold=True, marker=True,
+    )
 
-    # Tall marks (current storm name, CHD/ADAM/GDACS ticks, observed):
-    # tall vertical line at the actual value, label placed above the PDF area
-    # with anti-overlap shifting and a diagonal leader line when shifted.
-    if tall_marks:
-        _eff_xmax = (
-            x_max if (x_max is not None and x_max > 0)
-            else max(float(m.value) for m in tall_marks)
-        )
-        _placed = _place_tall_labels(tall_marks, _eff_xmax)
-        # Collect (text_obj, placed_x) here, then centre in a second pass AFTER
-        # set_xlim below. Rotated-label width in data units depends on the x-axis
-        # scale, so centring must use the final transData, not the autoscale one.
-        _to_center: list[tuple] = []
-        for m, placed_x in _placed:
-            actual_x = float(m.value)
-            _shifted = abs(placed_x - actual_x) > _eff_xmax * 0.005
-            # Bold (mean) mark is taller and heavier; shortened when shifted.
-            if _shifted:
-                tick_top = _Y_SHIFT_TOP
-            elif m.bold:
-                tick_top = _Y_BOLD_TOP
-            else:
-                tick_top = _Y_TALL_TOP
-            linewidth = 2.5 if m.bold else 1.6
-            ax.plot(
-                [actual_x, actual_x], [0, tick_top],
-                color=m.color, linewidth=linewidth, alpha=1.0,
-                zorder=4, solid_capstyle="butt",
-            )
-            # Draw text label(s) at the left-edge anchor; they are re-centred on
-            # placed_x in the second pass after set_xlim. With ha="left",
-            # va="bottom", rotation=90 the anchor is the rotated label's right edge;
-            # _center_rotated_label_at shifts it so the label's bottom-middle lands
-            # at data-x = placed_x. Text and arrow stay separate so the arrow can
-            # run to that bottom-middle point.
-            if m.bold_prefix:
-                # Render as two overlapping same-anchor texts using blank lines as
-                # spacers so they align like a single multi-line label. Both have
-                # identical line counts (1 + _n_suffix), so each re-centres to the
-                # same anchor and stays overlapped.
-                # Emphasis labels (forecast final exposure + observed-to-date):
-                # a bit larger than the data-source ticks below.
-                _n_suffix = m.label.count("\n") + 1
-                t_pref = ax.text(
-                    placed_x, _Y_TALL_LABEL, m.bold_prefix + "\n" * _n_suffix,
-                    ha="left", va="bottom", rotation=90,
-                    fontsize=8.0, color=m.color, fontweight="bold",
-                    zorder=5, clip_on=False,
-                )
-                t_main = ax.text(
-                    placed_x, _Y_TALL_LABEL, "\n" + m.label,
-                    ha="left", va="bottom", rotation=90,
-                    fontsize=8.0, color=m.color, fontweight="normal",
-                    zorder=5, clip_on=False,
-                )
-                _to_center.append((t_pref, placed_x))
-                _to_center.append((t_main, placed_x))
-            else:
-                t = ax.text(
-                    placed_x, _Y_TALL_LABEL, m.label,
-                    ha="left", va="bottom", rotation=90,
-                    fontsize=6.5, color=m.color,
-                    fontweight="bold" if m.bold else "normal",
-                    zorder=5, clip_on=False,
-                )
-                _to_center.append((t, placed_x))
-            # Diagonal leader line for shifted labels. The label is now centred on
-            # placed_x, so (placed_x, _Y_TALL_LABEL) is exactly its bottom-middle.
-            if _shifted:
-                ax.annotate(
-                    "",
-                    xy=(actual_x, tick_top),
-                    xytext=(placed_x, _Y_TALL_LABEL),
-                    arrowprops=dict(
-                        # shrinkA pulls the tail back from the label (xytext side)
-                        # so the leader line doesn't crowd the label's bottom edge.
-                        arrowstyle="-", color=m.color, lw=0.7,
-                        shrinkA=5, shrinkB=2,
-                    ),
-                    annotation_clip=False,
-                )
-
-    ax.set_ylim(0, _Y_TOP)
     ax.set_yticks([])
     if title:
-        ax.set_title(title, fontsize=11, fontweight="bold", loc="left")
+        ax.set_title(title, fontsize=11, fontweight="bold", loc="left",
+                     color=INK)
 
-    ax.set_xlabel(x_label)
+    ax.set_xlabel(x_label, fontsize=8.5, color=INK_3)
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(_fmt_pop))
-    ax.tick_params(axis="x", which="both", length=4)
+    ax.tick_params(axis="x", which="both", length=3, color=LINE,
+                   labelsize=8, labelcolor=INK_3)
     for side in ("top", "right", "left"):
         ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(LINE)
 
-    if x_max is not None and x_max > 0:
-        ax.set_xlim(0, x_max * 1.05)
-    else:
-        xmin, xmax = ax.get_xlim()
-        ax.set_xlim(min(xmin, 0), xmax)
-
-    # Centre tall labels now that the x-axis scale is final. Rotated-label width in
-    # data units depends on the data-per-pixel ratio, which is only correct once
-    # set_xlim above has fixed the view limits.
-    if tall_marks and _to_center:
-        _renderer = fig.canvas.get_renderer()
-        for _t, _px in _to_center:
-            _center_rotated_label_at(_t, _px, ax, _renderer)
+    if has_pdf and show_legend:
+        _wsp_legend(ax, pdf_shades)
 
     if total_pop is not None and total_pop > 0:
-        xlim = ax.get_xlim()
-        xfrac = (total_pop - xlim[0]) / (xlim[1] - xlim[0])
-        if 0.0 <= xfrac <= 1.0:
-            # Heavy tick + "total pop." label using axes-fraction coordinates.
-            # annotation_clip=False lets it draw below the axes without
-            # affecting figure size (bbox_inches="tight" removed from savefig).
+        xfrac = (total_pop - x_lo) / (x_hi - x_lo)
+        # Suppress it when it lands on top of the headline mark: at that point
+        # the storm is exposing essentially the whole country, which the "(100%)"
+        # in the summary table already says, and the two labels collide.
+        _crowded = any(
+            abs(float(m.value) - total_pop) < (x_hi - x_lo) * 0.03 for m in bold
+        )
+        if 0.0 <= xfrac <= 1.0 and not _crowded:
+            # Horizontal, muted, below the axis: it is a reference bound, not a
+            # data point, and should not compete with the storm marks.
             ax.annotate(
-                "Total est. pop.",
-                xy=(xfrac, 0.0),
-                xycoords="axes fraction",
-                xytext=(xfrac, -0.18),
-                textcoords="axes fraction",
-                ha="center", va="top",
-                fontsize=5.5, color="#333333", fontweight="bold",
-                arrowprops=dict(
-                    arrowstyle="-",
-                    color="#333333",
-                    lw=2.0,
-                    shrinkA=0, shrinkB=0,
-                ),
+                "total population",
+                xy=(xfrac, 0.0), xycoords="axes fraction",
+                xytext=(xfrac, -0.15), textcoords="axes fraction",
+                ha="center", va="top", fontsize=6.8, color=INK_3,
+                arrowprops=dict(arrowstyle="-", color=INK_3, lw=1.2,
+                                shrinkA=0, shrinkB=0),
                 annotation_clip=False,
             )
 
     return _fig_to_img_tag(fig, alt=title)
 
-
 def wind_speed_color(wind_speed_kt: int) -> str:
-    """NHC R34/R50/R64 wind-radius colour for the given wind speed."""
-    return _NHC_WIND_COLOR.get(int(wind_speed_kt), "#888888")
+    """Mark colour for the R34/R50/R64 wind threshold (HDX status ramp)."""
+    return _NHC_WIND_COLOR.get(int(wind_speed_kt), INK_2)
+
+
+def wind_speed_fill(wind_speed_kt: int) -> str:
+    """Pale same-hue step, for the WSP density strip under the marks."""
+    return _WIND_RAMP.get(int(wind_speed_kt), (GREY_FILL, INK_2))[0]
 
 
 def country_strip_chart(
@@ -419,6 +667,7 @@ def country_strip_chart(
     x_max: float | None = None,
     pdf: WspPdf | None = None,
     total_pop: int | None = None,
+    show_legend: bool = True,
 ) -> str:
     # Title omitted — surrounding HTML headings carry country / source.
     return _strip_chart(
@@ -427,8 +676,11 @@ def country_strip_chart(
         marks=marks,
         x_max=x_max,
         pdf=pdf,
-        pdf_fill_color=wind_speed_color(wind_speed_kt),
+        pdf_fill_color=wind_speed_fill(wind_speed_kt),
+        pdf_edge_color=wind_speed_color(wind_speed_kt),
+        pdf_shades=_WSP_SHADES.get(int(wind_speed_kt)),
         total_pop=total_pop,
+        show_legend=show_legend,
     )
 
 
@@ -460,6 +712,50 @@ def adam_strip_chart(
     )
 
 
+# Tile basemap. CartoDB Positron: light, low-chroma, and carries coastlines and
+# place names, so the wind swaths stay the loudest thing on the map. Everything
+# here is plotted in EPSG:4326; contextily warps the tiles rather than us
+# reprojecting the storm geometry.
+_BASEMAP_CRS = "EPSG:4326"
+# Cap the zoom: contextily's auto-zoom fetches a lot of tiles for a basin-scale
+# view, and detail past this is invisible at email render size anyway.
+_BASEMAP_MAX_ZOOM = 6
+_basemap_failed = False
+
+
+def _add_basemap(ax) -> bool:
+    """Draw a tile basemap under the storm layers. True if it landed.
+
+    Tiles are a network call inside a scheduled job, so failure has to be
+    survivable: on any error this returns False and the caller falls back to the
+    packaged Natural Earth polygons, which need no network. The first failure
+    latches, so one outage doesn't mean a timeout per map for the rest of the
+    run.
+    """
+    global _basemap_failed
+    if _basemap_failed:
+        return False
+    try:
+        import contextily as ctx
+
+        ctx.add_basemap(
+            ax,
+            crs=_BASEMAP_CRS,
+            source=ctx.providers.CartoDB.Positron,
+            zoom_adjust=None,
+            zorder=0,
+            attribution_size=5,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — any tile failure is non-fatal
+        _basemap_failed = True
+        logging.getLogger(__name__).warning(
+            f"Basemap tiles unavailable ({exc}); using the offline boundary "
+            f"layer instead."
+        )
+        return False
+
+
 def _drop_tiny_parts(geom, min_area: float = 0.05):
     """Drop polygon parts smaller than min_area (sq degrees) from a MultiPolygon."""
     if geom is None or geom.is_empty:
@@ -473,23 +769,34 @@ def _drop_tiny_parts(geom, min_area: float = 0.05):
     return geom
 
 
-def _draw_countries(ax, countries: gpd.GeoDataFrame) -> None:
-    """Draw adm0 outlines — world background layer."""
-    if countries.empty:
+def _draw_countries(ax, countries: gpd.GeoDataFrame, on_basemap: bool) -> None:
+    """Draw adm0 outlines — the offline world background layer.
+
+    Skipped entirely when tiles loaded: Positron already draws coastlines and
+    national borders, and a second set of outlines over them is just noise. This
+    layer exists so the map still reads when the tile fetch fails.
+    """
+    if countries.empty or on_basemap:
         return
-    countries.plot(ax=ax, facecolor="#f4f5f7", edgecolor="#cdd2d9", linewidth=0.5, zorder=1)
+    countries.plot(ax=ax, facecolor="#f4f5f7", edgecolor="#cdd2d9",
+                   linewidth=0.5, zorder=1)
 
 
-def _draw_adm1(ax, adm1_gdf: gpd.GeoDataFrame) -> None:
+def _draw_adm1(ax, adm1_gdf: gpd.GeoDataFrame, on_basemap: bool) -> None:
     """Draw adm1 polygons for affected countries with internal division lines."""
     if adm1_gdf.empty:
         return
     adm1_gdf.plot(
-        ax=ax, facecolor="#f4f5f7", edgecolor="#cdd2d9", linewidth=0.35, zorder=1
+        ax=ax,
+        facecolor="none" if on_basemap else "#f4f5f7",
+        edgecolor=GREY_EDGE if on_basemap else "#cdd2d9",
+        linewidth=0.35, zorder=1,
     )
     # Emphasise the national (adm0) border with a slightly thicker line.
     outer = adm1_gdf.dissolve(by="iso_3", as_index=False)
-    outer.plot(ax=ax, facecolor="none", edgecolor="#9aa0a8", linewidth=0.8, zorder=1)
+    outer.plot(ax=ax, facecolor="none",
+               edgecolor=INK_2 if on_basemap else "#9aa0a8",
+               linewidth=0.8, zorder=1)
 
 
 def _draw_obsv_buffers(ax, buffers: gpd.GeoDataFrame) -> list[mpatches.Patch]:
@@ -544,18 +851,18 @@ def _draw_wsp_polygons(
     # 0% band gets an outline — one call; remaining bands batched into one call.
     zero = ordered[ordered["percentage"] == 0]
     if not zero.empty:
-        zero.plot(ax=ax, facecolor=_NHC_WSP_COLOR.get(0, "#ffffff"),
-                  edgecolor="#888888", linewidth=0.6, alpha=0.7, zorder=2)
+        zero.plot(ax=ax, facecolor=_NHC_WSP_COLOR.get(0, PANEL),
+                  edgecolor=GREY_EDGE, linewidth=0.6, alpha=_WSP_ALPHA, zorder=2)
     rest = ordered[ordered["percentage"] != 0]
     if not rest.empty:
-        colors = [_NHC_WSP_COLOR.get(int(p), "#888888") for p in rest["percentage"]]
-        rest.plot(ax=ax, color=colors, edgecolor="none", alpha=0.7, zorder=2)
+        colors = [_NHC_WSP_COLOR.get(int(p), GREY_EDGE) for p in rest["percentage"]]
+        rest.plot(ax=ax, color=colors, edgecolor="none", alpha=_WSP_ALPHA, zorder=2)
     for pct in sorted(wsp["percentage"].unique()):
-        color = _NHC_WSP_COLOR.get(int(pct), "#888888")
-        edgecolor = "#888888" if int(pct) == 0 else "none"
+        color = _NHC_WSP_COLOR.get(int(pct), GREY_EDGE)
+        edgecolor = GREY_EDGE if int(pct) == 0 else "none"
         linewidth = 0.6 if int(pct) == 0 else 0
         proxies.append(mpatches.Patch(
-            facecolor=color, alpha=0.7,
+            facecolor=color, alpha=_WSP_ALPHA,
             edgecolor=edgecolor, linewidth=linewidth,
             label=f"≥{int(pct)}%",
         ))
@@ -572,6 +879,7 @@ def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
                 obs.geometry.x, obs.geometry.y,
                 color="#222222", linewidth=2, zorder=3,
                 label=f"{atcf_id} observed",
+                path_effects=[_TRACK_CASING],
             )
             ax.scatter(
                 obs.geometry.x, obs.geometry.y,
@@ -586,11 +894,13 @@ def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
                 ax.plot(
                     bridge_x, bridge_y,
                     color="#444444", linewidth=2, linestyle="--", zorder=3,
+                    path_effects=[_TRACK_CASING],
                 )
             ax.plot(
                 fcs.geometry.x, fcs.geometry.y,
                 color="#444444", linewidth=2, linestyle="--", zorder=3,
                 label=f"{atcf_id} forecast",
+                path_effects=[_TRACK_CASING],
             )
             ax.scatter(
                 fcs.geometry.x, fcs.geometry.y,
@@ -680,13 +990,18 @@ def _finalize_map(ax, title: str, legend_handles: list) -> None:
 
 
 def _add_time_note(ax, tracks: gpd.GeoDataFrame) -> None:
-    """Small footnote clarifying all point times are ET (forecast points only)."""
+    """Small footnote clarifying all point times are ET (forecast points only).
+
+    Bottom-RIGHT: contextily puts the tile attribution bottom-left, and the two
+    overprinted each other into an unreadable smudge.
+    """
     if tracks.empty or not (tracks["kind"] == "forecast").any():
         return
     ax.text(
-        0.01, 0.01, "Times shown in ET (America/New_York)",
-        transform=ax.transAxes, fontsize=7, color="#777777",
-        ha="left", va="bottom", zorder=6,
+        0.99, 0.01, "Times shown in ET (America/New_York)",
+        transform=ax.transAxes, fontsize=7, color=INK_3,
+        ha="right", va="bottom", zorder=6,
+        path_effects=[path_effects.withStroke(linewidth=2.0, foreground=PANEL)],
     )
 
 
@@ -737,6 +1052,190 @@ def _add_stacked_legends(ax, fig, groups: list[tuple[str, list]]) -> None:
         y -= leg_h / ax_h + 0.012  # tight gap → reads as a single stack
 
 
+# Exposure choropleth bins (population exposed, 34 kt). Fixed across storms so
+# a repeat reader learns the scale once; log-spaced because exposure spans five
+# orders of magnitude. HDX brand ramp — sequential, one hue, light -> dark —
+# which is also gghdx's default sequential, so it reads as "an HDX choropleth".
+_EXP_BINS: list[tuple[float, str]] = [
+    (10_000, "#e9f5f1"),      # --hdx-brand-05
+    (100_000, "#a8d5c9"),     # --hdx-brand-2
+    (1_000_000, "#51ac92"),   # --hdx-brand-4
+    (5_000_000, "#1e795f"),   # --hdx-brand-6
+    (float("inf"), "#0f3c30"),  # --hdx-brand-8
+]
+_EXP_BIN_LABELS = ["< 10K", "10K – 100K", "100K – 1M", "1M – 5M", "> 5M"]
+
+
+def _exp_bin_color(pop: float) -> str:
+    for cut, color in _EXP_BINS:
+        if pop < cut:
+            return color
+    return _EXP_BINS[-1][1]
+
+
+def track_plot_exposure(
+    tracks: gpd.GeoDataFrame,
+    buffers: gpd.GeoDataFrame,
+    background: gpd.GeoDataFrame,
+    adm1_gdf: gpd.GeoDataFrame,
+    adm1_exp,
+    adm0_exp: dict[str, int],
+    adm0_gdf: gpd.GeoDataFrame | None = None,
+    storm_name: str = "",
+) -> str:
+    """The single storm map for the condensed email: track + swath edges +
+    population exposed shaded by admin-1.
+
+    This replaces the deterministic/probabilistic map PAIR in the email — the
+    reader's question is "who is in the path", which neither map answered
+    directly. The swaths become outlines rather than fills so the exposure
+    shading underneath stays readable; severity still comes through in the
+    outline colours (34/50/64 kt) and the exposure magnitudes themselves.
+
+    adm1_exp: rows of (iso3, fm_pcode, pop_exposed) — consolidated 34 kt MAX
+    across sources, same numbers as the attached workbook. adm0_exp covers
+    countries with national exposure but no admin-1 rows; their whole adm0
+    polygon (from adm0_gdf) gets the national bin so small territories don't
+    vanish from the map.
+    """
+    if tracks.empty:
+        return ""
+    _fcast_buf = buffers[buffers["kind"] == "forecast"] if not buffers.empty else buffers
+    _obsv_buf = buffers[buffers["kind"] == "observed"] if not buffers.empty else buffers
+    xlim, ylim = _forecast_view_bbox(tracks, _fcast_buf, obsv_buffers=_obsv_buf)
+    fig, ax = plt.subplots(figsize=(9, 6))
+    ax.set_aspect("equal")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    on_basemap = _add_basemap(ax)
+    _draw_countries(ax, background, on_basemap)
+
+    # --- exposure shading -------------------------------------------------
+    shaded_iso3s: set[str] = set()
+    if adm1_exp is not None and len(adm1_exp) and not adm1_gdf.empty:
+        merged = adm1_gdf.merge(
+            adm1_exp[adm1_exp["pop_exposed"] > 0],
+            left_on="adm1_id", right_on="fm_pcode", how="inner",
+        )
+        if not merged.empty:
+            merged.plot(
+                ax=ax,
+                color=[_exp_bin_color(p) for p in merged["pop_exposed"]],
+                edgecolor=PANEL, linewidth=0.4, alpha=0.9, zorder=2,
+            )
+            shaded_iso3s = set(merged["iso3"])
+    # National fallback for countries the admin-1 layer doesn't cover — but
+    # ONLY small territories. Painting all of Mexico one shade because its
+    # admin-1 rows are missing asserts sub-national knowledge we don't have;
+    # for an island the adm0 and the affected area are the same thing.
+    _FALLBACK_MAX_DEG2 = 5.0
+    fallback_geoms: dict[str, object] = {}
+    if adm0_gdf is not None and not adm0_gdf.empty:
+        fb = adm0_gdf[
+            adm0_gdf["iso_3"].isin(
+                {k for k, v in adm0_exp.items() if v > 0} - shaded_iso3s
+            )
+        ]
+        with warnings.catch_warnings():
+            # Area in squared degrees is exactly what we want here — it is a
+            # size-on-this-map test, not a physical area — so the
+            # geographic-CRS warning is noise.
+            warnings.simplefilter("ignore", UserWarning)
+            fb = fb[fb.geometry.area < _FALLBACK_MAX_DEG2]
+        if not fb.empty:
+            fb.plot(
+                ax=ax,
+                color=[_exp_bin_color(adm0_exp[i]) for i in fb["iso_3"]],
+                edgecolor=PANEL, linewidth=0.4, alpha=0.9, zorder=2,
+            )
+            fallback_geoms = dict(zip(fb["iso_3"], fb.geometry, strict=True))
+    # Country outlines over the shading so units still group into countries.
+    if not adm1_gdf.empty:
+        outer = adm1_gdf.dissolve(by="iso_3", as_index=False)
+        outer.plot(ax=ax, facecolor="none", edgecolor=INK_2, linewidth=0.7,
+                   zorder=3)
+
+    # Small-island visibility: a shaded polygon that covers well under a
+    # thousandth of the view is invisible at email render size, and for a
+    # Lesser-Antilles storm that is every affected country. Mark those with a
+    # bin-coloured ring at the centroid so the exposure reads at a glance.
+    view_area = (xlim[1] - xlim[0]) * (ylim[1] - ylim[0])
+    marked_any = False
+    country_geom: dict[str, object] = dict(fallback_geoms)
+    if shaded_iso3s and not adm1_gdf.empty:
+        for iso3_v, grp in adm1_gdf[adm1_gdf["iso_3"].isin(shaded_iso3s)].groupby("iso_3"):
+            country_geom[iso3_v] = grp.geometry.union_all()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        geom_area = {k: (g.area if g is not None and not g.is_empty else 0.0)
+                     for k, g in country_geom.items()}
+    for iso3_v, geom in country_geom.items():
+        if geom is None or geom.is_empty:
+            continue
+        if geom_area[iso3_v] / view_area < 0.0008:
+            c = geom.centroid
+            ax.plot(
+                [c.x], [c.y], marker="o", ms=11,
+                mfc=_exp_bin_color(adm0_exp.get(iso3_v, 0)),
+                mec=INK_2, mew=1.2, alpha=0.95, zorder=4, clip_on=True,
+            )
+            marked_any = True
+
+    # --- forecast swath edges --------------------------------------------
+    swath_handles: list = []
+    if not _fcast_buf.empty:
+        valid = _fcast_buf[
+            ~(_fcast_buf.geometry.is_empty | _fcast_buf.geometry.isna())
+        ].sort_values("wind_speed_kt")
+        for wsp_v, grp in valid.groupby("wind_speed_kt"):
+            c = _NHC_WIND_COLOR.get(int(wsp_v), INK_2)
+            grp.plot(ax=ax, facecolor="none", edgecolor=c, linewidth=1.6,
+                     zorder=3, path_effects=[_TRACK_CASING])
+            swath_handles.append(
+                Line2D([0], [0], color=c, lw=2, label=f"{int(wsp_v)} kt")
+            )
+
+    _draw_tracks(ax, tracks)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+
+    _finalize_map(
+        ax,
+        title=(
+            f"{storm_name}: forecast track and population exposed"
+            if storm_name else "Forecast track and population exposed"
+        ),
+        legend_handles=[],
+    )
+    fig.tight_layout()
+    exp_handles = [
+        mpatches.Patch(facecolor=c, edgecolor=LINE, label=lbl)
+        for (_, c), lbl in zip(_EXP_BINS, _EXP_BIN_LABELS, strict=True)
+    ]
+    if marked_any:
+        exp_handles.append(Line2D(
+            [0], [0], marker="o", ls="", ms=9, mfc=PANEL, mec=INK_2, mew=1.2,
+            label="small territory",
+        ))
+    _add_stacked_legends(ax, fig, [
+        ("Population\nexposed", exp_handles),
+        ("Forecast swath\n(edge)", swath_handles),
+        ("Tracks", _track_legend_handles(tracks)),
+    ])
+    _add_time_note(ax, tracks)
+    ax.text(
+        0.99, 0.045, "Shading: admin-1 where available",
+        transform=ax.transAxes, fontsize=6.5, color=INK_3,
+        ha="right", va="bottom", zorder=6,
+        path_effects=[path_effects.withStroke(linewidth=2.0, foreground=PANEL)],
+    )
+    return _fig_to_img_tag(
+        fig,
+        alt=(f"{storm_name}: forecast track and population exposed map"
+             if storm_name else "Forecast track and population exposed map"),
+    )
+
+
 def track_plot_buffers(
     tracks: gpd.GeoDataFrame,
     buffers: gpd.GeoDataFrame,
@@ -756,12 +1255,20 @@ def track_plot_buffers(
     _obsv_buf = buffers[buffers["kind"] == "observed"] if not buffers.empty else buffers
     xlim, ylim = _forecast_view_bbox(tracks, _fcast_buf, obsv_buffers=_obsv_buf)
     fig, ax = plt.subplots(figsize=(9, 6))
-    _draw_countries(ax, background)
+    # Aspect and limits first, in that order: contextily picks its tile extent
+    # from the axes' current view, and set_aspect can move the limits. Fetching
+    # before either is settled leaves part of the frame with no tiles under it.
+    ax.set_aspect("equal")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    on_basemap = _add_basemap(ax)
+    _draw_countries(ax, background, on_basemap)
     if adm1_gdf is not None and not adm1_gdf.empty:
-        _draw_adm1(ax, adm1_gdf)
+        _draw_adm1(ax, adm1_gdf, on_basemap)
     obsv_proxies = _draw_obsv_buffers(ax, buffers)
     fcast_proxies = _draw_fcast_buffers(ax, buffers)
     _draw_tracks(ax, tracks)
+    # add_basemap snaps the view out to whole tiles; restore the intended frame.
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     # No on-plot legend — titled legends stacked off the right edge.
@@ -810,9 +1317,16 @@ def track_plot_wsp(
         return ""
     xlim, ylim = _forecast_view_bbox(tracks, wsp)
     fig, ax = plt.subplots(figsize=(9, 6))
-    _draw_countries(ax, background)
+    # Aspect and limits first, in that order: contextily picks its tile extent
+    # from the axes' current view, and set_aspect can move the limits. Fetching
+    # before either is settled leaves part of the frame with no tiles under it.
+    ax.set_aspect("equal")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    on_basemap = _add_basemap(ax)
+    _draw_countries(ax, background, on_basemap)
     if adm1_gdf is not None and not adm1_gdf.empty:
-        _draw_adm1(ax, adm1_gdf)
+        _draw_adm1(ax, adm1_gdf, on_basemap)
     obsv_proxies = _draw_obsv_buffers(ax, buffers)
     wsp_proxies = _draw_wsp_polygons(ax, wsp, wind_threshold_kt)
     _draw_tracks(ax, tracks)
