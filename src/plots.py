@@ -24,7 +24,7 @@ import matplotlib.ticker as mticker
 import matplotlib.transforms as mtransforms
 from matplotlib.lines import Line2D
 
-from src.landfall import densify_track
+from src.landfall import densify_observed, densify_track
 
 # ---------------------------------------------------------------------------
 # HDX v2 design tokens (ds-knowledge-base methods/style-guide.md; full mirror in
@@ -245,7 +245,7 @@ _Y_HIST_ROW_GAP = 0.20
 # lanes above the historical band; the headline tier and the y-limit are
 # computed per chart from the number of lanes — see _strip_chart.
 
-_HIST_FONTSIZE = 6.8
+_HIST_FONTSIZE = 6.4
 _SRC_FONTSIZE = 7.2
 _BOLD_FONTSIZE = 8.4
 
@@ -496,8 +496,16 @@ def _strip_chart(
     hist_edge_color: str = GREY_EDGE,
     total_pop: int | None = None,
     wind_chip_kt: int | None = None,
+    rp_label: str = "",
+    show_axis: bool = True,
 ) -> str:
     """Compact source-comparison chart for one country + wind threshold.
+
+    A country's charts share one x-scale (the caller passes the same x_max),
+    reading as a small-multiples stack: `show_axis=False` on all but the last
+    chart suppresses the tick numbers and the total-population marker, whose
+    single copy at the bottom serves the whole stack. `rp_label` prints the
+    threshold's own return period under the wind marker.
 
     Everything lives on ONE axis — population exposed:
 
@@ -544,15 +552,16 @@ def _strip_chart(
     y_top = 1.30 if (hist or obs) else 0.62
 
     # Fixed physical furniture: the axes area scales with y_top, the space
-    # below the axis (dot labels, tick numbers, total-population marker) is a
-    # constant depth.
-    axes_in = y_top * 0.78
-    fig_h = axes_in + 0.66
+    # below the axis (dot labels, and on the last chart of a stack the tick
+    # numbers + total-population marker) is a constant depth.
+    axes_in = y_top * 0.72
+    below_in = 0.60 if show_axis else 0.28
+    fig_h = axes_in + below_in + 0.06
     fig, ax = plt.subplots(figsize=(_FIG_W_IN, fig_h))
     fig.patch.set_facecolor(PANEL)
     fig.subplots_adjust(
         left=0.02, right=0.98,
-        top=1 - 0.06 / fig_h, bottom=0.60 / fig_h,
+        top=1 - 0.06 / fig_h, bottom=below_in / fig_h,
     )
 
     if x_max is not None and x_max > 0:
@@ -732,7 +741,8 @@ def _strip_chart(
 
     # Wind-threshold marker, top-right: plain bold text in the threshold
     # colour (the pill box was visual noise), replacing the x-axis label and
-    # the per-chart heading.
+    # the per-chart heading. Its own return period sits right under it in
+    # muted ink — offset in points, so the spacing survives any chart height.
     if wind_chip_kt is not None:
         c = _NHC_WIND_COLOR.get(int(wind_chip_kt), INK_2)
         ax.text(
@@ -740,6 +750,12 @@ def _strip_chart(
             transform=ax.transAxes, ha="right", va="top",
             fontsize=10, color=c, fontweight="bold", zorder=7,
         )
+        if rp_label:
+            ax.annotate(
+                rp_label, xy=(0.998, 0.97), xycoords="axes fraction",
+                xytext=(0, -13), textcoords="offset points",
+                ha="right", va="top", fontsize=6.8, color=INK_2, zorder=7,
+            )
 
     # Mini-legend for the baseline curves, top-left — fixed position so every
     # chart reads the same way. Vertical storm names stop below it.
@@ -760,14 +776,17 @@ def _strip_chart(
                      color=INK)
     ax.set_xlabel("")
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(_fmt_pop))
-    # Big pad drops the numeric labels below the source-label row.
+    # Big pad drops the numeric labels below the source-label row. On the
+    # non-final charts of a stack the numbers are suppressed entirely — the
+    # shared axis at the bottom of the stack carries them once.
     ax.tick_params(axis="x", which="both", length=3, color=LINE,
-                   labelsize=7.5, labelcolor=INK_3, pad=22)
+                   labelsize=7.5, labelcolor=INK_3, pad=22,
+                   labelbottom=show_axis)
     for side in ("top", "right", "left"):
         ax.spines[side].set_visible(False)
     ax.spines["bottom"].set_color(LINE)
 
-    if total_pop is not None and total_pop > 0:
+    if show_axis and total_pop is not None and total_pop > 0:
         xfrac = (total_pop - x_lo) / (x_hi - x_lo)
         _crowded = any(
             abs(float(m.value) - total_pop) < (x_hi - x_lo) * 0.03
@@ -784,7 +803,9 @@ def _strip_chart(
                 annotation_clip=False,
             )
 
-    return _fig_to_img_tag(fig, alt=title)
+    # Retina render: 2x the pixel density of the declared display size, so
+    # the charts stay sharp in the email (see _fig_to_img_tag).
+    return _fig_to_img_tag(fig, alt=title, dpi=200, display_scale=2.0)
 
 
 def wind_speed_color(wind_speed_kt: int) -> str:
@@ -806,6 +827,8 @@ def country_strip_chart(
     pdf_style: str = "density",
     hist_values: list[float] | None = None,
     total_pop: int | None = None,
+    rp_label: str = "",
+    show_axis: bool = True,
 ) -> str:
     # Title omitted — surrounding HTML headings carry country / source; the
     # in-chart chip carries quantity + threshold.
@@ -823,6 +846,8 @@ def country_strip_chart(
         hist_edge_color=wind_speed_color(wind_speed_kt),
         total_pop=total_pop,
         wind_chip_kt=wind_speed_kt,
+        rp_label=rp_label,
+        show_axis=show_axis,
     )
 
 
@@ -1022,12 +1047,23 @@ def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
         fcs = storm[storm["kind"] == "forecast"].sort_values("valid_time")
 
         if not obs.empty:
-            ax.plot(
-                obs.geometry.x, obs.geometry.y,
-                color="#222222", linewidth=2, zorder=3,
-                label=f"{atcf_id} observed",
-                path_effects=[_TRACK_CASING],
-            )
+            # Same PCHIP densification as the forecast line, so the observed
+            # segment curves rather than cutting corners at six-hourly fixes.
+            _ot, _olon, _olat, _ow = densify_observed(storm)
+            if len(_olon) > 1:
+                ax.plot(
+                    _olon, _olat,
+                    color="#222222", linewidth=2, zorder=3,
+                    label=f"{atcf_id} observed",
+                    path_effects=[_TRACK_CASING],
+                )
+            else:
+                ax.plot(
+                    obs.geometry.x, obs.geometry.y,
+                    color="#222222", linewidth=2, zorder=3,
+                    label=f"{atcf_id} observed",
+                    path_effects=[_TRACK_CASING],
+                )
             ax.scatter(
                 obs.geometry.x, obs.geometry.y,
                 color="#222222", s=15, zorder=4,
@@ -1520,7 +1556,14 @@ def track_plot_wsp(
     return _fig_to_img_tag(fig, alt=title, dpi=150)
 
 
-def _fig_to_img_tag(fig: plt.Figure, alt: str = "", dpi: int = 100) -> str:
+def _fig_to_img_tag(
+    fig: plt.Figure, alt: str = "", dpi: int = 100, display_scale: float = 1.0,
+) -> str:
+    """`display_scale` > 1 is the retina trick: render at a multiple of the
+    display resolution and declare the logical size in the width/height
+    attributes, so the chart stays pixel-sharp on high-DPI screens. HTML/SVG
+    charts would be sharper still but do not survive email clients (Gmail
+    strips positioning CSS; Outlook desktop renders with the Word engine)."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
@@ -1533,7 +1576,7 @@ def _fig_to_img_tag(fig: plt.Figure, alt: str = "", dpi: int = 100) -> str:
     # max-width:100%;height:auto. alt gives a graceful state while loading or if
     # an image ever fails to load.
     nat_w, nat_h = Image.open(io.BytesIO(png)).size
-    w = min(nat_w, _EMAIL_CONTENT_WIDTH_PX)
+    w = min(round(nat_w / display_scale), _EMAIL_CONTENT_WIDTH_PX)
     h = max(1, round(w * nat_h / nat_w))
     img_b64 = base64.b64encode(png).decode("utf-8")
     alt_attr = _html.escape(alt, quote=True)

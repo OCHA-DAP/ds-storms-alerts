@@ -75,6 +75,24 @@ def densify_track(
     rows = ([obs.iloc[-1]] if not obs.empty else []) + [
         r for _, r in fcs.iterrows()
     ]
+    return _densify_rows(rows, freq_minutes)
+
+
+def densify_observed(
+    tracks: gpd.GeoDataFrame, freq_minutes: int = 30
+) -> tuple[list[datetime], np.ndarray, np.ndarray, np.ndarray | None]:
+    """The observed path on a dense time grid, same interpolation as
+    densify_track — so the drawn observed line curves like the forecast line
+    instead of cutting straight doglegs between six-hourly fixes."""
+    obs = tracks[tracks["kind"] == "observed"].sort_values("valid_time")
+    if obs.empty:
+        return [], np.array([]), np.array([]), None
+    return _densify_rows([r for _, r in obs.iterrows()], freq_minutes)
+
+
+def _densify_rows(
+    rows: list, freq_minutes: int
+) -> tuple[list[datetime], np.ndarray, np.ndarray, np.ndarray | None]:
     seen: set = set()
     times, lons, lats, winds = [], [], [], []
     for r in rows:

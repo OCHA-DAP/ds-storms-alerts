@@ -990,7 +990,12 @@ def generate_alert_html(
 
             combined_blocks: list[str] = []
             _total_pop = iso3_to_total_pop.get(iso3, 0)
+            _rp_by_wsp = {w["wsp"]: w["rp"] for w in _toc_wsps}
 
+            # Pre-pass: gather every threshold's data and how much x-range it
+            # needs, so the country's charts can share ONE x-scale and read as
+            # an aligned small-multiples stack.
+            _wsp_payloads: list[dict] = []
             for wsp in wsps_to_render:
                 wsp_color = wind_speed_color(wsp)
                 obsv_floor = _obsv_for(obsv_df, aid, iso3, wsp)
@@ -1030,26 +1035,53 @@ def generate_alert_html(
                     & (wsp_exp_df["wind_threshold_kt"] == wsp)
                 ]
 
-                # x_max = min(total_pop, 2 × wsp_extent), extended if any mark exceeds it.
-                # wsp_extent = right edge of the PDF polygon (obsv_floor + sum of all bands),
-                # which is the "maximum value from the WSP distribution" as seen on the chart.
+                # This threshold's x-range need: min(total_pop, 2 x wsp_extent),
+                # extended by any mark that must stay in frame. wsp_extent =
+                # right edge of the WSP distribution (obsv_floor + all bands).
                 _wsp_extent = obsv_floor + float(wsp_sub["pop_exposed"].sum()) if not wsp_sub.empty else 0.0
                 _base = _wsp_extent if _wsp_extent > 0 else (
                     max(active_sources.values()) if active_sources else x_max_per_wsp[wsp]
                 )
                 _cap = min(_total_pop, 2 * _base) if _total_pop > 0 else 2 * _base
                 _max_active = max(active_sources.values()) if active_sources else 0
-                # Stretch to keep the "most similar storms" in frame — they
-                # are the comparators the table names, so falling off the
-                # right edge defeats their purpose. Similarity scoring keeps
-                # their values near the current ones, so the stretch is small.
+                # Keep the "most similar storms" in frame — they are the
+                # comparators the table names, so falling off the right edge
+                # defeats their purpose. Similarity scoring keeps their values
+                # near the current ones, so the stretch is small.
                 _max_similar = max(
                     (v.get(wsp, 0) for v in _similar_vals.values()), default=0
                 )
-                _chart_xmax = max(_cap, _max_active, _max_similar)
-                # show "total pop." tick only when total_pop is visible on this chart
-                _chart_total_pop = (
-                    _total_pop if (_total_pop > 0 and _total_pop <= _chart_xmax) else None
+                _wsp_payloads.append({
+                    "wsp": wsp, "wsp_color": wsp_color,
+                    "obsv_floor": obsv_floor,
+                    "active_sources": active_sources, "wsp_sub": wsp_sub,
+                    "xmax_need": max(_cap, _max_active, _max_similar),
+                })
+
+            _shared_xmax = max(
+                (p["xmax_need"] for p in _wsp_payloads), default=0.0
+            )
+            # Show the "total pop." marker only when it is on-scale; shared
+            # across the stack, so it can only appear once (last chart).
+            _chart_total_pop = (
+                _total_pop if (_total_pop > 0 and _total_pop <= _shared_xmax)
+                else None
+            )
+
+            for _pi, _pl in enumerate(_wsp_payloads):
+                wsp = _pl["wsp"]
+                wsp_color = _pl["wsp_color"]
+                obsv_floor = _pl["obsv_floor"]
+                active_sources = _pl["active_sources"]
+                wsp_sub = _pl["wsp_sub"]
+                # Email stack: tick numbers + total-pop marker only on the
+                # bottom chart — the shared scale makes one axis row enough.
+                # The full page keeps every axis: its captions between charts
+                # break the visual stack.
+                _show_axis = full or _pi == len(_wsp_payloads) - 1
+                _rp = _rp_by_wsp.get(wsp)
+                _rp_lbl = "" if _rp is None else (
+                    "<1-year RP" if _rp < 1 else f"{_rp:.0f}-year RP"
                 )
 
                 _raw_hist_marks = [
@@ -1058,7 +1090,7 @@ def generate_alert_html(
                 ]
                 hist_marks = _filter_historical(
                     _raw_hist_marks,
-                    _chart_xmax,
+                    _shared_xmax,
                     current_values=list(active_sources.values()),
                 )
 
@@ -1110,9 +1142,8 @@ def generate_alert_html(
                 # The email chart carries no forecast-probability curve (it
                 # confused more than it informed); the full page shows it in
                 # BOTH styles — density and exceedance — for comparison. No
-                # per-chart RP note (the RP lives in the summary table and
-                # the country heading pill) and no per-threshold heading (the
-                # in-chart chip names quantity and threshold).
+                # per-threshold heading: the in-chart marker names quantity,
+                # threshold and its return period.
                 if full and pdf is not None:
                     _cap_style = (
                         "font-size:0.78em;color:#7e8e8f;margin:14px 0 2px;"
@@ -1125,11 +1156,13 @@ def generate_alert_html(
                     ):
                         _img = country_strip_chart(
                             iso3, wsp, combined_marks,
-                            x_max=_chart_xmax,
+                            x_max=_shared_xmax,
                             pdf=pdf,
                             pdf_style=_style,
                             hist_values=_hist_vals,
                             total_pop=_chart_total_pop,
+                            rp_label=_rp_lbl,
+                            show_axis=_show_axis,
                         )
                         combined_blocks.append(
                             f"<p style='{_cap_style}'>{_cap}</p>{_img}"
@@ -1137,16 +1170,18 @@ def generate_alert_html(
                 else:
                     combined_img = country_strip_chart(
                         iso3, wsp, combined_marks,
-                        x_max=_chart_xmax,
+                        x_max=_shared_xmax,
                         pdf=pdf if full else None,
                         hist_values=_hist_vals,
                         total_pop=_chart_total_pop,
+                        rp_label=_rp_lbl,
+                        show_axis=_show_axis,
                     )
                     combined_blocks.append(combined_img)
 
-            # The country's highest RP rides its heading as a colour pill —
-            # the chart may feature a threshold whose own RP is unremarkable
-            # while a lower threshold is the once-a-decade story.
+            # The country's WORST RP across thresholds rides its heading as a
+            # colour pill — deliberately louder than the per-threshold RP
+            # printed inside each chart, since it is the country's headline.
             _c_best_rp = max(
                 (w["rp"] for w in _toc_wsps if w["rp"]), default=None
             )
@@ -1155,13 +1190,14 @@ def generate_alert_html(
                 # it; colour only when the value is notable.
                 _pc = _rp_color(_c_best_rp) or "#ebeff0"
                 _c_lbl = (
-                    "&lt;1-year" if _c_best_rp < 1 else f"{_c_best_rp:.0f}-year"
+                    "&lt;1-year RP" if _c_best_rp < 1
+                    else f"up to {_c_best_rp:.0f}-year RP"
                 )
                 _c_pill = (
-                    f" <span style='display:inline-block;padding:1px 10px;"
+                    f" <span style='display:inline-block;padding:2px 12px;"
                     f"border-radius:999px;background:{_pc};color:#1f2324;"
-                    f"font-size:0.72em;font-weight:600;vertical-align:2px'>"
-                    f"{_c_lbl} RP</span>"
+                    f"font-size:0.82em;font-weight:700;vertical-align:2px'>"
+                    f"{_c_lbl}</span>"
                 )
             else:
                 _c_pill = ""
