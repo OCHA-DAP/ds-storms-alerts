@@ -1,4 +1,5 @@
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -562,12 +563,65 @@ def fetch_track_geo(
           AND issued_time = :issued_time
           AND leadtime > 0
     """).bindparams(bindparam("atcf_ids", expanding=True))
-    return gpd.read_postgis(
+    gdf = gpd.read_postgis(
         sql,
         engine,
         params={"atcf_ids": atcf_ids, "issued_time": issued_time},
         geom_col="geometry",
     )
+    return _drop_implausible_observed(gdf)
+
+
+# A tropical cyclone's translation speed tops out around 90 km/h even in
+# extreme high-latitude accelerations; anything faster is a garbled position.
+# Real case: Erin 2025's 06Z Aug 16 advisory carried a 0-hour position 7.3
+# degrees west of the 00Z one (~127 km/h implied motion, 4x its actual speed),
+# which drew the observed track teleporting ahead of the forecast and back.
+_MAX_TRACK_SPEED_KMH = 110
+
+
+def _drop_implausible_observed(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Drop observed track points implying impossible storm motion.
+
+    Greedy forward pass per storm: a point is kept only if the great-circle
+    speed from the last KEPT point is plausible, so a single bad fix is
+    dropped while the good points on either side of it survive. Upstream data
+    error, but one that can land in a live advisory — the alert should degrade
+    to a slightly shorter observed line, not a teleporting one.
+    """
+    if gdf.empty:
+        return gdf
+    keep_idx: list = []
+    obs = gdf[gdf["kind"] == "observed"]
+    for _, storm in obs.groupby("atcf_id"):
+        storm = storm.sort_values("valid_time")
+        last = None
+        for idx, r in storm.iterrows():
+            if r.geometry is None or r.geometry.is_empty:
+                continue
+            if last is not None:
+                dt_h = (
+                    r["valid_time"] - last["valid_time"]
+                ).total_seconds() / 3600
+                if dt_h <= 0:
+                    continue
+                # Equirectangular distance is plenty at these scales.
+                dx = (r.geometry.x - last.geometry.x) * math.cos(
+                    math.radians((r.geometry.y + last.geometry.y) / 2))
+                dy = r.geometry.y - last.geometry.y
+                km = math.hypot(dx, dy) * 111.32
+                if km / dt_h > _MAX_TRACK_SPEED_KMH:
+                    logging.getLogger(__name__).warning(
+                        f"Dropping implausible observed position for "
+                        f"{r['atcf_id']} at {r['valid_time']} "
+                        f"({km / dt_h:.0f} km/h implied motion)"
+                    )
+                    continue
+            keep_idx.append(idx)
+            last = r
+    return gdf[
+        (gdf["kind"] != "observed") | gdf.index.isin(keep_idx)
+    ].copy()
 
 
 def _load_one_adm1(iso3: str) -> gpd.GeoDataFrame:
