@@ -1071,19 +1071,11 @@ def generate_alert_html(
                         color=wsp_color,
                     )
 
-                # The KDE gets the FULL historical sample — the tick marks are
-                # thinned for label spacing, and a thinned sample would bias
-                # the curve.
-                _hist_vals_all = hist_df[
-                    (hist_df["iso3"] == iso3)
-                    & (hist_df["wind_speed_kt"] == wsp)
-                ]["pop_exposed"].tolist()
                 combined_img = country_strip_chart(
                     iso3, wsp, combined_marks,
                     x_max=_chart_xmax,
                     pdf=pdf,
                     total_pop=_chart_total_pop,
-                    hist_values=_hist_vals_all,
                 )
                 # No per-chart RP note: the return period lives in exactly two
                 # places — the summary table and the country heading pill.
@@ -1169,8 +1161,7 @@ def generate_alert_html(
                 "<b style='color:#5e6a6b'>Dots</b> are the current estimates "
                 "by source (labelled beneath the axis) &middot; "
                 "<b style='color:#5e6a6b'>vertical ticks</b> are past storms "
-                "since 2002, and the <b style='color:#5e6a6b'>grey curve</b> "
-                "their distribution &middot; the <b style='color:#5e6a6b'>"
+                "since 2002 &middot; the <b style='color:#5e6a6b'>"
                 "coloured curve</b> is the forecast probabilistic "
                 "distribution of exposure from NHC's wind-speed "
                 "probabilities — its spike at the low end is the chance that "

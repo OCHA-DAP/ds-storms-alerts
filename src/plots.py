@@ -87,7 +87,7 @@ _NHC_WSP_COLOR = {
 # Swath opacity. Both are lower than they were: over a tile basemap an opaque
 # swath hides the coastlines and place names that are the reason for having one.
 _OBSV_BUFFER_ALPHA = 0.20
-_FCAST_BUFFER_ALPHA = 0.45
+_FCAST_BUFFER_ALPHA = 0.52
 # The probability bands nest, so the visible colour of an inner band is its own
 # fill over everything outside it. Keep this high enough that the stack does not
 # drift far from the legend swatches, low enough to read the coastline through.
@@ -206,17 +206,22 @@ def _pdf_atoms(
 
 def _kernel_density(
     atoms: list[tuple[float, float]], grid, sigma: float,
+    upper: float | None = None,
 ):
-    """Gaussian-kernel density of weighted atoms on `grid`, reflected at zero.
+    """Gaussian-kernel density of weighted atoms on `grid`, reflected at zero
+    and (when given) at `upper`.
 
-    Reflection keeps the mass of an atom at (or near) zero on the physical
-    side of the axis instead of losing half of it to negative exposure — the
-    delta-at-zero stays a visible spike rather than shrinking by half.
+    Reflection keeps boundary mass on the physical side of each limit: the
+    delta-at-zero stays a visible spike instead of losing half its area to
+    negative exposure, and mass at the total-population cap piles up AT the
+    cap instead of smearing past more people than the country has.
     """
     dens = np.zeros_like(grid, dtype=float)
     for x, w in atoms:
         dens += w * np.exp(-0.5 * ((grid - x) / sigma) ** 2)
         dens += w * np.exp(-0.5 * ((grid + x) / sigma) ** 2)
+        if upper is not None:
+            dens += w * np.exp(-0.5 * ((grid - (2 * upper - x)) / sigma) ** 2)
     return dens
 
 
@@ -469,7 +474,6 @@ def _strip_chart(
     pdf_edge_color: str = GREY_EDGE,
     total_pop: int | None = None,
     wind_chip_kt: int | None = None,
-    hist_values: list[float] | None = None,
 ) -> str:
     """Compact source-comparison chart for one country + wind threshold.
 
@@ -506,7 +510,7 @@ def _strip_chart(
 
     # Vertical layout (data units above the axis). The band for vertical
     # storm-name labels dominates; charts with no history stay shallow.
-    _y_strip = 0.18          # WSP spread curve
+    _y_strip = 0.52          # forecast-distribution curve (tall on purpose)
     _y_rug = 0.16            # historical ticks
     _y_rug_label = 0.22      # vertical names start here
     y_top = 1.30 if (hist or obs) else 0.62
@@ -534,45 +538,32 @@ def _strip_chart(
     # axis line.
     below = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
 
-    # Two distributions share the baseline, each peak-normalised to the strip
-    # height and annotated in the mini-legend (top-left):
-    #
-    # - GREY: the historical distribution — a Gaussian KDE over this
-    #   country's storm exposures since 2002 (Zach's ridgeline treatment,
-    #   on a linear axis);
-    # - COLOURED: the forecast probabilistic distribution — the smoothed
-    #   comonotone atom distribution from the WSP bands (see _pdf_atoms).
-    #   Its mass sums to 1, which is why it usually spikes hard at the
-    #   already-observed floor: a country whose highest wind-probability band
-    #   is 10% carries ~90% probability of no further exposure.
+    # The forecast probabilistic distribution on the baseline — the smoothed
+    # comonotone atom pmf from the WSP bands (see _pdf_atoms). Mass sums to 1,
+    # which is why it usually spikes hard at the already-observed floor; its
+    # support is HARD-capped at the total population (grid stops there, and
+    # boundary reflection piles cap-adjacent mass at the cap rather than
+    # smearing it past). A historical KDE was tried on this baseline and
+    # dropped — on a linear axis it read as noise beside the ticks.
     sigma = (x_hi - x_lo) * 0.022
     legend_rows: list[tuple[str, str]] = []
-    if hist_values:
-        hv = [float(v) for v in hist_values if v and v > 0]
-        if len(hv) >= 3:
-            hgrid = np.linspace(0.0, x_hi, 480)
-            hdens = _kernel_density([(v, 1.0 / len(hv)) for v in hv],
-                                    hgrid, sigma)
-            if hdens.max() > 0:
-                hdens = hdens * _y_strip / hdens.max()
-                ax.fill_between(hgrid, hdens, 0, facecolor=GREY_FILL,
-                                alpha=0.75, linewidth=0, zorder=1)
-                ax.plot(hgrid, hdens, color=GREY_EDGE, lw=0.9, alpha=0.85,
-                        zorder=2)
-                legend_rows.append(("historical distribution", GREY_EDGE))
     if has_pdf:
-        atoms = _pdf_atoms(pdf, float(total_pop) if total_pop else None)
+        cap = float(total_pop) if total_pop and total_pop > 0 else None
+        atoms = _pdf_atoms(pdf, cap)
         if atoms:
-            end = min(max(x for x, _ in atoms) + 4 * sigma, x_hi)
+            end = max(x for x, _ in atoms) + 4 * sigma
+            if cap is not None:
+                end = min(end, cap)
+            end = min(end, x_hi)
             fgrid = np.linspace(0.0, end, 480)
-            fdens = _kernel_density(atoms, fgrid, sigma)
+            fdens = _kernel_density(atoms, fgrid, sigma, upper=cap)
             if fdens.max() > 0:
                 fdens = fdens * _y_strip / fdens.max()
                 ax.fill_between(fgrid, fdens, 0, facecolor=pdf_fill_color,
                                 alpha=0.9, linewidth=0, zorder=2)
                 ax.plot(fgrid, fdens, color=pdf_edge_color, lw=1.0,
                         alpha=0.9, zorder=3)
-                legend_rows.insert(0, (
+                legend_rows.append((
                     "forecast probabilistic distribution", pdf_edge_color))
 
     # Historical storms: a tick each, VERTICAL name labels above. Vertical
@@ -653,10 +644,10 @@ def _strip_chart(
         c = _NHC_WIND_COLOR.get(int(wind_chip_kt), INK_2)
         fill = _WIND_RAMP.get(int(wind_chip_kt), (GREY_FILL, INK_2))[0]
         ax.text(
-            0.998, 0.97, f"Population exposed to ≥{int(wind_chip_kt)} kt winds",
+            0.998, 0.97, f"≥{int(wind_chip_kt)} kt",
             transform=ax.transAxes, ha="right", va="top",
-            fontsize=8, color=c, fontweight="bold", zorder=7,
-            bbox=dict(boxstyle="round,pad=0.4", facecolor=fill,
+            fontsize=8.5, color=c, fontweight="bold", zorder=7,
+            bbox=dict(boxstyle="round,pad=0.35", facecolor=fill,
                       edgecolor=c, linewidth=0.8, alpha=0.95),
         )
 
@@ -723,7 +714,6 @@ def country_strip_chart(
     x_max: float | None = None,
     pdf: WspPdf | None = None,
     total_pop: int | None = None,
-    hist_values: list[float] | None = None,
 ) -> str:
     # Title omitted — surrounding HTML headings carry country / source; the
     # in-chart chip carries quantity + threshold.
@@ -737,7 +727,6 @@ def country_strip_chart(
         pdf_edge_color=wind_speed_color(wind_speed_kt),
         total_pop=total_pop,
         wind_chip_kt=wind_speed_kt,
-        hist_values=hist_values,
     )
 
 
@@ -1185,7 +1174,7 @@ def track_plot_exposure(
     obsv_proxies = _draw_obsv_buffers(ax, buffers)
     fcast_proxies = _draw_fcast_buffers(ax, buffers)
 
-    # --- exposure shading -------------------------------------------------
+    # --- exposure shading (drawn over the fills; edges added after) --------
     shaded_iso3s: set[str] = set()
     if adm1_exp is not None and len(adm1_exp) and not adm1_gdf.empty:
         merged = adm1_gdf.merge(
@@ -1229,6 +1218,19 @@ def track_plot_exposure(
         outer = adm1_gdf.dissolve(by="iso_3", as_index=False)
         outer.plot(ax=ax, facecolor="none", edgecolor=INK_2, linewidth=0.7,
                    zorder=3)
+
+    # Forecast swath EDGES over the choropleth: the fills sit under the
+    # exposure shading (bold greens win on land), so without edges the swath
+    # disappears exactly where it matters most. The outline carries it across
+    # shaded countries.
+    if not _fcast_buf.empty:
+        _valid_f = _fcast_buf[
+            ~(_fcast_buf.geometry.is_empty | _fcast_buf.geometry.isna())
+        ]
+        for _wsp_v, _grp in _valid_f.groupby("wind_speed_kt"):
+            _grp.plot(ax=ax, facecolor="none",
+                      edgecolor=_NHC_WIND_COLOR.get(int(_wsp_v), INK_2),
+                      linewidth=1.5, alpha=0.95, zorder=3)
 
     # Small-island visibility: a shaded polygon that covers well under a
     # thousandth of the view is invisible at email render size, and for a
