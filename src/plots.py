@@ -464,6 +464,12 @@ def _draw_tier(
                 ])
 
 
+# Minimum number of past storms (nonzero exposure at this country + threshold)
+# before a historical density curve is drawn. Below this a "distribution" is
+# two or three bumps pretending to be a shape — the ticks alone say more.
+_HIST_KDE_MIN_STORMS = 5
+
+
 def _strip_chart(
     title: str,
     x_label: str,
@@ -472,6 +478,8 @@ def _strip_chart(
     pdf: WspPdf | None = None,
     pdf_fill_color: str = GREY_FILL,
     pdf_edge_color: str = GREY_EDGE,
+    pdf_style: str = "density",
+    hist_values: list[float] | None = None,
     total_pop: int | None = None,
     wind_chip_kt: int | None = None,
 ) -> str:
@@ -483,8 +491,14 @@ def _strip_chart(
       row just below it (so they can't collide with storm names above);
     - historical storms are ticks rising from the axis with VERTICAL name
       labels — vertical packs several times more names into the same width;
-    - the shaded curve along the baseline is the probabilistic (WSP) forecast
-      spread, smoothed and capped at the total population;
+    - `hist_values` (the FULL unfiltered set of past nonzero exposures, not
+      just the labelled ticks) draws a grey historical density curve — only
+      when there are at least _HIST_KDE_MIN_STORMS of them;
+    - `pdf` draws the probabilistic (WSP) forecast along the baseline, in one
+      of two styles: ``"density"`` (the smoothed comonotone pmf, capped at the
+      total population) or ``"exceedance"`` (the chance that final exposure
+      exceeds each value — starts at 100% and falls to zero). The email passes
+      no pdf at all; both styles render on the full-detail page;
     - a dashed line marks exposure already observed;
     - the chip in the top-right names the wind threshold, replacing both the
       old x-axis label and the per-chart heading.
@@ -538,15 +552,38 @@ def _strip_chart(
     # axis line.
     below = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
 
-    # The forecast probabilistic distribution on the baseline — the smoothed
-    # comonotone atom pmf from the WSP bands (see _pdf_atoms). Mass sums to 1,
-    # which is why it usually spikes hard at the already-observed floor; its
-    # support is HARD-capped at the total population (grid stops there, and
-    # boundary reflection piles cap-adjacent mass at the cap rather than
-    # smearing it past). A historical KDE was tried on this baseline and
-    # dropped — on a linear axis it read as noise beside the ticks.
+    # Baseline curves. Historical first (grey, behind), then the forecast
+    # probabilistic curve if a pdf was passed — the email passes none.
     sigma = (x_hi - x_lo) * 0.022
     legend_rows: list[tuple[str, str]] = []
+
+    # Historical density: a grey curve over ALL past nonzero exposures at this
+    # country + threshold (hist_values, not the filtered ticks — the ticks
+    # drop storms that crowd each other, which would bias the shape). Only
+    # drawn when there are enough storms for a distribution to mean anything.
+    hvals = [float(v) for v in (hist_values or []) if v > 0]
+    if len(hvals) >= _HIST_KDE_MIN_STORMS:
+        h_sigma = (x_hi - x_lo) * 0.045
+        h_end = min(max(hvals) + 3 * h_sigma, x_hi)
+        hgrid = np.linspace(0.0, h_end, 480)
+        w = 1.0 / len(hvals)
+        hdens = _kernel_density([(v, w) for v in hvals], hgrid, h_sigma)
+        if hdens.max() > 0:
+            hdens = hdens * 0.34 / hdens.max()
+            ax.fill_between(hgrid, hdens, 0, facecolor=GREY_FILL,
+                            alpha=0.75, linewidth=0, zorder=1)
+            ax.plot(hgrid, hdens, color=GREY_EDGE, lw=1.0, alpha=0.85,
+                    zorder=1.5)
+            legend_rows.append((
+                f"past storms distribution ({len(hvals)} storms)", GREY_EDGE))
+
+    # The forecast probabilistic distribution — the smoothed comonotone atom
+    # pmf from the WSP bands (see _pdf_atoms). Mass sums to 1, which is why
+    # the density usually spikes hard at the already-observed floor; support
+    # is HARD-capped at the total population (grid stops there, and boundary
+    # reflection piles cap-adjacent mass at the cap rather than smearing it
+    # past). "exceedance" integrates the same smoothed density into a survival
+    # curve P(exposure >= x): anchored at 100% on the left, falling to zero.
     if has_pdf:
         cap = float(total_pop) if total_pop and total_pop > 0 else None
         atoms = _pdf_atoms(pdf, cap)
@@ -557,7 +594,29 @@ def _strip_chart(
             end = min(end, x_hi)
             fgrid = np.linspace(0.0, end, 480)
             fdens = _kernel_density(atoms, fgrid, sigma, upper=cap)
-            if fdens.max() > 0:
+            if pdf_style == "exceedance" and fdens.sum() > 0:
+                cdf = np.cumsum(fdens)
+                surv = 1.0 - cdf / cdf[-1]
+                ys = surv * _y_strip
+                ax.fill_between(fgrid, ys, 0, facecolor=pdf_fill_color,
+                                alpha=0.9, linewidth=0, zorder=2)
+                ax.plot(fgrid, ys, color=pdf_edge_color, lw=1.0,
+                        alpha=0.9, zorder=3)
+                # Probability rulings so the curve's vertical scale is
+                # readable: 100% at the anchor, a dotted 50% line.
+                ax.plot([x_lo, end], [_y_strip / 2] * 2, color=INK_3,
+                        lw=0.6, ls=(0, (1, 2)), alpha=0.7, zorder=2.5)
+                for frac, lab in ((1.0, "100%"), (0.5, "50%")):
+                    ax.text(x_lo + (x_hi - x_lo) * 0.002,
+                            frac * _y_strip + 0.015, lab, ha="left",
+                            va="bottom", fontsize=6.2, color=INK_3,
+                            zorder=6).set_path_effects([
+                                path_effects.withStroke(
+                                    linewidth=2.0, foreground=PANEL)])
+                legend_rows.append((
+                    "forecast chance exposure exceeds each value",
+                    pdf_edge_color))
+            elif fdens.max() > 0:
                 fdens = fdens * _y_strip / fdens.max()
                 ax.fill_between(fgrid, fdens, 0, facecolor=pdf_fill_color,
                                 alpha=0.9, linewidth=0, zorder=2)
@@ -713,6 +772,8 @@ def country_strip_chart(
     marks: list[StormMark],
     x_max: float | None = None,
     pdf: WspPdf | None = None,
+    pdf_style: str = "density",
+    hist_values: list[float] | None = None,
     total_pop: int | None = None,
 ) -> str:
     # Title omitted — surrounding HTML headings carry country / source; the
@@ -725,6 +786,8 @@ def country_strip_chart(
         pdf=pdf,
         pdf_fill_color=wind_speed_fill(wind_speed_kt),
         pdf_edge_color=wind_speed_color(wind_speed_kt),
+        pdf_style=pdf_style,
+        hist_values=hist_values,
         total_pop=total_pop,
         wind_chip_kt=wind_speed_kt,
     )

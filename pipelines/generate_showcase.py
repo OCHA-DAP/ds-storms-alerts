@@ -22,23 +22,34 @@ Run manually after layout changes:
 
 Requires DSCI_LISTMONK_* env vars for the email chrome (falls back to a plain
 wrapper if Listmonk is unreachable) and dev-DB access via ocha-stratus.
+
+DB and blob results are cached on disk in ``.showcase-cache/`` (the archived
+advisories never change; only the plots do), so re-runs after a layout change
+skip every fetch. ``--refresh`` clears the cache first; ``--no-cache``
+bypasses it entirely. Basemap tiles cache alongside via contextily.
 """
 
 from __future__ import annotations
 
+import argparse
 import html
 import logging
+import os
 import re
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
 
+import contextily as ctx
 import ocha_stratus as stratus
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipelines.run_alert import _build_subject, generate_alert_html  # noqa: E402
 from src.preview import PreviewUnavailable, render_with_template  # noqa: E402
+
+CACHE_DIR = Path(__file__).resolve().parent.parent / ".showcase-cache"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -158,11 +169,41 @@ def _plain_wrap(body: str, title: str) -> str:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--refresh", action="store_true",
+                    help="clear the data cache and refetch everything")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="bypass the data cache without touching it")
+    ap.add_argument("--only", metavar="SLUG[,SLUG]",
+                    help="regenerate only these examples (skips index.html — "
+                         "with data cached, rendering is the slow part, and "
+                         "one storm beats five while iterating on layout)")
+    args = ap.parse_args()
+
+    showcase = SHOWCASE
+    if args.only:
+        wanted = {s.strip() for s in args.only.split(",")}
+        unknown = wanted - {e["slug"] for e in SHOWCASE}
+        if unknown:
+            ap.error(f"unknown slug(s): {sorted(unknown)} "
+                     f"(valid: {[e['slug'] for e in SHOWCASE]})")
+        showcase = [e for e in SHOWCASE if e["slug"] in wanted]
+
+    if args.refresh and CACHE_DIR.exists():
+        shutil.rmtree(CACHE_DIR)
+        logger.info(f"Cleared data cache {CACHE_DIR}")
+    if args.no_cache:
+        os.environ.pop("STORMS_ALERTS_DATA_CACHE", None)
+    else:
+        os.environ.setdefault("STORMS_ALERTS_DATA_CACHE", str(CACHE_DIR))
+        ctx.set_cache_dir(str(CACHE_DIR / "tiles"))
+        logger.info(f"Data cache: {os.environ['STORMS_ALERTS_DATA_CACHE']}")
+
     DOCS_ALERTS.mkdir(parents=True, exist_ok=True)
     engine = stratus.get_engine(stage="dev")
     rows: list[dict] = []
 
-    for entry in SHOWCASE:
+    for entry in showcase:
         t = datetime.strptime(entry["issued"], "%Y-%m-%dT%H")
         logger.info(f"=== {entry['slug']} ({entry['issued']})")
 
@@ -202,6 +243,9 @@ def main() -> None:
         logger.info(f"  done: storms={names} countries={len(iso3s)}")
 
     # ---- browser page ----------------------------------------------------
+    if args.only:
+        logger.info(f"Wrote {len(rows)} example(s); index.html untouched (--only)")
+        return
     cards = "".join(
         f"""
   <div style="background:#fff;border:1px solid #e2e2e2;border-radius:8px;

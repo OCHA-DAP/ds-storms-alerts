@@ -960,19 +960,19 @@ def generate_alert_html(
                     "similar": _similar,
                 })
 
-            # Condensed email: one chart per country — the source comparison
-            # at the highest threshold with an actual source estimate. A
-            # threshold can be "active" on WSP probability alone with every
-            # source at zero, and that chart is an empty strip: for Haiti
-            # under Melissa it would show 64 kt with nothing in it instead of
-            # the 5.4M-at-34 kt story. All thresholds render in full mode.
+            # Charts render only for thresholds where at least one SOURCE
+            # (CHD deterministic+observed, GDACS, ADAM) has a nonzero
+            # estimate. WSP probability alone no longer qualifies — with the
+            # forecast curve gone from the email chart, a source-less strip is
+            # empty, and on the full page a source-less threshold was mostly
+            # noise. Condensed email: ONE chart, the highest qualifying
+            # threshold (for Haiti under Melissa that is the 5.4M-at-34 kt
+            # story, not an empty 64 kt strip); full mode: all of them.
+            _est_wsps = [w["wsp"] for w in _toc_wsps]
             if full:
-                wsps_to_render = active_wsps
+                wsps_to_render = [w for w in active_wsps if w in _est_wsps]
             else:
-                _est_wsps = [w["wsp"] for w in _toc_wsps]
-                wsps_to_render = (
-                    [max(_est_wsps)] if _est_wsps else active_wsps[:1]
-                )
+                wsps_to_render = [max(_est_wsps)] if _est_wsps else []
 
             combined_blocks: list[str] = []
             _total_pop = iso3_to_total_pop.get(iso3, 0)
@@ -1071,18 +1071,53 @@ def generate_alert_html(
                         color=wsp_color,
                     )
 
-                combined_img = country_strip_chart(
-                    iso3, wsp, combined_marks,
-                    x_max=_chart_xmax,
-                    pdf=pdf,
-                    total_pop=_chart_total_pop,
-                )
-                # No per-chart RP note: the return period lives in exactly two
-                # places — the summary table and the country heading pill.
-                _rp_html = ""
-                # No per-threshold heading: the in-chart chip names both the
-                # quantity and the threshold.
-                combined_blocks.append(f"{combined_img}{_rp_html}")
+                # The historical density uses the FULL set of past nonzero
+                # exposures, not the filtered tick marks — the tick filter
+                # drops crowded storms, which would bias the curve's shape.
+                _hist_vals = [
+                    float(v) for v in hist_df[
+                        (hist_df["iso3"] == iso3)
+                        & (hist_df["wind_speed_kt"] == wsp)
+                    ]["pop_exposed"]
+                    if v > 0
+                ]
+
+                # The email chart carries no forecast-probability curve (it
+                # confused more than it informed); the full page shows it in
+                # BOTH styles — density and exceedance — for comparison. No
+                # per-chart RP note (the RP lives in the summary table and
+                # the country heading pill) and no per-threshold heading (the
+                # in-chart chip names quantity and threshold).
+                if full and pdf is not None:
+                    _cap_style = (
+                        "font-size:0.78em;color:#7e8e8f;margin:14px 0 -6px;"
+                        "font-weight:600"
+                    )
+                    for _style, _cap in (
+                        ("density", "Probability density view"),
+                        ("exceedance", "Exceedance view &mdash; chance "
+                                       "exposure exceeds each value"),
+                    ):
+                        _img = country_strip_chart(
+                            iso3, wsp, combined_marks,
+                            x_max=_chart_xmax,
+                            pdf=pdf,
+                            pdf_style=_style,
+                            hist_values=_hist_vals,
+                            total_pop=_chart_total_pop,
+                        )
+                        combined_blocks.append(
+                            f"<p style='{_cap_style}'>{_cap}</p>{_img}"
+                        )
+                else:
+                    combined_img = country_strip_chart(
+                        iso3, wsp, combined_marks,
+                        x_max=_chart_xmax,
+                        pdf=pdf if full else None,
+                        hist_values=_hist_vals,
+                        total_pop=_chart_total_pop,
+                    )
+                    combined_blocks.append(combined_img)
 
             # The country's highest RP rides its heading as a colour pill —
             # the chart may feature a threshold whose own RP is unremarkable
@@ -1105,6 +1140,12 @@ def generate_alert_html(
                 )
             else:
                 _c_pill = ""
+            # No chart and nothing to announce -> no section. Countries with
+            # WSP probability but no source estimate otherwise leave a bare
+            # heading stacked under the map (they still shade the map and,
+            # when relevant, appear in the summary table).
+            if not combined_blocks and not notice_html:
+                continue
             country_sections.append(
                 f"<h3 style='{_H3}'>{_cname(iso3)}{_c_pill}</h3>"
                 + notice_html
@@ -1152,6 +1193,14 @@ def generate_alert_html(
 
         howto_html = ""
         if country_sections:
+            _howto_fcast = (
+                " &middot; the <b style='color:#5e6a6b'>coloured curves</b> "
+                "are the forecast probabilistic distribution of exposure "
+                "from NHC's wind-speed probabilities, shown two ways: as a "
+                "probability density, and as the chance that final exposure "
+                "exceeds each value (starting at 100% and falling to zero)"
+                if full else ""
+            )
             howto_html = (
                 "<p style='font-size:0.8em;color:#7e8e8f;line-height:1.7;"
                 "margin:18px 0 2px;padding:10px 14px;background:#fafbfb;"
@@ -1161,13 +1210,13 @@ def generate_alert_html(
                 "<b style='color:#5e6a6b'>Dots</b> are the current estimates "
                 "by source (labelled beneath the axis) &middot; "
                 "<b style='color:#5e6a6b'>vertical ticks</b> are past storms "
-                "since 2002 &middot; the <b style='color:#5e6a6b'>"
-                "coloured curve</b> is the forecast probabilistic "
-                "distribution of exposure from NHC's wind-speed "
-                "probabilities — its spike at the low end is the chance that "
-                "little or no further exposure happens &middot; a "
-                "<b style='color:#5e6a6b'>dashed line</b> marks exposure "
-                "already observed.</p>"
+                "since 2002 &middot; the <b style='color:#5e6a6b'>grey "
+                "curve</b>, where shown, is the distribution of those past "
+                "storms' exposure (drawn only when there are enough past "
+                "storms to make a distribution meaningful)"
+                + _howto_fcast +
+                " &middot; a <b style='color:#5e6a6b'>dashed line</b> marks "
+                "exposure already observed.</p>"
             )
         if storm_map_parts or country_sections:
             sections.append(

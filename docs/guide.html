@@ -243,7 +243,8 @@
   <p>
     Each affected country then gets one chart comparing the three source
     estimates — CHD, ADAM and GDACS as labelled dots on a shared scale — at
-    that country's highest active wind threshold. The full set —
+    the country's highest wind threshold where at least one source reports
+    exposure (no chart when none does). The full set —
     every threshold, plus the probabilistic wind-speed-probability map — lives
     on the online full-detail layout, shown for a set of historical storms on
     the <a href="alerts/index.html">example alerts</a> page. The charts read as
@@ -256,14 +257,20 @@
       across them.</li>
     <li><strong>Vertical ticks</strong> — historical storms since 2002, named
       vertically where space allows.</li>
+    <li><strong>Grey curve</strong> — the distribution of those past storms'
+      exposure, drawn only where enough past storms exist for a distribution
+      to be meaningful.</li>
     <li><strong>Dashed line ("observed so far")</strong> — cumulative population
       already within the wind radius based on the observed track.</li>
-    <li><strong>Coloured curve</strong> — the forecast probabilistic
-      distribution of exposure, derived from NHC's wind-speed probabilities
-      under a single-severity-draw model. Its probability mass sums to one,
-      which is why it usually spikes near zero: a country whose highest
-      wind-probability band is 10% carries roughly 90% probability of little
-      or no further exposure. Capped at the country's total population.</li>
+    <li><strong>Coloured curves (full-detail pages only)</strong> — the
+      forecast probabilistic distribution of exposure, derived from NHC's
+      wind-speed probabilities under a single-severity-draw model, shown two
+      ways: a probability density (its mass sums to one, which is why it
+      usually spikes near zero — a country whose highest wind-probability band
+      is 10% carries roughly 90% probability of little or no further
+      exposure; capped at the country's total population), and an exceedance
+      curve giving the chance that final exposure exceeds each value,
+      starting at 100% and falling to zero.</li>
     <li><strong>Return-period pill</strong> — every country heading carries
       its highest return period as a pill, colour-coded when notable
       (&gt;3-year RP), matching the summary table.</li>
