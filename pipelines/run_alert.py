@@ -781,20 +781,6 @@ def generate_alert_html(
             return "#e5bc7f"
         return "#f6e9d4"
 
-    def _rp_text(forecast_val: float, iso3: str, wsp: int) -> str:
-        rp = _rp_numeric(forecast_val, iso3, wsp)
-        if rp is None:
-            return ""
-        hist_vals = hist_df[
-            (hist_df["iso3"] == iso3) & (hist_df["wind_speed_kt"] == wsp)
-        ]["pop_exposed"].tolist()
-        exceedances = sum(1 for v in hist_vals if v >= forecast_val)
-        rp_part = "<1-year RP" if rp < 1 else f"≈{rp:.0f}-year RP"
-        return (
-            f"{rp_part} "
-            f"({exceedances} storms since 2002 had ≥ this exposure)"
-        )
-
     toc_storms: list[dict] = []
 
     _ordered_aids = sorted(
@@ -1085,38 +1071,23 @@ def generate_alert_html(
                         color=wsp_color,
                     )
 
+                # The KDE gets the FULL historical sample — the tick marks are
+                # thinned for label spacing, and a thinned sample would bias
+                # the curve.
+                _hist_vals_all = hist_df[
+                    (hist_df["iso3"] == iso3)
+                    & (hist_df["wind_speed_kt"] == wsp)
+                ]["pop_exposed"].tolist()
                 combined_img = country_strip_chart(
                     iso3, wsp, combined_marks,
                     x_max=_chart_xmax,
                     pdf=pdf,
                     total_pop=_chart_total_pop,
+                    hist_values=_hist_vals_all,
                 )
-                # RP note in the SAME pill format as the summary table —
-                # colour when notable, neutral grey otherwise — with the
-                # explanation as muted text after it. One format everywhere.
-                _rp_val = _rp_numeric(float(our_val), iso3, wsp)
+                # No per-chart RP note: the return period lives in exactly two
+                # places — the summary table and the country heading pill.
                 _rp_html = ""
-                if _rp_val is not None:
-                    _hist_vals = hist_df[
-                        (hist_df["iso3"] == iso3)
-                        & (hist_df["wind_speed_kt"] == wsp)
-                    ]["pop_exposed"].tolist()
-                    _exceed = sum(
-                        1 for v in _hist_vals if v >= float(our_val))
-                    _lbl = (
-                        "&lt;1-year" if _rp_val < 1
-                        else f"{_rp_val:.0f}-year"
-                    )
-                    _pc = _rp_color(_rp_val) or "#ebeff0"
-                    _rp_html = (
-                        f"<p style='font-size:0.8em;color:#7e8e8f;"
-                        f"margin:2px 0 16px;padding-left:2px'>"
-                        f"<span style='display:inline-block;padding:1px 9px;"
-                        f"border-radius:999px;background:{_pc};"
-                        f"color:#1f2324;font-weight:600'>{_lbl} RP</span> "
-                        f"{_exceed} storm{'' if _exceed == 1 else 's'} since "
-                        f"2002 had &ge; this exposure (CHD estimate)</p>"
-                    )
                 # No per-threshold heading: the in-chart chip names both the
                 # quantity and the threshold.
                 combined_blocks.append(f"{combined_img}{_rp_html}")
@@ -1127,9 +1098,10 @@ def generate_alert_html(
             _c_best_rp = max(
                 (w["rp"] for w in _toc_wsps if w["rp"]), default=None
             )
-            _c_pill = ""
-            _pc = _rp_color(_c_best_rp) if _c_best_rp else ""
-            if _pc:
+            if _c_best_rp is not None:
+                # Always present, so the reader learns ONE place to look for
+                # it; colour only when the value is notable.
+                _pc = _rp_color(_c_best_rp) or "#ebeff0"
                 _c_lbl = (
                     "&lt;1-year" if _c_best_rp < 1 else f"{_c_best_rp:.0f}-year"
                 )
@@ -1139,6 +1111,8 @@ def generate_alert_html(
                     f"font-size:0.72em;font-weight:600;vertical-align:2px'>"
                     f"{_c_lbl} RP</span>"
                 )
+            else:
+                _c_pill = ""
             country_sections.append(
                 f"<h3 style='{_H3}'>{_cname(iso3)}{_c_pill}</h3>"
                 + notice_html
@@ -1195,10 +1169,14 @@ def generate_alert_html(
                 "<b style='color:#5e6a6b'>Dots</b> are the current estimates "
                 "by source (labelled beneath the axis) &middot; "
                 "<b style='color:#5e6a6b'>vertical ticks</b> are past storms "
-                "since 2002 &middot; the <b style='color:#5e6a6b'>shaded "
-                "curve</b> is the spread of NHC's probabilistic (wind-speed "
-                "probability) forecast &middot; a <b style='color:#5e6a6b'>"
-                "dashed line</b> marks exposure already observed.</p>"
+                "since 2002, and the <b style='color:#5e6a6b'>grey curve</b> "
+                "their distribution &middot; the <b style='color:#5e6a6b'>"
+                "coloured curve</b> is the forecast probabilistic "
+                "distribution of exposure from NHC's wind-speed "
+                "probabilities — its spike at the low end is the chance that "
+                "little or no further exposure happens &middot; a "
+                "<b style='color:#5e6a6b'>dashed line</b> marks exposure "
+                "already observed.</p>"
             )
         if storm_map_parts or country_sections:
             sections.append(

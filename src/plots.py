@@ -129,10 +129,13 @@ class StormMark:
     bold_prefix: str = ""
 
 
-# WSP probability band widths (fraction of total probability)
-_WSP_BAND_WIDTH_FRAC = {
-    0: 0.05, 5: 0.05, 10: 0.10, 20: 0.10, 30: 0.10,
-    40: 0.10, 50: 0.10, 60: 0.10, 70: 0.10, 80: 0.10, 90: 0.10,
+# WSP band edges: the `percentage` column is the band's LOWER probability
+# edge; consecutive edges bound each band. Midpoints are the representative
+# per-band probability, matching run_alert's expected-population weighting.
+_WSP_BAND_EDGES = [0, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+_WSP_BAND_MID = {
+    lo: (lo + hi) / 200.0
+    for lo, hi in zip(_WSP_BAND_EDGES[:-1], _WSP_BAND_EDGES[1:], strict=False)
 }
 
 
@@ -156,39 +159,65 @@ def _fmt_pop(x: float, _pos: object) -> str:
     return str(int(x))
 
 
-def _pdf_polygon(pdf: WspPdf) -> tuple[list[float], list[float]]:
-    """Build (xs, ys) for a contiguous shaded WSP PDF.
+def _pdf_atoms(
+    pdf: WspPdf, total_pop: float | None
+) -> list[tuple[float, float]]:
+    """The forecast-exposure distribution as (value, probability) atoms.
 
-    Each band contributes a horizontal segment at height = band_width_frac / pop,
-    spanning width = pop. Total area ≈ 1. Bands sorted highest-probability first
-    so the dense, certain core sits on the left.
-    Returns ([], []) if there's nothing to draw.
+    Built under the comonotone ("one severity draw") model: a single
+    U ~ Uniform(0,1) decides the storm's realised severity, and a location is
+    exposed iff its WSP probability >= U. Then total exposure is discrete:
+
+    - with probability 1 - p_max nothing beyond the already-observed floor
+      happens -> an atom AT the floor (usually zero). This is the near-delta
+      the plain band layout hid: a country whose highest band is 10% has ~90%
+      of its probability mass sitting right there;
+    - the cumulative band population C_k (bands sorted by descending band
+      probability p_1 > ... > p_m, midpoint-represented) occurs with
+      probability p_k - p_{k+1}, and C_m with probability p_m.
+
+    Probabilities sum to 1 by construction. Values are clamped at the
+    country's total population; clamped atoms merge, accumulating their
+    probability at the cap.
     """
     bands = [(p, n) for p, n in pdf.bands if n > 0]
     if not bands:
-        return [], []
+        return []
+    # Sort by representative probability, descending.
+    bands.sort(key=lambda b: -_WSP_BAND_MID.get(int(b[0]), 0.0))
+    probs = [_WSP_BAND_MID.get(int(p), 0.0) for p, _ in bands]
+    atoms: dict[float, float] = {}
 
-    # Filter artifact bands: if a band has < 0.1% of the largest band's population
-    # its density (bw/pop) is ≥1000× higher, causing it to dominate the y-scale
-    # and compress the real distribution to near-zero height.
-    max_pop = max(n for _, n in bands)
-    min_pop = max(max_pop * 0.001, 50)
-    bands = [(p, n) for p, n in bands if n >= min_pop]
-    if not bands:
-        return [], []
+    def _add(x: float, w: float) -> None:
+        if w <= 0:
+            return
+        if total_pop and total_pop > 0:
+            x = min(x, float(total_pop))
+        atoms[x] = atoms.get(x, 0.0) + w
 
-    bands.sort(key=lambda b: b[0], reverse=True)
-
-    xs: list[float] = []
-    ys: list[float] = []
+    _add(pdf.x_offset, 1.0 - probs[0])
     cum = pdf.x_offset
-    for pct, pop in bands:
-        bw = _WSP_BAND_WIDTH_FRAC.get(int(pct), 0.05)
-        density = bw / pop
-        xs.extend([cum, cum + pop])
-        ys.extend([density, density])
+    for k, ((_, pop), p_k) in enumerate(zip(bands, probs, strict=True)):
         cum += pop
-    return xs, ys
+        p_next = probs[k + 1] if k + 1 < len(probs) else 0.0
+        _add(cum, p_k - p_next)
+    return sorted(atoms.items())
+
+
+def _kernel_density(
+    atoms: list[tuple[float, float]], grid, sigma: float,
+):
+    """Gaussian-kernel density of weighted atoms on `grid`, reflected at zero.
+
+    Reflection keeps the mass of an atom at (or near) zero on the physical
+    side of the axis instead of losing half of it to negative exposure — the
+    delta-at-zero stays a visible spike rather than shrinking by half.
+    """
+    dens = np.zeros_like(grid, dtype=float)
+    for x, w in atoms:
+        dens += w * np.exp(-0.5 * ((grid - x) / sigma) ** 2)
+        dens += w * np.exp(-0.5 * ((grid + x) / sigma) ** 2)
+    return dens
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +469,7 @@ def _strip_chart(
     pdf_edge_color: str = GREY_EDGE,
     total_pop: int | None = None,
     wind_chip_kt: int | None = None,
+    hist_values: list[float] | None = None,
 ) -> str:
     """Compact source-comparison chart for one country + wind threshold.
 
@@ -504,38 +534,46 @@ def _strip_chart(
     # axis line.
     below = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
 
-    # The WSP spread as a smooth low curve on the baseline (see previous
-    # revision for the full rationale): band steps are artefacts of the
-    # cumulative layout, so they are Gaussian-smoothed; support is capped at
-    # the total population, ending with a vertical edge at the cap.
-    if has_pdf:
-        xs, ys = _pdf_polygon(pdf)
-        if xs:
-            raw_end = xs[-1]
-            cap = (
-                min(raw_end, float(total_pop))
-                if total_pop and total_pop > 0 else raw_end
-            )
-            gx = np.linspace(0.0, cap, 480)
-            seg_starts = np.array(xs[0::2])
-            seg_dens = np.array(ys[0::2])
-            idx = np.searchsorted(seg_starts, gx, side="right") - 1
-            gy = np.where(
-                (idx >= 0) & (gx >= xs[0]) & (gx <= raw_end),
-                seg_dens[np.clip(idx, 0, len(seg_dens) - 1)], 0.0,
-            )
-            k = max(5, int(len(gx) * 0.03) | 1)
-            kern = np.exp(-0.5 * (np.linspace(-2.5, 2.5, k)) ** 2)
-            kern /= kern.sum()
-            gy = np.convolve(gy, kern, mode="same")
-            gy = gy ** 0.3
-            top = gy.max()
-            if top > 0:
-                gy = gy * _y_strip / top
-                ax.fill_between(gx, gy, 0, facecolor=pdf_fill_color,
-                                linewidth=0, zorder=1)
-                ax.plot(gx, gy, color=pdf_edge_color, lw=0.9, alpha=0.8,
+    # Two distributions share the baseline, each peak-normalised to the strip
+    # height and annotated in the mini-legend (top-left):
+    #
+    # - GREY: the historical distribution — a Gaussian KDE over this
+    #   country's storm exposures since 2002 (Zach's ridgeline treatment,
+    #   on a linear axis);
+    # - COLOURED: the forecast probabilistic distribution — the smoothed
+    #   comonotone atom distribution from the WSP bands (see _pdf_atoms).
+    #   Its mass sums to 1, which is why it usually spikes hard at the
+    #   already-observed floor: a country whose highest wind-probability band
+    #   is 10% carries ~90% probability of no further exposure.
+    sigma = (x_hi - x_lo) * 0.022
+    legend_rows: list[tuple[str, str]] = []
+    if hist_values:
+        hv = [float(v) for v in hist_values if v and v > 0]
+        if len(hv) >= 3:
+            hgrid = np.linspace(0.0, x_hi, 480)
+            hdens = _kernel_density([(v, 1.0 / len(hv)) for v in hv],
+                                    hgrid, sigma)
+            if hdens.max() > 0:
+                hdens = hdens * _y_strip / hdens.max()
+                ax.fill_between(hgrid, hdens, 0, facecolor=GREY_FILL,
+                                alpha=0.75, linewidth=0, zorder=1)
+                ax.plot(hgrid, hdens, color=GREY_EDGE, lw=0.9, alpha=0.85,
                         zorder=2)
+                legend_rows.append(("historical distribution", GREY_EDGE))
+    if has_pdf:
+        atoms = _pdf_atoms(pdf, float(total_pop) if total_pop else None)
+        if atoms:
+            end = min(max(x for x, _ in atoms) + 4 * sigma, x_hi)
+            fgrid = np.linspace(0.0, end, 480)
+            fdens = _kernel_density(atoms, fgrid, sigma)
+            if fdens.max() > 0:
+                fdens = fdens * _y_strip / fdens.max()
+                ax.fill_between(fgrid, fdens, 0, facecolor=pdf_fill_color,
+                                alpha=0.9, linewidth=0, zorder=2)
+                ax.plot(fgrid, fdens, color=pdf_edge_color, lw=1.0,
+                        alpha=0.9, zorder=3)
+                legend_rows.insert(0, (
+                    "forecast probabilistic distribution", pdf_edge_color))
 
     # Historical storms: a tick each, VERTICAL name labels above. Vertical
     # packs several times more names per axis-inch than horizontal, so most
@@ -622,6 +660,19 @@ def _strip_chart(
                       edgecolor=c, linewidth=0.8, alpha=0.95),
         )
 
+    # Mini-legend for the baseline curves, top-left — fixed position so every
+    # chart reads the same way. Vertical storm names stop below it.
+    for i, (lbl, c) in enumerate(legend_rows):
+        y_f = 0.965 - i * 0.115
+        # A drawn swatch, not a text glyph — U+25AC has no glyph in the
+        # fallback fonts and rendered as a hollow box.
+        ax.plot([0.004, 0.024], [y_f - 0.028, y_f - 0.028], color=c, lw=2.2,
+                transform=ax.transAxes, zorder=7, clip_on=False,
+                solid_capstyle="butt")
+        ax.text(0.032, y_f, lbl, transform=ax.transAxes, ha="left",
+                va="top", fontsize=6.8, color=INK_2, zorder=7).set_path_effects(
+            [path_effects.withStroke(linewidth=2.0, foreground=PANEL)])
+
     ax.set_yticks([])
     if title:
         ax.set_title(title, fontsize=11, fontweight="bold", loc="left",
@@ -672,6 +723,7 @@ def country_strip_chart(
     x_max: float | None = None,
     pdf: WspPdf | None = None,
     total_pop: int | None = None,
+    hist_values: list[float] | None = None,
 ) -> str:
     # Title omitted — surrounding HTML headings carry country / source; the
     # in-chart chip carries quantity + threshold.
@@ -685,6 +737,7 @@ def country_strip_chart(
         pdf_edge_color=wind_speed_color(wind_speed_kt),
         total_pop=total_pop,
         wind_chip_kt=wind_speed_kt,
+        hist_values=hist_values,
     )
 
 

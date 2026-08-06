@@ -258,14 +258,17 @@
       vertically where space allows.</li>
     <li><strong>Dashed line ("observed so far")</strong> — cumulative population
       already within the wind radius based on the observed track.</li>
-    <li><strong>Shaded curve</strong> — when present, the probabilistic WSP
-      forecast spread rather than a single deterministic value: the range of
-      outcomes the wind-speed-probability forecast considers plausible, drawn
-      smoothly in the threshold colour and capped at the country's total
-      population.</li>
-    <li><strong>Return-period pill</strong> — a country whose exposure is
-      historically rare (&gt;3-year RP) carries a colour-coded pill on its
-      heading, matching the summary table's colours.</li>
+    <li><strong>Coloured curve</strong> — the forecast probabilistic
+      distribution of exposure, derived from NHC's wind-speed probabilities
+      under a single-severity-draw model. Its probability mass sums to one,
+      which is why it usually spikes near zero: a country whose highest
+      wind-probability band is 10% carries roughly 90% probability of little
+      or no further exposure. Capped at the country's total population.</li>
+    <li><strong>Grey curve</strong> — the historical distribution: a smoothed
+      density over the same country's storm exposures since 2002.</li>
+    <li><strong>Return-period pill</strong> — every country heading carries
+      its highest return period as a pill, colour-coded when notable
+      (&gt;3-year RP), matching the summary table.</li>
   </ul>
   <div class="callout">
     <p><strong>Comparing the estimates to history.</strong> The historical ticks
