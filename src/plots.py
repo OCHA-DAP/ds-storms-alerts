@@ -21,6 +21,7 @@ import matplotlib.patches as mpatches
 import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import matplotlib.transforms as mtransforms
 from matplotlib.lines import Line2D
 
 from src.landfall import densify_track
@@ -218,7 +219,8 @@ _FIG_W_IN = 9.0
 
 
 def _label_half_widths(
-    ax, fig, labels: list[str], fontsize: float, bold: bool = False
+    ax, fig, labels: list[str], fontsize: float, bold: bool = False,
+    rotation: float = 0,
 ) -> list[float]:
     """Half the horizontal footprint of each label, in data units.
 
@@ -233,7 +235,7 @@ def _label_half_widths(
     out: list[float] = []
     for label in labels:
         probe = ax.text(
-            0, 0, label, fontsize=fontsize, ha="center",
+            0, 0, label, fontsize=fontsize, ha="center", rotation=rotation,
             fontweight="bold" if bold else "normal",
         )
         bb = probe.get_window_extent(renderer=renderer)
@@ -437,16 +439,21 @@ def _strip_chart(
     pdf_fill_color: str = GREY_FILL,
     pdf_edge_color: str = GREY_EDGE,
     total_pop: int | None = None,
+    wind_chip_kt: int | None = None,
 ) -> str:
     """Compact source-comparison chart for one country + wind threshold.
 
-    Reads bottom-up: the pale strip on the baseline is the probabilistic WSP
-    spread, the small ticks are historical storms (only the largest few get a
-    name — the rest are context, not references), and the bars are the source
-    estimates, CHD on top. A dashed line marks exposure already observed. The
-    consolidated headline number lives in the summary table, not here — it is
-    by definition the longest bar, and a second bold mark restating it was the
-    single clunkiest thing on the old chart.
+    Everything lives on ONE axis — population exposed:
+
+    - source-estimate dots sit directly on the axis line, their labels in a
+      row just below it (so they can't collide with storm names above);
+    - historical storms are ticks rising from the axis with VERTICAL name
+      labels — vertical packs several times more names into the same width;
+    - the shaded curve along the baseline is the probabilistic (WSP) forecast
+      spread, smoothed and capped at the total population;
+    - a dashed line marks exposure already observed;
+    - the chip in the top-right names the wind threshold, replacing both the
+      old x-axis label and the per-chart heading.
     """
     # Drop marks that would be outside the chart's x range — their ax.text
     # objects at large data coordinates expand bbox_inches="tight" to data
@@ -464,36 +471,28 @@ def _strip_chart(
 
     hist = [m for m in nonzero if m.short]
     _tall = [m for m in nonzero if not m.short]
-    # bold / bold_prefix marks are observed-so-far references (dashed line);
-    # the sources render as bars.
     obs = [m for m in _tall if m.bold or m.bold_prefix]
     srcs = [m for m in _tall if not (m.bold or m.bold_prefix)]
 
-    # Vertical layout, in data units, bottom-up. Height follows content so a
-    # chart with no estimates is genuinely small.
-    _y_strip = 0.20          # WSP spread curve
-    _y_rug = 0.26            # historical ticks
-    _y_rug_label = 0.33      # single row of labels for the largest few
-    _y_dot = 0.74            # source-estimate dots share one guide line
-    _y_dot_label = 0.88      # their label row
-    if srcs:
-        est_top = _y_dot_label + 0.30
-    else:
-        est_top = _y_rug_label + 0.26
-    y_top = est_top + (0.34 if obs else 0.06)
-    fig_h = max(1.15, y_top * 1.06)
+    # Vertical layout (data units above the axis). The band for vertical
+    # storm-name labels dominates; charts with no history stay shallow.
+    _y_strip = 0.18          # WSP spread curve
+    _y_rug = 0.16            # historical ticks
+    _y_rug_label = 0.22      # vertical names start here
+    y_top = 1.30 if (hist or obs) else 0.62
 
+    # Fixed physical furniture: the axes area scales with y_top, the space
+    # below the axis (dot labels, tick numbers, total-population marker) is a
+    # constant depth.
+    axes_in = y_top * 0.78
+    fig_h = axes_in + 0.66
     fig, ax = plt.subplots(figsize=(_FIG_W_IN, fig_h))
     fig.patch.set_facecolor(PANEL)
-    # The x-axis furniture needs a fixed physical depth, so the bottom margin
-    # is a fraction computed from the figure height rather than a constant.
     fig.subplots_adjust(
-        left=0.02, right=0.98, top=0.96,
-        bottom=min(0.34, max(0.16, 0.36 / fig_h)),
+        left=0.02, right=0.98,
+        top=1 - 0.06 / fig_h, bottom=0.60 / fig_h,
     )
 
-    # Fix the x range up front: label widths are measured in data units, so
-    # the scale has to be final before anything is placed.
     if x_max is not None and x_max > 0:
         x_hi = x_max * 1.12
     else:
@@ -501,17 +500,14 @@ def _strip_chart(
     x_lo = 0.0
     ax.set_xlim(x_lo, x_hi)
     ax.set_ylim(0, y_top)
+    # x in data coordinates, y in axes fraction — for everything below the
+    # axis line.
+    below = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
 
-    # The WSP spread as a smooth low curve on the baseline. The band data is a
-    # step function (population per probability band, laid out cumulatively);
-    # the steps are display artefacts of that layout, not features of the
-    # forecast, so the sampled steps are Gaussian-smoothed into one curve.
-    # Support is CAPPED at the total population: the cumulative band layout
-    # can sum past it, but exposure beyond everyone is not a real outcome, so
-    # the curve is truncated at the cap and ends with a vertical edge there.
-    # Heights use a compressive ^0.3 so the long flat tail stays visible
-    # alongside the high-density spike; the shape conveys "where the WSP mass
-    # lives", one flat colour, nothing more.
+    # The WSP spread as a smooth low curve on the baseline (see previous
+    # revision for the full rationale): band steps are artefacts of the
+    # cumulative layout, so they are Gaussian-smoothed; support is capped at
+    # the total population, ending with a vertical edge at the cap.
     if has_pdf:
         xs, ys = _pdf_polygon(pdf)
         if xs:
@@ -521,7 +517,6 @@ def _strip_chart(
                 if total_pop and total_pop > 0 else raw_end
             )
             gx = np.linspace(0.0, cap, 480)
-            # Piecewise density lookup over the band segments.
             seg_starts = np.array(xs[0::2])
             seg_dens = np.array(ys[0::2])
             idx = np.searchsorted(seg_starts, gx, side="right") - 1
@@ -542,27 +537,37 @@ def _strip_chart(
                 ax.plot(gx, gy, color=pdf_edge_color, lw=0.9, alpha=0.8,
                         zorder=2)
 
-    # Historical rug: every storm is a tick, only the largest few get names —
-    # the summary table already lists each country's most similar storms.
+    # Historical storms: a tick each, VERTICAL name labels above. Vertical
+    # packs several times more names per axis-inch than horizontal, so most
+    # storms get named; genuinely unresolvable crowding drops the smallest.
     if hist:
-        by_size = sorted(hist, key=lambda m: -float(m.value))
-        labeled, unlabeled = by_size[:3], by_size[3:]
-        for m in unlabeled:
-            ax.plot([m.value, m.value], [0, _y_rug], color=INK_3, lw=0.8,
-                    alpha=0.65, zorder=3, solid_capstyle="butt")
-        _draw_tier(
-            ax, fig, labeled, x_lo, x_hi,
-            tick_top=_y_rug, label_y=_y_rug_label,
-            fontsize=_HIST_FONTSIZE, linewidth=0.9, color=INK_3,
-            text_color=INK_3, halo=True, droppable=True,
+        ordered = sorted(hist, key=lambda m: -float(m.value))
+        labels = [m.label.replace("\n", " ") for m in ordered]
+        half = _label_half_widths(
+            ax, fig, labels, _HIST_FONTSIZE, rotation=90)
+        pad = half[0] * 0.9 if half else 0.0
+        placed, keep = _place_labels(
+            [(float(m.value), h) for m, h in zip(ordered, half, strict=True)],
+            x_lo, x_hi, pad, droppable=True,
         )
+        for m, lb, px, kp in zip(ordered, labels, placed, keep, strict=True):
+            x_v = float(m.value)
+            ax.plot([x_v, x_v], [0, _y_rug], color=INK_3, lw=0.9,
+                    alpha=0.75, zorder=3, solid_capstyle="butt")
+            if not kp:
+                continue
+            if abs(px - x_v) > (x_hi - x_lo) * 0.004:
+                _leader(ax, px, _y_rug_label - 0.015, x_v, _y_rug + 0.015,
+                        INK_3)
+            txt = ax.text(px, _y_rug_label, lb, rotation=90,
+                          rotation_mode="anchor", ha="left", va="center",
+                          fontsize=_HIST_FONTSIZE, color=INK_3, zorder=5)
+            txt.set_path_effects([
+                path_effects.withStroke(linewidth=2.0, foreground=PANEL)
+            ])
 
-    # Source estimates as dots on one shared guide line (a dot-strip plot):
-    # position carries the comparison, the label row above carries identity
-    # and value. Bars were tried and rejected — three near-full-width bars
-    # dominated the chart's ink for what is a three-number comparison.
+    # Source estimates: dots ON the axis line, labels in a row just below it.
     if srcs:
-        ax.plot([x_lo, x_hi], [_y_dot, _y_dot], color=LINE, lw=0.8, zorder=3)
         labels = [
             f"{m.label}  {_fmt_pop(float(m.value), None)}" for m in srcs
         ]
@@ -574,48 +579,64 @@ def _strip_chart(
         )
         for m, lbl, px in zip(srcs, labels, placed, strict=True):
             x_v = float(m.value)
-            ax.plot([x_v], [_y_dot], marker="o", ms=8.5, mfc=m.color,
-                    mec=PANEL, mew=1.2, zorder=5, clip_on=False)
+            ax.plot([x_v], [0], marker="o", ms=8.5, mfc=m.color,
+                    mec=PANEL, mew=1.2, zorder=6, clip_on=False)
             if abs(px - x_v) > (x_hi - x_lo) * 0.004:
-                _leader(ax, px, _y_dot_label - 0.03, x_v, _y_dot + 0.05,
-                        m.color)
-            txt = ax.text(px, _y_dot_label, lbl, ha="center", va="bottom",
-                          fontsize=_SRC_FONTSIZE, color=INK_2, zorder=6)
+                ax.annotate(
+                    "", xy=(x_v, -0.02), xycoords=below,
+                    xytext=(px, -0.12), textcoords=below,
+                    arrowprops=dict(arrowstyle="-", color=m.color, lw=0.6,
+                                    alpha=0.55, shrinkA=2, shrinkB=3),
+                    annotation_clip=False,
+                )
+            txt = ax.text(px, -0.14, lbl, transform=below, ha="center",
+                          va="top", fontsize=_SRC_FONTSIZE, color=INK_2,
+                          zorder=6, clip_on=False)
             txt.set_path_effects([
                 path_effects.withStroke(linewidth=2.2, foreground=PANEL)
             ])
 
-    # Observed-so-far reference: a dashed line, labelled once above.
+    # Observed-so-far reference: a dashed line, labelled at its top.
     for m in obs:
         x_v = float(m.value)
-        ax.plot([x_v, x_v], [0, est_top + 0.04], color=INK, lw=1.1,
+        ax.plot([x_v, x_v], [0, y_top * 0.86], color=INK, lw=1.1,
                 ls=(0, (3, 2)), alpha=0.8, zorder=5, solid_capstyle="butt")
         _hw = _label_half_widths(ax, fig, [m.label], 6.8)[0]
         x_t = min(max(x_v, x_lo + _hw), x_hi - _hw)
-        t_obs = ax.text(x_t, est_top + 0.08, m.label, ha="center",
+        t_obs = ax.text(x_t, y_top * 0.88, m.label, ha="center",
                         va="bottom", fontsize=6.8, color=INK_2, zorder=6)
         t_obs.set_path_effects([
             path_effects.withStroke(linewidth=2.0, foreground=PANEL)
         ])
 
+    # Wind-threshold chip, top-right: names both the quantity and the
+    # threshold, replacing the x-axis label and the per-chart heading.
+    if wind_chip_kt is not None:
+        c = _NHC_WIND_COLOR.get(int(wind_chip_kt), INK_2)
+        fill = _WIND_RAMP.get(int(wind_chip_kt), (GREY_FILL, INK_2))[0]
+        ax.text(
+            0.998, 0.97, f"Population exposed to ≥{int(wind_chip_kt)} kt winds",
+            transform=ax.transAxes, ha="right", va="top",
+            fontsize=8, color=c, fontweight="bold", zorder=7,
+            bbox=dict(boxstyle="round,pad=0.4", facecolor=fill,
+                      edgecolor=c, linewidth=0.8, alpha=0.95),
+        )
+
     ax.set_yticks([])
     if title:
         ax.set_title(title, fontsize=11, fontweight="bold", loc="left",
                      color=INK)
-
-    ax.set_xlabel(x_label, fontsize=8, color=INK_3, labelpad=2)
+    ax.set_xlabel("")
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(_fmt_pop))
+    # Big pad drops the numeric labels below the source-label row.
     ax.tick_params(axis="x", which="both", length=3, color=LINE,
-                   labelsize=7.5, labelcolor=INK_3)
+                   labelsize=7.5, labelcolor=INK_3, pad=22)
     for side in ("top", "right", "left"):
         ax.spines[side].set_visible(False)
     ax.spines["bottom"].set_color(LINE)
 
     if total_pop is not None and total_pop > 0:
         xfrac = (total_pop - x_lo) / (x_hi - x_lo)
-        # Suppress it when it lands on a bar end: the "(100%)" in the summary
-        # table already says the whole country is exposed, and the two labels
-        # collide.
         _crowded = any(
             abs(float(m.value) - total_pop) < (x_hi - x_lo) * 0.03
             for m in srcs
@@ -624,7 +645,7 @@ def _strip_chart(
             ax.annotate(
                 "total population",
                 xy=(xfrac, 0.0), xycoords="axes fraction",
-                xytext=(xfrac, -0.30 / fig_h), textcoords="axes fraction",
+                xytext=(xfrac, -0.52 / axes_in), textcoords="axes fraction",
                 ha="center", va="top", fontsize=6.6, color=INK_3,
                 arrowprops=dict(arrowstyle="-", color=INK_3, lw=1.1,
                                 shrinkA=0, shrinkB=0),
@@ -652,16 +673,18 @@ def country_strip_chart(
     pdf: WspPdf | None = None,
     total_pop: int | None = None,
 ) -> str:
-    # Title omitted — surrounding HTML headings carry country / source.
+    # Title omitted — surrounding HTML headings carry country / source; the
+    # in-chart chip carries quantity + threshold.
     return _strip_chart(
         title="",
-        x_label=f"Population exposed ({wind_speed_kt} kt wind)",
+        x_label="",
         marks=marks,
         x_max=x_max,
         pdf=pdf,
         pdf_fill_color=wind_speed_fill(wind_speed_kt),
         pdf_edge_color=wind_speed_color(wind_speed_kt),
         total_pop=total_pop,
+        wind_chip_kt=wind_speed_kt,
     )
 
 

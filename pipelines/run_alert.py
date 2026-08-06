@@ -1091,35 +1091,35 @@ def generate_alert_html(
                     pdf=pdf,
                     total_pop=_chart_total_pop,
                 )
-                _rp = _rp_text(float(our_val), iso3, wsp)
+                # RP note in the SAME pill format as the summary table —
+                # colour when notable, neutral grey otherwise — with the
+                # explanation as muted text after it. One format everywhere.
                 _rp_val = _rp_numeric(float(our_val), iso3, wsp)
-                _pill_color = _rp_color(_rp_val) if _rp_val else ""
-                if _rp and _pill_color:
-                    # High return period = the operationally unusual case;
-                    # give it the same colour pill as the summary table so it
-                    # pops instead of hiding in grey smallprint.
-                    _lbl, _, _rest = _rp.partition(" RP ")
+                _rp_html = ""
+                if _rp_val is not None:
+                    _hist_vals = hist_df[
+                        (hist_df["iso3"] == iso3)
+                        & (hist_df["wind_speed_kt"] == wsp)
+                    ]["pop_exposed"].tolist()
+                    _exceed = sum(
+                        1 for v in _hist_vals if v >= float(our_val))
+                    _lbl = (
+                        "&lt;1-year" if _rp_val < 1
+                        else f"{_rp_val:.0f}-year"
+                    )
+                    _pc = _rp_color(_rp_val) or "#ebeff0"
                     _rp_html = (
                         f"<p style='font-size:0.8em;color:#7e8e8f;"
-                        f"margin:0 0 14px;padding-left:2px'>"
+                        f"margin:2px 0 16px;padding-left:2px'>"
                         f"<span style='display:inline-block;padding:1px 9px;"
-                        f"border-radius:999px;background:{_pill_color};"
+                        f"border-radius:999px;background:{_pc};"
                         f"color:#1f2324;font-weight:600'>{_lbl} RP</span> "
-                        f"{_rest}</p>"
+                        f"{_exceed} storm{'' if _exceed == 1 else 's'} since "
+                        f"2002 had &ge; this exposure (CHD estimate)</p>"
                     )
-                elif _rp:
-                    _rp_html = (
-                        f"<p style='font-size:0.8em;color:#7e8e8f;"
-                        f"margin:0 0 14px;padding-left:2px'>{_rp}</p>"
-                    )
-                else:
-                    _rp_html = ""
-                # In the email the chart's own x-label already names the one
-                # threshold shown; a bare "64 kt" heading would just repeat it.
-                _wsp_heading = f"<h5 style='{_H5}'>{wsp} kt</h5>" if full else ""
-                combined_blocks.append(
-                    f"{_wsp_heading}{combined_img}{_rp_html}"
-                )
+                # No per-threshold heading: the in-chart chip names both the
+                # quantity and the threshold.
+                combined_blocks.append(f"{combined_img}{_rp_html}")
 
             # The country's highest RP rides its heading as a colour pill —
             # the chart may feature a threshold whose own RP is unremarkable
@@ -1184,11 +1184,28 @@ def generate_alert_html(
             if exp_m:
                 storm_map_parts.append(exp_m)
 
+        howto_html = ""
+        if country_sections:
+            howto_html = (
+                "<p style='font-size:0.8em;color:#7e8e8f;line-height:1.7;"
+                "margin:18px 0 2px;padding:10px 14px;background:#fafbfb;"
+                "border:1px solid #ebeff0;border-radius:6px'>"
+                "<b style='color:#5e6a6b'>Reading the charts below:</b> "
+                "everything sits on one axis, population exposed. "
+                "<b style='color:#5e6a6b'>Dots</b> are the current estimates "
+                "by source (labelled beneath the axis) &middot; "
+                "<b style='color:#5e6a6b'>vertical ticks</b> are past storms "
+                "since 2002 &middot; the <b style='color:#5e6a6b'>shaded "
+                "curve</b> is the spread of NHC's probabilistic (wind-speed "
+                "probability) forecast &middot; a <b style='color:#5e6a6b'>"
+                "dashed line</b> marks exposure already observed.</p>"
+            )
         if storm_map_parts or country_sections:
             sections.append(
                 f"<h2 id='storm-{aid}' style='{_H2}'>{storm_h2_label}</h2>"
                 + landfall_html
                 + "".join(storm_map_parts)
+                + howto_html
                 + "".join(country_sections)
             )
 
