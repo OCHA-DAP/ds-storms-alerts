@@ -8,6 +8,7 @@ import re
 import sys
 import tempfile
 import webbrowser
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -636,15 +637,22 @@ def generate_alert_html(
     ) -> list[StormMark]:
         """Keep the highest-value historical storms; drop ones too close to a
         bigger neighbour or to a current/forecast mark, and drop storms below
-        a minimum absolute value (relative to x_max)."""
+        a minimum absolute value (relative to x_max). Bold marks (the "most
+        similar storms" the summary table names) are exempt from every drop —
+        they are processed first so crowding resolves in their favour."""
         if not hist_marks or x_max <= 0:
             return hist_marks
-        sorted_marks = sorted(hist_marks, key=lambda m: m.value, reverse=True)
+        sorted_marks = sorted(
+            hist_marks, key=lambda m: (not m.bold, -m.value)
+        )
         min_gap = x_max * 0.025
         min_value = x_max * 0.005
         blocked = list(current_values or [])
         kept: list[StormMark] = []
         for m in sorted_marks:
+            if m.bold:
+                kept.append(m)
+                continue
             if m.value < min_value:
                 continue
             if any(abs(m.value - v) < min_gap for v in blocked):
@@ -926,6 +934,8 @@ def generate_alert_html(
                         "rp": _rp_numeric(float(_our), iso3, _tw),
                         "pct": _tot / _tp * 100 if _tp > 0 else None,
                     })
+            _similar: list[str] = []
+            _similar_vals: dict[str, dict[int, int]] = {}
             if _toc_wsps:
                 # Find most similar historical storms by relative-difference score
                 # across all three wind speeds (lower score = more similar).
@@ -952,6 +962,15 @@ def generate_alert_html(
                     _sim_scores.append((_score, _storm_label(_hd["name"], _hd["season"])))
                 _sim_scores.sort()
                 _similar = [_lbl for _, _lbl in _sim_scores[:3]]
+                # Their per-threshold exposures, so the charts can bold them
+                # and stretch the axis to keep them in frame.
+                _similar_vals = {
+                    _storm_label(_hd["name"], _hd["season"]): {
+                        _ws: _hd[_ws] for _ws in (34, 50, 64)
+                    }
+                    for _hd in _hist_storms_by_id.values()
+                    if _storm_label(_hd["name"], _hd["season"]) in _similar
+                }
 
                 toc_countries.append({
                     "name": _cname(iso3),
@@ -962,17 +981,12 @@ def generate_alert_html(
 
             # Charts render only for thresholds where at least one SOURCE
             # (CHD deterministic+observed, GDACS, ADAM) has a nonzero
-            # estimate. WSP probability alone no longer qualifies — with the
-            # forecast curve gone from the email chart, a source-less strip is
-            # empty, and on the full page a source-less threshold was mostly
-            # noise. Condensed email: ONE chart, the highest qualifying
-            # threshold (for Haiti under Melissa that is the 5.4M-at-34 kt
-            # story, not an empty 64 kt strip); full mode: all of them.
+            # estimate — in BOTH layouts. WSP probability alone no longer
+            # qualifies: with the forecast curve gone from the email chart, a
+            # source-less strip is empty, and on the full page a source-less
+            # threshold was mostly noise.
             _est_wsps = [w["wsp"] for w in _toc_wsps]
-            if full:
-                wsps_to_render = [w for w in active_wsps if w in _est_wsps]
-            else:
-                wsps_to_render = [max(_est_wsps)] if _est_wsps else []
+            wsps_to_render = [w for w in active_wsps if w in _est_wsps]
 
             combined_blocks: list[str] = []
             _total_pop = iso3_to_total_pop.get(iso3, 0)
@@ -1025,14 +1039,25 @@ def generate_alert_html(
                 )
                 _cap = min(_total_pop, 2 * _base) if _total_pop > 0 else 2 * _base
                 _max_active = max(active_sources.values()) if active_sources else 0
-                _chart_xmax = max(_cap, _max_active)
+                # Stretch to keep the "most similar storms" in frame — they
+                # are the comparators the table names, so falling off the
+                # right edge defeats their purpose. Similarity scoring keeps
+                # their values near the current ones, so the stretch is small.
+                _max_similar = max(
+                    (v.get(wsp, 0) for v in _similar_vals.values()), default=0
+                )
+                _chart_xmax = max(_cap, _max_active, _max_similar)
                 # show "total pop." tick only when total_pop is visible on this chart
                 _chart_total_pop = (
                     _total_pop if (_total_pop > 0 and _total_pop <= _chart_xmax) else None
                 )
 
+                _raw_hist_marks = [
+                    replace(m, bold=True) if m.label in _similar else m
+                    for m in _marks(hist_df, iso3, wsp, _HIST_COLOR, short=True)
+                ]
                 hist_marks = _filter_historical(
-                    _marks(hist_df, iso3, wsp, _HIST_COLOR, short=True),
+                    _raw_hist_marks,
                     _chart_xmax,
                     current_values=list(active_sources.values()),
                 )
@@ -1090,7 +1115,7 @@ def generate_alert_html(
                 # in-chart chip names quantity and threshold).
                 if full and pdf is not None:
                     _cap_style = (
-                        "font-size:0.78em;color:#7e8e8f;margin:14px 0 -6px;"
+                        "font-size:0.78em;color:#7e8e8f;margin:14px 0 2px;"
                         "font-weight:600"
                     )
                     for _style, _cap in (
@@ -1210,10 +1235,11 @@ def generate_alert_html(
                 "<b style='color:#5e6a6b'>Dots</b> are the current estimates "
                 "by source (labelled beneath the axis) &middot; "
                 "<b style='color:#5e6a6b'>vertical ticks</b> are past storms "
-                "since 2002 &middot; the <b style='color:#5e6a6b'>grey "
-                "curve</b>, where shown, is the distribution of those past "
-                "storms' exposure (drawn only when there are enough past "
-                "storms to make a distribution meaningful)"
+                "since 2002, the most similar ones in bold &middot; the "
+                "<b style='color:#5e6a6b'>shaded curve</b>, where shown, is "
+                "the distribution of those past storms' exposure (drawn only "
+                "when there are enough past storms to make a distribution "
+                "meaningful)"
                 + _howto_fcast +
                 " &middot; a <b style='color:#5e6a6b'>dashed line</b> marks "
                 "exposure already observed.</p>"

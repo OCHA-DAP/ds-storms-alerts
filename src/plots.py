@@ -254,7 +254,7 @@ _FIG_W_IN = 9.0
 
 def _label_half_widths(
     ax, fig, labels: list[str], fontsize: float, bold: bool = False,
-    rotation: float = 0,
+    rotation: float = 0, bold_flags: list[bool] | None = None,
 ) -> list[float]:
     """Half the horizontal footprint of each label, in data units.
 
@@ -267,10 +267,11 @@ def _label_half_widths(
     renderer = fig.canvas.get_renderer()
     inv = ax.transData.inverted()
     out: list[float] = []
-    for label in labels:
+    for i, label in enumerate(labels):
+        b = bold_flags[i] if bold_flags is not None else bold
         probe = ax.text(
             0, 0, label, fontsize=fontsize, ha="center", rotation=rotation,
-            fontweight="bold" if bold else "normal",
+            fontweight="bold" if b else "normal",
         )
         bb = probe.get_window_extent(renderer=renderer)
         probe.remove()
@@ -282,7 +283,7 @@ def _label_half_widths(
 
 def _place_labels(
     items: list[tuple[float, float]], x_lo: float, x_hi: float, pad: float,
-    droppable: bool = False,
+    droppable: bool = False, protected: list[bool] | None = None,
 ) -> tuple[list[float], list[bool]]:
     """Spread labels so they stop overlapping, keeping the group centred.
 
@@ -300,12 +301,16 @@ def _place_labels(
     `droppable` allows the last resort — when a row genuinely has more label
     than axis, the lower-valued labels are marked `keep=False`. Their ticks
     still draw; only the text is withheld, so the distribution stays honest and
-    nothing overprints.
+    nothing overprints. `protected` (aligned with `items`) exempts a label
+    from that drop — used for the "most similar storms", which must always be
+    named; a clash between two protected labels is left overprinting rather
+    than silently unnaming one.
     """
     if not items:
         return [], []
     order = sorted(range(len(items)), key=lambda i: items[i][0])
     hw = [items[i][1] for i in order]
+    prot = [bool(protected[i]) if protected else False for i in order]
     keep = [True] * len(order)
     margin = pad * 0.4
 
@@ -343,18 +348,25 @@ def _place_labels(
     if droppable:
         # Whatever the settle could not resolve is a genuine overflow. Drop the
         # smallest-valued offender and retry; bigger storms are the ones a
-        # reader is comparing against.
+        # reader is comparing against. Protected labels never drop — if both
+        # sides of a clash are protected, move on to the next clash.
         while len(live) > 1:
-            clash = next(
-                (k for k in range(len(pos) - 1)
-                 if pos[k + 1] - pos[k] < hw[live[k]] + hw[live[k + 1]] + pad * 0.5),
-                None,
-            )
-            if clash is None:
+            dropped = False
+            for k in range(len(pos) - 1):
+                if pos[k + 1] - pos[k] >= hw[live[k]] + hw[live[k + 1]] + pad * 0.5:
+                    continue
+                victim = next(
+                    (j for j in (k, k + 1) if not prot[live[j]]), None
+                )
+                if victim is None:
+                    continue
+                keep[live[victim]] = False
+                live.pop(victim)
+                pos = _settle(live)
+                dropped = True
                 break
-            keep[live[clash]] = False
-            live.pop(clash)
-            pos = _settle(live)
+            if not dropped:
+                break
 
     out = [0.0] * len(items)
     out_keep = [False] * len(items)
@@ -480,6 +492,8 @@ def _strip_chart(
     pdf_edge_color: str = GREY_EDGE,
     pdf_style: str = "density",
     hist_values: list[float] | None = None,
+    hist_fill_color: str = GREY_FILL,
+    hist_edge_color: str = GREY_EDGE,
     total_pop: int | None = None,
     wind_chip_kt: int | None = None,
 ) -> str:
@@ -555,27 +569,38 @@ def _strip_chart(
     # Baseline curves. Historical first (grey, behind), then the forecast
     # probabilistic curve if a pdf was passed — the email passes none.
     sigma = (x_hi - x_lo) * 0.022
-    legend_rows: list[tuple[str, str]] = []
+    legend_rows: list[tuple[str, str, float]] = []  # (label, colour, alpha)
 
-    # Historical density: a grey curve over ALL past nonzero exposures at this
+    # Historical density: a curve over ALL past nonzero exposures at this
     # country + threshold (hist_values, not the filtered ticks — the ticks
     # drop storms that crowd each other, which would bias the shape). Only
     # drawn when there are enough storms for a distribution to mean anything.
+    # Same total-population cap as the forecast curve: past exposure can't
+    # exceed the country, so mass near the cap reflects back rather than
+    # smearing past it. Tinted to the wind threshold, but paler than the
+    # forecast curve so the two stay tellable-apart on the full page.
     hvals = [float(v) for v in (hist_values or []) if v > 0]
     if len(hvals) >= _HIST_KDE_MIN_STORMS:
+        h_cap = float(total_pop) if total_pop and total_pop > 0 else None
         h_sigma = (x_hi - x_lo) * 0.045
         h_end = min(max(hvals) + 3 * h_sigma, x_hi)
+        if h_cap is not None:
+            h_end = min(h_end, h_cap)
         hgrid = np.linspace(0.0, h_end, 480)
         w = 1.0 / len(hvals)
-        hdens = _kernel_density([(v, w) for v in hvals], hgrid, h_sigma)
+        hdens = _kernel_density(
+            [(min(v, h_cap) if h_cap is not None else v, w) for v in hvals],
+            hgrid, h_sigma, upper=h_cap,
+        )
         if hdens.max() > 0:
             hdens = hdens * 0.34 / hdens.max()
-            ax.fill_between(hgrid, hdens, 0, facecolor=GREY_FILL,
-                            alpha=0.75, linewidth=0, zorder=1)
-            ax.plot(hgrid, hdens, color=GREY_EDGE, lw=1.0, alpha=0.85,
+            ax.fill_between(hgrid, hdens, 0, facecolor=hist_fill_color,
+                            alpha=0.5, linewidth=0, zorder=1)
+            ax.plot(hgrid, hdens, color=hist_edge_color, lw=0.9, alpha=0.6,
                     zorder=1.5)
             legend_rows.append((
-                f"past storms distribution ({len(hvals)} storms)", GREY_EDGE))
+                f"past storms distribution ({len(hvals)} storms)",
+                hist_edge_color, 0.55))
 
     # The forecast probabilistic distribution — the smoothed comonotone atom
     # pmf from the WSP bands (see _pdf_atoms). Mass sums to 1, which is why
@@ -615,7 +640,7 @@ def _strip_chart(
                                     linewidth=2.0, foreground=PANEL)])
                 legend_rows.append((
                     "forecast chance exposure exceeds each value",
-                    pdf_edge_color))
+                    pdf_edge_color, 1.0))
             elif fdens.max() > 0:
                 fdens = fdens * _y_strip / fdens.max()
                 ax.fill_between(fgrid, fdens, 0, facecolor=pdf_fill_color,
@@ -623,25 +648,30 @@ def _strip_chart(
                 ax.plot(fgrid, fdens, color=pdf_edge_color, lw=1.0,
                         alpha=0.9, zorder=3)
                 legend_rows.append((
-                    "forecast probabilistic distribution", pdf_edge_color))
+                    "forecast probabilistic distribution", pdf_edge_color,
+                    1.0))
 
     # Historical storms: a tick each, VERTICAL name labels above. Vertical
     # packs several times more names per axis-inch than horizontal, so most
-    # storms get named; genuinely unresolvable crowding drops the smallest.
+    # storms get named; genuinely unresolvable crowding drops the smallest —
+    # except the "most similar storms" (marked bold upstream), which are the
+    # comparators the table points the reader at: always named, in bold.
     if hist:
         ordered = sorted(hist, key=lambda m: -float(m.value))
         labels = [m.label.replace("\n", " ") for m in ordered]
+        bolds = [m.bold for m in ordered]
         half = _label_half_widths(
-            ax, fig, labels, _HIST_FONTSIZE, rotation=90)
+            ax, fig, labels, _HIST_FONTSIZE, rotation=90, bold_flags=bolds)
         pad = half[0] * 0.9 if half else 0.0
         placed, keep = _place_labels(
             [(float(m.value), h) for m, h in zip(ordered, half, strict=True)],
-            x_lo, x_hi, pad, droppable=True,
+            x_lo, x_hi, pad, droppable=True, protected=bolds,
         )
         for m, lb, px, kp in zip(ordered, labels, placed, keep, strict=True):
             x_v = float(m.value)
-            ax.plot([x_v, x_v], [0, _y_rug], color=INK_3, lw=0.9,
-                    alpha=0.75, zorder=3, solid_capstyle="butt")
+            ax.plot([x_v, x_v], [0, _y_rug], color=INK_3,
+                    lw=1.3 if m.bold else 0.9, alpha=0.85 if m.bold else 0.75,
+                    zorder=3, solid_capstyle="butt")
             if not kp:
                 continue
             if abs(px - x_v) > (x_hi - x_lo) * 0.004:
@@ -649,7 +679,10 @@ def _strip_chart(
                         INK_3)
             txt = ax.text(px, _y_rug_label, lb, rotation=90,
                           rotation_mode="anchor", ha="left", va="center",
-                          fontsize=_HIST_FONTSIZE, color=INK_3, zorder=5)
+                          fontsize=_HIST_FONTSIZE,
+                          color=INK_2 if m.bold else INK_3,
+                          fontweight="bold" if m.bold else "normal",
+                          zorder=5)
             txt.set_path_effects([
                 path_effects.withStroke(linewidth=2.0, foreground=PANEL)
             ])
@@ -697,27 +730,25 @@ def _strip_chart(
             path_effects.withStroke(linewidth=2.0, foreground=PANEL)
         ])
 
-    # Wind-threshold chip, top-right: names both the quantity and the
-    # threshold, replacing the x-axis label and the per-chart heading.
+    # Wind-threshold marker, top-right: plain bold text in the threshold
+    # colour (the pill box was visual noise), replacing the x-axis label and
+    # the per-chart heading.
     if wind_chip_kt is not None:
         c = _NHC_WIND_COLOR.get(int(wind_chip_kt), INK_2)
-        fill = _WIND_RAMP.get(int(wind_chip_kt), (GREY_FILL, INK_2))[0]
         ax.text(
-            0.998, 0.97, f"≥{int(wind_chip_kt)} kt",
+            0.998, 0.97, f"{int(wind_chip_kt)} kt",
             transform=ax.transAxes, ha="right", va="top",
-            fontsize=8.5, color=c, fontweight="bold", zorder=7,
-            bbox=dict(boxstyle="round,pad=0.35", facecolor=fill,
-                      edgecolor=c, linewidth=0.8, alpha=0.95),
+            fontsize=10, color=c, fontweight="bold", zorder=7,
         )
 
     # Mini-legend for the baseline curves, top-left — fixed position so every
     # chart reads the same way. Vertical storm names stop below it.
-    for i, (lbl, c) in enumerate(legend_rows):
+    for i, (lbl, c, a) in enumerate(legend_rows):
         y_f = 0.965 - i * 0.115
         # A drawn swatch, not a text glyph — U+25AC has no glyph in the
         # fallback fonts and rendered as a hollow box.
         ax.plot([0.004, 0.024], [y_f - 0.028, y_f - 0.028], color=c, lw=2.2,
-                transform=ax.transAxes, zorder=7, clip_on=False,
+                alpha=a, transform=ax.transAxes, zorder=7, clip_on=False,
                 solid_capstyle="butt")
         ax.text(0.032, y_f, lbl, transform=ax.transAxes, ha="left",
                 va="top", fontsize=6.8, color=INK_2, zorder=7).set_path_effects(
@@ -788,6 +819,8 @@ def country_strip_chart(
         pdf_edge_color=wind_speed_color(wind_speed_kt),
         pdf_style=pdf_style,
         hist_values=hist_values,
+        hist_fill_color=wind_speed_fill(wind_speed_kt),
+        hist_edge_color=wind_speed_color(wind_speed_kt),
         total_pop=total_pop,
         wind_chip_kt=wind_speed_kt,
     )
