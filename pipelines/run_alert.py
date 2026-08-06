@@ -1359,17 +1359,29 @@ def generate_alert_html(
             "style='color:#1862d8'>the methodology</a> are online."
         )
     )
-    intro_html = (
-        f"<p style='{_p}'>Dear colleagues,</p>"
-        f"<p style='{_p}'>NHC has issued their cyclone forecasts for "
-        f"{_format_issued_et(issued_time_dt)} (NY time). "
-        f"There {'is' if _n == 1 else 'are'} {_n} active "
-        f"storm{'' if _n == 1 else 's'}: <b>{', '.join(storm_names)}</b>.</p>"
-        f"<p style='{_p}'>This email consolidates exposure estimates from "
-        f"{_oxford(_present)}.{_missing_sentence}{_detail_sentence}</p>"
-        f"<p style='{_p};margin-bottom:22px'>"
-        f"Best regards,<br>OCHA Centre for Humanitarian Data</p>"
-    )
+    if full:
+        # The online full-detail page is a reference document, not
+        # correspondence — no salutation, just the advisory context.
+        intro_html = (
+            f"<p style='{_p}'>NHC cyclone forecasts issued "
+            f"{_format_issued_et(issued_time_dt)} (NY time) &middot; "
+            f"{_n} active storm{'' if _n == 1 else 's'}: "
+            f"<b>{', '.join(storm_names)}</b>. "
+            f"Consolidates exposure estimates from "
+            f"{_oxford(_present)}.{_missing_sentence}</p>"
+        )
+    else:
+        intro_html = (
+            f"<p style='{_p}'>Dear colleagues,</p>"
+            f"<p style='{_p}'>NHC has issued their cyclone forecasts for "
+            f"{_format_issued_et(issued_time_dt)} (NY time). "
+            f"There {'is' if _n == 1 else 'are'} {_n} active "
+            f"storm{'' if _n == 1 else 's'}: <b>{', '.join(storm_names)}</b>.</p>"
+            f"<p style='{_p}'>This email consolidates exposure estimates from "
+            f"{_oxford(_present)}.{_missing_sentence}{_detail_sentence}</p>"
+            f"<p style='{_p};margin-bottom:22px'>"
+            f"Best regards,<br>OCHA Centre for Humanitarian Data</p>"
+        )
 
     _hr = "<hr style='border:none;border-top:1px solid #e2e8e8;margin:26px 0'>"
     summary_header = f"<h2 style='{_H2}'>Summary</h2>"

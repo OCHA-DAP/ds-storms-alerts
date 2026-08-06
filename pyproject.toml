@@ -10,6 +10,7 @@ dependencies = [
     "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@v0.3.0",
     "openpyxl>=3.1.5",
     "contextily>=1.7.1",
+    "scipy>=1.17.1",
 ]
 
 [build-system]

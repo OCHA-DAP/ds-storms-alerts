@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import geopandas as gpd
 import matplotlib
+import numpy as np
 matplotlib.use("Agg")  # must be before pyplot import
 from PIL import Image
 
@@ -21,6 +22,8 @@ import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.lines import Line2D
+
+from src.landfall import densify_track
 
 # ---------------------------------------------------------------------------
 # HDX v2 design tokens (ds-knowledge-base methods/style-guide.md; full mirror in
@@ -467,17 +470,17 @@ def _strip_chart(
     srcs = [m for m in _tall if not (m.bold or m.bold_prefix)]
 
     # Vertical layout, in data units, bottom-up. Height follows content so a
-    # one-bar chart is genuinely small.
-    _y_strip = 0.20          # WSP spread strip
+    # chart with no estimates is genuinely small.
+    _y_strip = 0.20          # WSP spread curve
     _y_rug = 0.26            # historical ticks
     _y_rug_label = 0.33      # single row of labels for the largest few
-    _bars_y0, _bar_h, _bar_gap = 0.64, 0.26, 0.08
-    n = len(srcs)
-    bars_top = (
-        _bars_y0 + n * (_bar_h + _bar_gap) - _bar_gap
-        if n else _y_rug_label + 0.26
-    )
-    y_top = bars_top + (0.44 if obs else 0.22)
+    _y_dot = 0.74            # source-estimate dots share one guide line
+    _y_dot_label = 0.88      # their label row
+    if srcs:
+        est_top = _y_dot_label + 0.30
+    else:
+        est_top = _y_rug_label + 0.26
+    y_top = est_top + (0.34 if obs else 0.06)
     fig_h = max(1.15, y_top * 1.06)
 
     fig, ax = plt.subplots(figsize=(_FIG_W_IN, fig_h))
@@ -499,20 +502,44 @@ def _strip_chart(
     ax.set_xlim(x_lo, x_hi)
     ax.set_ylim(0, y_top)
 
-    # The WSP spread as a low strip on the baseline. Heights use a compressive
-    # ^0.3 so the long flat tail of low-density bands stays visible alongside
-    # the tall high-density spike; the shape conveys "where the WSP mass
+    # The WSP spread as a smooth low curve on the baseline. The band data is a
+    # step function (population per probability band, laid out cumulatively);
+    # the steps are display artefacts of that layout, not features of the
+    # forecast, so the sampled steps are Gaussian-smoothed into one curve.
+    # Support is CAPPED at the total population: the cumulative band layout
+    # can sum past it, but exposure beyond everyone is not a real outcome, so
+    # the curve is truncated at the cap and ends with a vertical edge there.
+    # Heights use a compressive ^0.3 so the long flat tail stays visible
+    # alongside the high-density spike; the shape conveys "where the WSP mass
     # lives", one flat colour, nothing more.
     if has_pdf:
         xs, ys = _pdf_polygon(pdf)
         if xs:
-            ys_c = [y ** 0.3 for y in ys]
-            top = max(ys_c)
+            raw_end = xs[-1]
+            cap = (
+                min(raw_end, float(total_pop))
+                if total_pop and total_pop > 0 else raw_end
+            )
+            gx = np.linspace(0.0, cap, 480)
+            # Piecewise density lookup over the band segments.
+            seg_starts = np.array(xs[0::2])
+            seg_dens = np.array(ys[0::2])
+            idx = np.searchsorted(seg_starts, gx, side="right") - 1
+            gy = np.where(
+                (idx >= 0) & (gx >= xs[0]) & (gx <= raw_end),
+                seg_dens[np.clip(idx, 0, len(seg_dens) - 1)], 0.0,
+            )
+            k = max(5, int(len(gx) * 0.03) | 1)
+            kern = np.exp(-0.5 * (np.linspace(-2.5, 2.5, k)) ** 2)
+            kern /= kern.sum()
+            gy = np.convolve(gy, kern, mode="same")
+            gy = gy ** 0.3
+            top = gy.max()
             if top > 0:
-                ys_s = [y * _y_strip / top for y in ys_c]
-                ax.fill_between(xs, ys_s, 0, facecolor=pdf_fill_color,
+                gy = gy * _y_strip / top
+                ax.fill_between(gx, gy, 0, facecolor=pdf_fill_color,
                                 linewidth=0, zorder=1)
-                ax.plot(xs, ys_s, color=pdf_edge_color, lw=0.9, alpha=0.8,
+                ax.plot(gx, gy, color=pdf_edge_color, lw=0.9, alpha=0.8,
                         zorder=2)
 
     # Historical rug: every storm is a tick, only the largest few get names —
@@ -530,40 +557,42 @@ def _strip_chart(
             text_color=INK_3, halo=True, droppable=True,
         )
 
-    # Source bars, CHD on top. Canonical ORDER is fixed (GDACS, ADAM, CHD
-    # bottom-up) but lanes are compacted to the sources present.
-    _lane_order = {"GDACS": 0, "ADAM": 1, "CHD": 2}
-    for lane, m in enumerate(
-        sorted(srcs, key=lambda s: _lane_order.get(s.label, 9))
-    ):
-        y0 = _bars_y0 + lane * (_bar_h + _bar_gap)
-        ax.add_patch(plt.Rectangle(
-            (0, y0), float(m.value), _bar_h,
-            facecolor=m.color, edgecolor=PANEL, linewidth=0.8,
-            alpha=0.9, zorder=4,
-        ))
-        lbl = f"{m.label}  {_fmt_pop(float(m.value), None)}"
-        if m.value > x_hi * 0.72:
-            txt = ax.text(float(m.value) - x_hi * 0.008, y0 + _bar_h / 2, lbl,
-                          ha="right", va="center", fontsize=_SRC_FONTSIZE,
-                          color=INK, zorder=6)
-        else:
-            txt = ax.text(float(m.value) + x_hi * 0.008, y0 + _bar_h / 2, lbl,
-                          ha="left", va="center", fontsize=_SRC_FONTSIZE,
-                          color=INK_2, zorder=6)
-        txt.set_path_effects([
-            path_effects.withStroke(linewidth=2.2, foreground=PANEL)
-        ])
+    # Source estimates as dots on one shared guide line (a dot-strip plot):
+    # position carries the comparison, the label row above carries identity
+    # and value. Bars were tried and rejected — three near-full-width bars
+    # dominated the chart's ink for what is a three-number comparison.
+    if srcs:
+        ax.plot([x_lo, x_hi], [_y_dot, _y_dot], color=LINE, lw=0.8, zorder=3)
+        labels = [
+            f"{m.label}  {_fmt_pop(float(m.value), None)}" for m in srcs
+        ]
+        half = _label_half_widths(ax, fig, labels, _SRC_FONTSIZE)
+        pad = _label_half_widths(ax, fig, ["nn"], _SRC_FONTSIZE)[0] * 2
+        placed, _keep = _place_labels(
+            [(float(m.value), h) for m, h in zip(srcs, half, strict=True)],
+            x_lo, x_hi, pad,
+        )
+        for m, lbl, px in zip(srcs, labels, placed, strict=True):
+            x_v = float(m.value)
+            ax.plot([x_v], [_y_dot], marker="o", ms=8.5, mfc=m.color,
+                    mec=PANEL, mew=1.2, zorder=5, clip_on=False)
+            if abs(px - x_v) > (x_hi - x_lo) * 0.004:
+                _leader(ax, px, _y_dot_label - 0.03, x_v, _y_dot + 0.05,
+                        m.color)
+            txt = ax.text(px, _y_dot_label, lbl, ha="center", va="bottom",
+                          fontsize=_SRC_FONTSIZE, color=INK_2, zorder=6)
+            txt.set_path_effects([
+                path_effects.withStroke(linewidth=2.2, foreground=PANEL)
+            ])
 
-    # Observed-so-far reference: a dashed line through the bars, labelled once
-    # above them.
+    # Observed-so-far reference: a dashed line, labelled once above.
     for m in obs:
         x_v = float(m.value)
-        ax.plot([x_v, x_v], [0, bars_top + 0.10], color=INK, lw=1.1,
+        ax.plot([x_v, x_v], [0, est_top + 0.04], color=INK, lw=1.1,
                 ls=(0, (3, 2)), alpha=0.8, zorder=5, solid_capstyle="butt")
         _hw = _label_half_widths(ax, fig, [m.label], 6.8)[0]
         x_t = min(max(x_v, x_lo + _hw), x_hi - _hw)
-        t_obs = ax.text(x_t, bars_top + 0.16, m.label, ha="center",
+        t_obs = ax.text(x_t, est_top + 0.08, m.label, ha="center",
                         va="bottom", fontsize=6.8, color=INK_2, zorder=6)
         t_obs.set_path_effects([
             path_effects.withStroke(linewidth=2.0, foreground=PANEL)
@@ -845,20 +874,26 @@ def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
             )
 
         if not fcs.empty:
-            if not obs.empty:
-                bridge_x = [obs.geometry.x.iloc[-1], fcs.geometry.x.iloc[0]]
-                bridge_y = [obs.geometry.y.iloc[-1], fcs.geometry.y.iloc[0]]
+            # The forecast line follows the same 30-minute PCHIP densification
+            # the wind buffers are built from (src/landfall.densify_track), so
+            # the dashed line curves WITH its swath instead of cutting straight
+            # doglegs between six-hourly points. The densified path starts at
+            # the last observed position, which also covers the bridge.
+            _dt, _dlon, _dlat, _dw = densify_track(storm)
+            if len(_dlon):
                 ax.plot(
-                    bridge_x, bridge_y,
+                    _dlon, _dlat,
                     color="#444444", linewidth=2, linestyle="--", zorder=3,
+                    label=f"{atcf_id} forecast",
                     path_effects=[_TRACK_CASING],
                 )
-            ax.plot(
-                fcs.geometry.x, fcs.geometry.y,
-                color="#444444", linewidth=2, linestyle="--", zorder=3,
-                label=f"{atcf_id} forecast",
-                path_effects=[_TRACK_CASING],
-            )
+            else:
+                ax.plot(
+                    fcs.geometry.x, fcs.geometry.y,
+                    color="#444444", linewidth=2, linestyle="--", zorder=3,
+                    label=f"{atcf_id} forecast",
+                    path_effects=[_TRACK_CASING],
+                )
             ax.scatter(
                 fcs.geometry.x, fcs.geometry.y,
                 color="#444444", s=18, marker="D", zorder=4,

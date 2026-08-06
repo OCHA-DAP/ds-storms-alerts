@@ -222,7 +222,9 @@
     When the forecast track's centre crosses a country, the storm section
     opens with a landfall callout: where (nearest admin-1 unit), when (US
     Eastern time, with lead time), and the storm's approximate intensity at
-    that point. This is computed directly from the NHC forecast track — a
+    that point. This is computed from the NHC forecast track densified the
+    same way the wind swaths are built (30-minute monotone-cubic
+    interpolation), so it sits on the same curved path as the map — a
     country brushed by the wind field but never crossed by the centre shows
     exposure but no landfall entry.
   </p>
@@ -240,36 +242,38 @@
   <h3>Strip charts</h3>
   <p>
     Each affected country then gets one chart comparing the three source
-    estimates — horizontal bars for CHD, ADAM and GDACS — at that country's
-    highest active wind threshold. The full set —
+    estimates — CHD, ADAM and GDACS as labelled dots on a shared scale — at
+    that country's highest active wind threshold. The full set —
     every threshold, plus the probabilistic wind-speed-probability map — lives
     on the online full-detail layout, shown for a set of historical storms on
     the <a href="alerts/index.html">example alerts</a> page. The charts read as
     follows; the x-axis is population exposed.
   </p>
   <ul>
-    <li><strong>Bars</strong> — the individual source estimates (CHD / ADAM /
-      GDACS, forecast plus observed combined), CHD on top. The consolidated
-      headline in the summary table is the maximum across these bars.</li>
+    <li><strong>Dots</strong> — the individual source estimates (CHD / ADAM /
+      GDACS, forecast plus observed combined) on a shared scale. The
+      consolidated headline in the summary table is the maximum across
+      them.</li>
     <li><strong>Small ticks</strong> — comparable historical storms since 2002,
       for scale; only the largest few are named.</li>
     <li><strong>Dashed line ("observed so far")</strong> — cumulative population
       already within the wind radius based on the observed track.</li>
-    <li><strong>Shaded strip</strong> — when present, the probabilistic WSP
+    <li><strong>Shaded curve</strong> — when present, the probabilistic WSP
       forecast spread rather than a single deterministic value: the range of
       outcomes the wind-speed-probability forecast considers plausible, drawn
-      in the threshold colour.</li>
+      smoothly in the threshold colour and capped at the country's total
+      population.</li>
     <li><strong>Return-period pill</strong> — a country whose exposure is
       historically rare (&gt;3-year RP) carries a colour-coded pill on its
       heading, matching the summary table's colours.</li>
   </ul>
   <div class="callout">
-    <p><strong>Comparing the bars to history.</strong> The historical ticks
+    <p><strong>Comparing the estimates to history.</strong> The historical ticks
     (and the return period) use the <strong>CHD-only</strong> estimate, because
     CHD is the only source with a consistent record back to 2002. The summary
     table's headline, however, is the <strong>maximum across sources</strong>,
-    so it is intentionally at least as high as any single bar. For a
-    like-for-like historical read, use the <strong>CHD</strong> bar and the
+    so it is intentionally at least as high as any single estimate. For a
+    like-for-like historical read, use the <strong>CHD</strong> dot and the
     return period.</p>
   </div>
 

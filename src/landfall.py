@@ -7,11 +7,15 @@ bulletin anyway. Reviewer note that prompted this: landfall time/place was the
 one operationally-critical fact the alert didn't state.
 
 A "landfall" here is the first point where the forecast track (including the
-bridge segment from the last observed position) enters a country's polygon.
-Times are interpolated linearly along the crossing segment; intensity is the
-crossing segment's maximum of the two endpoint wind speeds — landfall sits
-between forecast points, and understating a hurricane by interpolating across
-its peak would be the wrong kind of error.
+bridge from the last observed position) enters a country's polygon. The track
+is densified the same way the wind buffers are built — PCHIP interpolation of
+lat/lon on a 30-minute grid, linear for wind speed, mirroring
+``ocha_lens.utils.storm.interpolate_track`` (the function
+``calculate_wind_buffers_gdf`` uses in ds-storms-pipeline) — so the landfall
+point sits on the same curved path the swaths on the map are built from.
+The full ocha-lens dependency chain (xarray, netcdf4, ...) is deliberately
+not imported for these thirty lines; if lens's interpolation ever changes,
+change this to match.
 """
 
 from __future__ import annotations
@@ -21,7 +25,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import geopandas as gpd
-from shapely.geometry import LineString, Point
+import numpy as np
+from scipy.interpolate import PchipInterpolator
+from shapely.geometry import Point
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,21 +58,62 @@ def saffir_simpson(wind_kt: float | None) -> str:
     return "tropical depression"
 
 
-def _track_points(tracks: gpd.GeoDataFrame) -> list[tuple[datetime, float, Point]]:
-    """Forecast path as (valid_time, wind_kt, point), bridged from the last
-    observed position so a landfall inside the first forecast interval isn't
-    missed."""
+def densify_track(
+    tracks: gpd.GeoDataFrame, freq_minutes: int = 30
+) -> tuple[list[datetime], np.ndarray, np.ndarray, np.ndarray | None]:
+    """The forecast path (bridged from the last observed position) on a dense
+    time grid: (times, lons, lats, winds). winds is None when unavailable.
+
+    Mirrors ocha-lens interpolate_track: PCHIP for lat/lon when 3+ points,
+    linear otherwise; linear for wind. No antimeridian handling — this system
+    alerts on NHC (Atlantic / East Pacific) storms, which don't cross it.
+    """
     fcs = tracks[tracks["kind"] == "forecast"].sort_values("valid_time")
     if fcs.empty:
-        return []
-    pts: list[tuple[datetime, float, Point]] = []
+        return [], np.array([]), np.array([]), None
     obs = tracks[tracks["kind"] == "observed"].sort_values("valid_time")
-    if not obs.empty:
-        last = obs.iloc[-1]
-        pts.append((last["valid_time"], last.get("wind_speed"), last.geometry))
-    for _, r in fcs.iterrows():
-        pts.append((r["valid_time"], r.get("wind_speed"), r.geometry))
-    return pts
+    rows = ([obs.iloc[-1]] if not obs.empty else []) + [
+        r for _, r in fcs.iterrows()
+    ]
+    seen: set = set()
+    times, lons, lats, winds = [], [], [], []
+    for r in rows:
+        tv = r["valid_time"]
+        if tv in seen or r.geometry is None or r.geometry.is_empty:
+            continue
+        seen.add(tv)
+        times.append(tv)
+        lons.append(r.geometry.x)
+        lats.append(r.geometry.y)
+        w = r.get("wind_speed")
+        winds.append(
+            float(w) if w is not None and not (
+                isinstance(w, float) and math.isnan(w)) else math.nan
+        )
+    if len(times) < 2:
+        return [], np.array([]), np.array([]), None
+
+    t0 = times[0]
+    x = np.array([(tv - t0).total_seconds() for tv in times])
+    step = freq_minutes * 60
+    x_new = np.arange(x[0], x[-1] + 1, step)
+    if x_new[-1] < x[-1]:
+        x_new = np.append(x_new, x[-1])
+
+    if len(times) == 2:
+        lon_new = np.interp(x_new, x, lons)
+        lat_new = np.interp(x_new, x, lats)
+    else:
+        lon_new = PchipInterpolator(x, lons)(x_new)
+        lat_new = PchipInterpolator(x, lats)(x_new)
+
+    w_arr = np.array(winds)
+    ok = ~np.isnan(w_arr)
+    winds_new = (
+        np.interp(x_new, x[ok], w_arr[ok]) if ok.sum() >= 2 else None
+    )
+    times_new = [t0 + timedelta(seconds=float(s)) for s in x_new]
+    return times_new, lon_new, lat_new, winds_new
 
 
 def compute_landfalls(
@@ -76,61 +123,29 @@ def compute_landfalls(
 
     country_geoms: iso3 -> (Multi)Polygon. Countries the track centre never
     enters produce no entry — brushing a coast with the wind field is exposure,
-    not landfall.
+    not landfall. Resolution is the 30-minute densified track, so times are
+    good to about +/- 15 minutes.
     """
-    pts = _track_points(tracks)
-    if len(pts) < 2:
+    times, lons, lats, winds = densify_track(tracks)
+    if not times:
         return []
+    pts = [Point(x, y) for x, y in zip(lons, lats, strict=True)]
 
     out: list[Landfall] = []
     for iso3, geom in country_geoms.items():
         if geom is None or geom.is_empty:
             continue
-        hit: Landfall | None = None
-        for (t0, w0, p0), (t1, w1, p1) in zip(pts, pts[1:], strict=False):
-            inside0 = geom.contains(p0)
-            inside1 = geom.contains(p1)
-            seg = LineString([p0, p1])
-            if inside0:
-                # Centre already over the country when the forecast starts:
-                # report it, flagged, only if this is the very first segment —
-                # otherwise it's just the continuation of a crossing we've
-                # already recorded.
-                if (t0, w0, p0) == pts[0]:
-                    hit = Landfall(iso3, t0, w0, p0, already_inland=True)
-                    break
+        for i, pt in enumerate(pts):
+            if not geom.contains(pt):
                 continue
-            if not inside1 and not seg.intersects(geom):
-                continue
-            # Entering segment: the crossing point is the intersection with
-            # the boundary closest to the segment start.
-            inter = seg.intersection(geom.boundary)
-            if inter.is_empty:
-                # Fully-contained end point with no boundary crossing shouldn't
-                # happen, but degrade to the end point rather than dying.
-                cross, frac = p1, 1.0
-            else:
-                cands = (
-                    list(inter.geoms) if hasattr(inter, "geoms") else [inter]
-                )
-                cands = [c for c in cands if isinstance(c, Point)] or [
-                    Point(c.coords[0]) for c in cands if hasattr(c, "coords")
-                ]
-                if not cands:
-                    continue
-                cross = min(cands, key=lambda c: seg.project(c))
-                frac = seg.project(cross) / seg.length if seg.length else 0.0
-            t_cross = t0 + timedelta(
-                seconds=frac * (t1 - t0).total_seconds()
+            wind = (
+                float(winds[i]) if winds is not None
+                and not math.isnan(winds[i]) else None
             )
-            # Max of the endpoints, not an interpolation: see module docstring.
-            winds = [w for w in (w0, w1) if w is not None and not (
-                isinstance(w, float) and math.isnan(w))]
-            wind = max(winds) if winds else None
-            hit = Landfall(iso3, t_cross, wind, cross, already_inland=False)
+            out.append(Landfall(
+                iso3, times[i], wind, pt, already_inland=(i == 0)
+            ))
             break
-        if hit is not None:
-            out.append(hit)
     out.sort(key=lambda lf: lf.time)
     return out
 
