@@ -188,7 +188,7 @@ def _pdf_polygon(pdf: WspPdf) -> tuple[list[float], list[float]]:
 
 
 # ---------------------------------------------------------------------------
-# Vertical layout, in data units (ylim is 0 .. _Y_TOP).
+# Vertical layout, in data units (the y-limit is computed per chart).
 #
 # The chart is a number line read bottom-up: the probabilistic forecast spread
 # is a low density strip on the baseline, marks rise out of it, and every label
@@ -203,11 +203,9 @@ _Y_PDF_TOP = 0.30         # WSP density strip occupies 0 .. here
 _Y_HIST_TOP = 0.22        # historical ticks stop just inside the strip
 _Y_HIST_LABEL = 0.34      # historical label band (2 staggered rows)
 _Y_HIST_ROW_GAP = 0.20
-_Y_SRC_TOP = 0.78         # source ticks (CHD / ADAM / GDACS)
-_Y_SRC_LABEL = 0.83       # their label band
-_Y_BOLD_TOP = 1.30        # the headline estimate rises above everything
-_Y_BOLD_LABEL = 1.38      # and is labelled last, at the top
-_Y_TOP = 2.05             # ylim (headroom for two-line bold labels)
+# Source estimates (CHD / ADAM / GDACS) render as horizontal bars in fixed
+# lanes above the historical band; the headline tier and the y-limit are
+# computed per chart from the number of lanes — see _strip_chart.
 
 _HIST_FONTSIZE = 6.8
 _SRC_FONTSIZE = 7.2
@@ -437,6 +435,16 @@ def _strip_chart(
     pdf_edge_color: str = GREY_EDGE,
     total_pop: int | None = None,
 ) -> str:
+    """Compact source-comparison chart for one country + wind threshold.
+
+    Reads bottom-up: the pale strip on the baseline is the probabilistic WSP
+    spread, the small ticks are historical storms (only the largest few get a
+    name — the rest are context, not references), and the bars are the source
+    estimates, CHD on top. A dashed line marks exposure already observed. The
+    consolidated headline number lives in the summary table, not here — it is
+    by definition the longest bar, and a second bold mark restating it was the
+    single clunkiest thing on the old chart.
+    """
     # Drop marks that would be outside the chart's x range — their ax.text
     # objects at large data coordinates expand bbox_inches="tight" to data
     # scale.
@@ -451,31 +459,38 @@ def _strip_chart(
     plt.rcParams["font.family"] = "sans-serif"
     plt.rcParams["font.sans-serif"] = _FONT_STACK
 
-    # Height follows the tiers that actually have marks. A country with no
-    # current estimate (historical context only) otherwise gets the full
-    # headline-tier headroom rendered as a band of empty white, and there are
-    # a lot of those charts in a multi-country email.
+    hist = [m for m in nonzero if m.short]
     _tall = [m for m in nonzero if not m.short]
-    _has_bold = any(m.bold or m.bold_prefix for m in _tall)
-    _has_src = any(not (m.bold or m.bold_prefix) for m in _tall)
-    if _has_bold:
-        y_top, fig_h = _Y_TOP, 2.35
-    elif _has_src:
-        y_top, fig_h = _Y_SRC_LABEL + 0.42, 1.80
-    else:
-        y_top, fig_h = _Y_HIST_LABEL + _Y_HIST_ROW_GAP + 0.30, 1.45
+    # bold / bold_prefix marks are observed-so-far references (dashed line);
+    # the sources render as bars.
+    obs = [m for m in _tall if m.bold or m.bold_prefix]
+    srcs = [m for m in _tall if not (m.bold or m.bold_prefix)]
+
+    # Vertical layout, in data units, bottom-up. Height follows content so a
+    # one-bar chart is genuinely small.
+    _y_strip = 0.20          # WSP spread strip
+    _y_rug = 0.26            # historical ticks
+    _y_rug_label = 0.33      # single row of labels for the largest few
+    _bars_y0, _bar_h, _bar_gap = 0.64, 0.26, 0.08
+    n = len(srcs)
+    bars_top = (
+        _bars_y0 + n * (_bar_h + _bar_gap) - _bar_gap
+        if n else _y_rug_label + 0.26
+    )
+    y_top = bars_top + (0.44 if obs else 0.22)
+    fig_h = max(1.15, y_top * 1.06)
 
     fig, ax = plt.subplots(figsize=(_FIG_W_IN, fig_h))
     fig.patch.set_facecolor(PANEL)
-    fig.subplots_adjust(left=0.02, right=0.98, top=0.97, bottom=0.20)
+    # The x-axis furniture needs a fixed physical depth, so the bottom margin
+    # is a fraction computed from the figure height rather than a constant.
+    fig.subplots_adjust(
+        left=0.02, right=0.98, top=0.96,
+        bottom=min(0.34, max(0.16, 0.36 / fig_h)),
+    )
 
-    # Fix the x range up front: label widths are computed in data units, so the
-    # scale has to be final before anything is placed. The old code placed first
-    # and re-centred after set_xlim, which is what made the label geometry so
-    # hard to follow.
-    # The headroom is generous on purpose: the headline mark usually sits at or
-    # near the maximum, and its label is the widest on the chart, so a tight
-    # right edge would either clip it or shove it away from its own tick.
+    # Fix the x range up front: label widths are measured in data units, so
+    # the scale has to be final before anything is placed.
     if x_max is not None and x_max > 0:
         x_hi = x_max * 1.12
     else:
@@ -484,86 +499,111 @@ def _strip_chart(
     ax.set_xlim(x_lo, x_hi)
     ax.set_ylim(0, y_top)
 
-    # The WSP spread as a low density strip on the baseline. Heights use a
-    # compressive ^0.3 so the long flat tail of low-density bands stays visible
-    # alongside the tall high-density spike; area no longer equals probability,
-    # the shape conveys "where the WSP mass lives".
+    # The WSP spread as a low strip on the baseline. Heights use a compressive
+    # ^0.3 so the long flat tail of low-density bands stays visible alongside
+    # the tall high-density spike; the shape conveys "where the WSP mass
+    # lives", one flat colour, nothing more.
     if has_pdf:
         xs, ys = _pdf_polygon(pdf)
         if xs:
             ys_c = [y ** 0.3 for y in ys]
             top = max(ys_c)
             if top > 0:
-                ys_s = [y * _Y_PDF_TOP / top for y in ys_c]
-                # One flat colour: the strip marks WHERE the probabilistic
-                # forecast mass lies, nothing more. Shading its blocks by band
-                # probability implied a per-slice reading the data doesn't
-                # support, so the blocks are gone.
+                ys_s = [y * _y_strip / top for y in ys_c]
                 ax.fill_between(xs, ys_s, 0, facecolor=pdf_fill_color,
                                 linewidth=0, zorder=1)
-                ax.plot(xs, ys_s, color=pdf_edge_color, lw=1.0, alpha=0.85,
+                ax.plot(xs, ys_s, color=pdf_edge_color, lw=0.9, alpha=0.8,
                         zorder=2)
 
-    hist = [m for m in nonzero if m.short]
-    bold = [m for m in _tall if m.bold or m.bold_prefix]
-    srcs = [m for m in _tall if not (m.bold or m.bold_prefix)]
+    # Historical rug: every storm is a tick, only the largest few get names —
+    # the summary table already lists each country's most similar storms.
+    if hist:
+        by_size = sorted(hist, key=lambda m: -float(m.value))
+        labeled, unlabeled = by_size[:3], by_size[3:]
+        for m in unlabeled:
+            ax.plot([m.value, m.value], [0, _y_rug], color=INK_3, lw=0.8,
+                    alpha=0.65, zorder=3, solid_capstyle="butt")
+        _draw_tier(
+            ax, fig, labeled, x_lo, x_hi,
+            tick_top=_y_rug, label_y=_y_rug_label,
+            fontsize=_HIST_FONTSIZE, linewidth=0.9, color=INK_3,
+            text_color=INK_3, halo=True, droppable=True,
+        )
 
-    _draw_tier(
-        ax, fig, hist, x_lo, x_hi,
-        tick_top=_Y_HIST_TOP, label_y=_Y_HIST_LABEL,
-        fontsize=_HIST_FONTSIZE, linewidth=0.9, color=INK_3,
-        text_color=INK_3, rows=2, row_gap=_Y_HIST_ROW_GAP, halo=True,
-        # Historical context is the only tier that may lose a label to crowding.
-        # The source ticks and the headline are the point of the chart.
-        droppable=True,
-    )
-    _draw_tier(
-        ax, fig, srcs, x_lo, x_hi,
-        tick_top=_Y_SRC_TOP, label_y=_Y_SRC_LABEL,
-        fontsize=_SRC_FONTSIZE, linewidth=1.4, color=None, text_color=INK_2,
-    )
-    _draw_tier(
-        ax, fig, bold, x_lo, x_hi,
-        tick_top=_Y_BOLD_TOP, label_y=_Y_BOLD_LABEL,
-        fontsize=_BOLD_FONTSIZE, linewidth=2.2, color=None, text_color=INK_2,
-        bold=True, marker=True,
-    )
+    # Source bars, CHD on top. Canonical ORDER is fixed (GDACS, ADAM, CHD
+    # bottom-up) but lanes are compacted to the sources present.
+    _lane_order = {"GDACS": 0, "ADAM": 1, "CHD": 2}
+    for lane, m in enumerate(
+        sorted(srcs, key=lambda s: _lane_order.get(s.label, 9))
+    ):
+        y0 = _bars_y0 + lane * (_bar_h + _bar_gap)
+        ax.add_patch(plt.Rectangle(
+            (0, y0), float(m.value), _bar_h,
+            facecolor=m.color, edgecolor=PANEL, linewidth=0.8,
+            alpha=0.9, zorder=4,
+        ))
+        lbl = f"{m.label}  {_fmt_pop(float(m.value), None)}"
+        if m.value > x_hi * 0.72:
+            txt = ax.text(float(m.value) - x_hi * 0.008, y0 + _bar_h / 2, lbl,
+                          ha="right", va="center", fontsize=_SRC_FONTSIZE,
+                          color=INK, zorder=6)
+        else:
+            txt = ax.text(float(m.value) + x_hi * 0.008, y0 + _bar_h / 2, lbl,
+                          ha="left", va="center", fontsize=_SRC_FONTSIZE,
+                          color=INK_2, zorder=6)
+        txt.set_path_effects([
+            path_effects.withStroke(linewidth=2.2, foreground=PANEL)
+        ])
+
+    # Observed-so-far reference: a dashed line through the bars, labelled once
+    # above them.
+    for m in obs:
+        x_v = float(m.value)
+        ax.plot([x_v, x_v], [0, bars_top + 0.10], color=INK, lw=1.1,
+                ls=(0, (3, 2)), alpha=0.8, zorder=5, solid_capstyle="butt")
+        _hw = _label_half_widths(ax, fig, [m.label], 6.8)[0]
+        x_t = min(max(x_v, x_lo + _hw), x_hi - _hw)
+        t_obs = ax.text(x_t, bars_top + 0.16, m.label, ha="center",
+                        va="bottom", fontsize=6.8, color=INK_2, zorder=6)
+        t_obs.set_path_effects([
+            path_effects.withStroke(linewidth=2.0, foreground=PANEL)
+        ])
 
     ax.set_yticks([])
     if title:
         ax.set_title(title, fontsize=11, fontweight="bold", loc="left",
                      color=INK)
 
-    ax.set_xlabel(x_label, fontsize=8.5, color=INK_3)
+    ax.set_xlabel(x_label, fontsize=8, color=INK_3, labelpad=2)
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(_fmt_pop))
     ax.tick_params(axis="x", which="both", length=3, color=LINE,
-                   labelsize=8, labelcolor=INK_3)
+                   labelsize=7.5, labelcolor=INK_3)
     for side in ("top", "right", "left"):
         ax.spines[side].set_visible(False)
     ax.spines["bottom"].set_color(LINE)
 
     if total_pop is not None and total_pop > 0:
         xfrac = (total_pop - x_lo) / (x_hi - x_lo)
-        # Suppress it when it lands on top of the headline mark: at that point
-        # the storm is exposing essentially the whole country, which the "(100%)"
-        # in the summary table already says, and the two labels collide.
+        # Suppress it when it lands on a bar end: the "(100%)" in the summary
+        # table already says the whole country is exposed, and the two labels
+        # collide.
         _crowded = any(
-            abs(float(m.value) - total_pop) < (x_hi - x_lo) * 0.03 for m in bold
+            abs(float(m.value) - total_pop) < (x_hi - x_lo) * 0.03
+            for m in srcs
         )
         if 0.0 <= xfrac <= 1.0 and not _crowded:
-            # Horizontal, muted, below the axis: it is a reference bound, not a
-            # data point, and should not compete with the storm marks.
             ax.annotate(
                 "total population",
                 xy=(xfrac, 0.0), xycoords="axes fraction",
-                xytext=(xfrac, -0.15), textcoords="axes fraction",
-                ha="center", va="top", fontsize=6.8, color=INK_3,
-                arrowprops=dict(arrowstyle="-", color=INK_3, lw=1.2,
+                xytext=(xfrac, -0.30 / fig_h), textcoords="axes fraction",
+                ha="center", va="top", fontsize=6.6, color=INK_3,
+                arrowprops=dict(arrowstyle="-", color=INK_3, lw=1.1,
                                 shrinkA=0, shrinkB=0),
                 annotation_clip=False,
             )
 
     return _fig_to_img_tag(fig, alt=title)
+
 
 def wind_speed_color(wind_speed_kt: int) -> str:
     """Mark colour for the R34/R50/R64 wind threshold (HDX status ramp)."""

@@ -42,6 +42,7 @@ from src.data import (
     load_background_countries,
 )
 from src import fm_matching as fm
+from src.landfall import compute_landfalls, nearest_adm1_name, saffir_simpson
 from src.preview import PreviewUnavailable, render_with_template
 from src.xlsx_style import build_readme, style_data_sheet
 from src.plots import (
@@ -175,9 +176,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _H2 = "font-size:1.35em;margin:24px 0 8px;font-weight:600"
-_H3 = "font-size:1.1em;margin:16px 0 6px;font-weight:600;color:#444"
-_H4 = "font-size:0.95em;margin:10px 0 4px;font-weight:600;color:#666"
-_H5 = "font-size:0.85em;margin:8px 0 3px;font-weight:600;color:#888"
+_H3 = "font-size:1.1em;margin:16px 0 6px;font-weight:600;color:#3f4748"
+_H4 = "font-size:0.95em;margin:10px 0 4px;font-weight:600;color:#5e6a6b"
+_H5 = "font-size:0.85em;margin:8px 0 3px;font-weight:600;color:#7e8e8f"
 
 
 def _parse_bool_env(name: str, default: bool) -> bool:
@@ -329,6 +330,57 @@ def _fetch_monitoring_list_ids(client) -> list[int]:
     ]
 
 
+def _landfall_panel_html(
+    landfalls, adm1_gdf, cname, issued_time_dt: datetime
+) -> str:
+    """Forecast-landfall callout for one storm (both layouts).
+
+    Computed from the NHC forecast track in our own DB — see src/landfall.py
+    for why this is not pulled from PDC. Only centre crossings count; a country
+    brushed by the wind field but never crossed shows exposure, not landfall.
+    """
+    if not landfalls:
+        return ""
+    rows: list[str] = []
+    for lf in landfalls[:4]:
+        country = cname(lf.iso3)
+        if lf.already_inland:
+            rows.append(
+                f"<div style='margin:2px 0'><b style='color:#1f2324'>{country}"
+                f"</b> — storm centre already inland at this advisory</div>"
+            )
+            continue
+        near = nearest_adm1_name(lf.point, adm1_gdf, lf.iso3)
+        near_part = f" near {near}" if near else ""
+        lead_h = (lf.time - issued_time_dt).total_seconds() / 3600
+        if lead_h < 1:
+            lead = "imminent"
+        elif lead_h < 48:
+            lead = f"in ~{lead_h:.0f} h"
+        else:
+            lead = f"in ~{lead_h / 24:.1f} days"
+        wind_part = ""
+        if lf.wind_speed_kt and not math.isnan(lf.wind_speed_kt):
+            cat = saffir_simpson(lf.wind_speed_kt)
+            cat_part = f" ({cat})" if cat else ""
+            wind_part = f" &middot; ~{lf.wind_speed_kt:.0f} kt{cat_part}"
+        rows.append(
+            f"<div style='margin:2px 0'>"
+            f"<b style='color:#1f2324'>{country}</b>{near_part} &middot; "
+            f"{_format_issued_et(lf.time)} ET ({lead}){wind_part}</div>"
+        )
+    return (
+        "<div style='background:#e8effb;border-left:3px solid #1862d8;"
+        "border-radius:0 6px 6px 0;padding:12px 16px;margin:12px 0 16px;"
+        "font-size:0.92em;color:#3f4748;line-height:1.6'>"
+        "<div style='font-size:0.8em;font-weight:600;letter-spacing:0.08em;"
+        "text-transform:uppercase;color:#134ead;margin-bottom:4px'>"
+        "Forecast landfall</div>"
+        + "".join(rows)
+        + "</div>"
+    )
+
+
 def generate_monitoring_html(
     engine, issued_time_dt: datetime, active_meta: list[dict]
 ) -> str:
@@ -352,7 +404,7 @@ def generate_monitoring_html(
 
     n = len(active_meta)
     intro = (
-        f"<p style='font-family:sans-serif;color:#555;"
+        f"<p style='font-family:sans-serif;color:#5e6a6b;"
         f"margin:0 0 24px;font-size:0.95em;line-height:1.5'>"
         f"{n} active storm{'s' if n != 1 else ''} at this advisory. "
         f"None {'are' if n != 1 else 'is'} currently forecast to affect "
@@ -724,10 +776,10 @@ def generate_alert_html(
         if rp <= 3:
             return ""
         if rp > 10:
-            return "#ffcccc"
+            return "#e7b5af"
         if rp > 5:
-            return "#ffe8cc"
-        return "#fff9c4"
+            return "#e5bc7f"
+        return "#f6e9d4"
 
     def _rp_text(forecast_val: float, iso3: str, wsp: int) -> str:
         rp = _rp_numeric(forecast_val, iso3, wsp)
@@ -769,6 +821,22 @@ def generate_alert_html(
         aid_buffers = buffers_gdf[buffers_gdf["atcf_id"] == aid]
         aid_wsp_poly = wsp_gdf[wsp_gdf["atcf_id"] == aid]
         aid_adm1 = adm1_gdf[adm1_gdf["iso_3"].isin(storm_to_iso3s[aid])]
+
+        # Forecast landfall: first centre crossing per affected country.
+        _geom_by_iso3: dict[str, object] = {}
+        if not aid_adm1.empty:
+            for _iso3_g, _grp in aid_adm1.groupby("iso_3"):
+                _geom_by_iso3[_iso3_g] = _grp.geometry.union_all()
+        _lf_missing = sorted(set(storm_to_iso3s[aid]) - set(_geom_by_iso3))
+        if _lf_missing:
+            _lf_adm0 = load_adm0_boundaries(_lf_missing)
+            for _r0 in _lf_adm0.itertuples():
+                _geom_by_iso3.setdefault(_r0.iso_3, _r0.geometry)
+        landfall_html = _landfall_panel_html(
+            compute_landfalls(aid_tracks, _geom_by_iso3),
+            adm1_gdf, _cname, issued_time_dt,
+        )
+
         storm_map_parts: list[str] = []
         if full:
             buf_m = track_plot_buffers(
@@ -805,7 +873,7 @@ def generate_alert_html(
                 )
                 _cn = _cname(iso3)
                 notice_html = (
-                    f"<p style='background:#fff3cd;border-left:4px solid #ffc107;"
+                    f"<p style='background:#fbf4ea;border-left:4px solid #d48f2a;"
                     f"padding:10px 14px;margin:12px 0;font-size:0.95em'>"
                     f"This is the last update for <strong>{storm_lbl}</strong> in "
                     f"<strong>{_cn}</strong> as there is no further forecasted "
@@ -907,9 +975,18 @@ def generate_alert_html(
                 })
 
             # Condensed email: one chart per country — the source comparison
-            # at the HIGHEST active wind threshold (active_wsps is ordered
-            # 64 -> 34, so [0] is it). All thresholds render in full mode.
-            wsps_to_render = active_wsps if full else active_wsps[:1]
+            # at the highest threshold with an actual source estimate. A
+            # threshold can be "active" on WSP probability alone with every
+            # source at zero, and that chart is an empty strip: for Haiti
+            # under Melissa it would show 64 kt with nothing in it instead of
+            # the 5.4M-at-34 kt story. All thresholds render in full mode.
+            if full:
+                wsps_to_render = active_wsps
+            else:
+                _est_wsps = [w["wsp"] for w in _toc_wsps]
+                wsps_to_render = (
+                    [max(_est_wsps)] if _est_wsps else active_wsps[:1]
+                )
 
             combined_blocks: list[str] = []
             _total_pop = iso3_to_total_pop.get(iso3, 0)
@@ -975,19 +1052,11 @@ def generate_alert_html(
                 )
 
                 if active_sources:
-                    # Combined estimate = MAX across sources, not mean (bias to
-                    # action — see _tot in the ToC loop for the full rationale).
-                    agg_val = max(active_sources.values())
+                    # The consolidated headline (MAX across sources — bias to
+                    # action, see _tot in the ToC loop) lives in the summary
+                    # table; on the chart it is by definition the longest bar,
+                    # so it is not drawn a second time.
                     _is_final = (aid, iso3) in final_update_pairs
-                    _final_suffix = "Estimated\nfinal exposure" if _is_final else "Forecasted\nfinal exposure"
-                    _storm_name = _storm_label(name_aid, None)
-                    agg_mark = StormMark(
-                        value=agg_val,
-                        label=_final_suffix,
-                        bold_prefix=_storm_name,
-                        color=wsp_color,
-                        bold=True,
-                    )
                     source_ticks = [
                         StormMark(value=v, label=_SRC_LABELS[k], color=wsp_color, short=False)
                         for k, v in active_sources.items()
@@ -995,14 +1064,13 @@ def generate_alert_html(
                     obs_ticks = (
                         [StormMark(
                             value=obsv_floor,
-                            label="Observed\nup to present",
-                            bold_prefix=_storm_name,
+                            label="observed so far",
                             color=wsp_color,
-                            short=False,
+                            bold=True,
                         )]
                         if obsv_floor > 0 and not _is_final else []
                     )
-                    combined_marks = hist_marks + obs_ticks + source_ticks + [agg_mark]
+                    combined_marks = hist_marks + obs_ticks + source_ticks
                 else:
                     combined_marks = hist_marks
 
@@ -1024,11 +1092,28 @@ def generate_alert_html(
                     total_pop=_chart_total_pop,
                 )
                 _rp = _rp_text(float(our_val), iso3, wsp)
-                _rp_html = (
-                    f"<p style='font-size:0.78em;color:#666;"
-                    f"margin:-4px 0 10px;padding-left:2px'>{_rp}</p>"
-                    if _rp else ""
-                )
+                _rp_val = _rp_numeric(float(our_val), iso3, wsp)
+                _pill_color = _rp_color(_rp_val) if _rp_val else ""
+                if _rp and _pill_color:
+                    # High return period = the operationally unusual case;
+                    # give it the same colour pill as the summary table so it
+                    # pops instead of hiding in grey smallprint.
+                    _lbl, _, _rest = _rp.partition(" RP ")
+                    _rp_html = (
+                        f"<p style='font-size:0.8em;color:#7e8e8f;"
+                        f"margin:0 0 14px;padding-left:2px'>"
+                        f"<span style='display:inline-block;padding:1px 9px;"
+                        f"border-radius:999px;background:{_pill_color};"
+                        f"color:#1f2324;font-weight:600'>{_lbl} RP</span> "
+                        f"{_rest}</p>"
+                    )
+                elif _rp:
+                    _rp_html = (
+                        f"<p style='font-size:0.8em;color:#7e8e8f;"
+                        f"margin:0 0 14px;padding-left:2px'>{_rp}</p>"
+                    )
+                else:
+                    _rp_html = ""
                 # In the email the chart's own x-label already names the one
                 # threshold shown; a bare "64 kt" heading would just repeat it.
                 _wsp_heading = f"<h5 style='{_H5}'>{wsp} kt</h5>" if full else ""
@@ -1036,8 +1121,26 @@ def generate_alert_html(
                     f"{_wsp_heading}{combined_img}{_rp_html}"
                 )
 
+            # The country's highest RP rides its heading as a colour pill —
+            # the chart may feature a threshold whose own RP is unremarkable
+            # while a lower threshold is the once-a-decade story.
+            _c_best_rp = max(
+                (w["rp"] for w in _toc_wsps if w["rp"]), default=None
+            )
+            _c_pill = ""
+            _pc = _rp_color(_c_best_rp) if _c_best_rp else ""
+            if _pc:
+                _c_lbl = (
+                    "&lt;1-year" if _c_best_rp < 1 else f"{_c_best_rp:.0f}-year"
+                )
+                _c_pill = (
+                    f" <span style='display:inline-block;padding:1px 10px;"
+                    f"border-radius:999px;background:{_pc};color:#1f2324;"
+                    f"font-size:0.72em;font-weight:600;vertical-align:2px'>"
+                    f"{_c_lbl} RP</span>"
+                )
             country_sections.append(
-                f"<h3 style='{_H3}'>{_cname(iso3)}</h3>"
+                f"<h3 style='{_H3}'>{_cname(iso3)}{_c_pill}</h3>"
                 + notice_html
                 + "".join(combined_blocks)
             )
@@ -1084,6 +1187,7 @@ def generate_alert_html(
         if storm_map_parts or country_sections:
             sections.append(
                 f"<h2 id='storm-{aid}' style='{_H2}'>{storm_h2_label}</h2>"
+                + landfall_html
                 + "".join(storm_map_parts)
                 + "".join(country_sections)
             )
@@ -1114,7 +1218,8 @@ def generate_alert_html(
         return (
             f"<span style='display:inline-block;padding:2px 10px;"
             f"border-radius:999px;background:{color};color:#1f2324;"
-            f"font-size:0.9em;white-space:nowrap'>{label}</span>"
+            f"font-size:0.9em;font-weight:600;white-space:nowrap'>"
+            f"{label}</span>"
         )
 
     tbl_rows: list[str] = []
@@ -1199,7 +1304,7 @@ def generate_alert_html(
             _ap_label = _storm_label(*storm_meta.get(_ap_aid, (None, None)))
             _passed_parts.append(f"{_ap_label}: {', '.join(sorted(_ap_entries))}")
         already_passed_html = (
-            "<p style='font-size:0.88em;color:#666;margin:0 0 20px'>"
+            "<p style='font-size:0.88em;color:#5e6a6b;margin:0 0 20px'>"
             "<strong>Countries already passed</strong> "
             "(see past emails for final exposure estimate): "
             + "; ".join(_passed_parts)
@@ -1242,16 +1347,16 @@ def generate_alert_html(
         if _missing else ""
     )
     _p = (
-        "font-family:sans-serif;color:#333;font-size:0.95em;"
+        "font-family:sans-serif;color:#1f2324;font-size:0.95em;"
         "line-height:1.55;margin:0 0 14px"
     )
     _detail_sentence = (
         "" if full else (
             " Full admin-1 figures are in the attached spreadsheet; "
             "<a href='https://ocha-dap.github.io/ds-storms-alerts/alerts/' "
-            "style='color:#0645ad'>example alerts with the full charts</a> "
+            "style='color:#1862d8'>example alerts with the full charts</a> "
             "and <a href='https://ocha-dap.github.io/ds-storms-alerts/guide.html' "
-            "style='color:#0645ad'>the methodology</a> are online."
+            "style='color:#1862d8'>the methodology</a> are online."
         )
     )
     intro_html = (
@@ -1266,18 +1371,18 @@ def generate_alert_html(
         f"Best regards,<br>OCHA Centre for Humanitarian Data</p>"
     )
 
-    _hr = "<hr style='border:none;border-top:1px solid #e2e2e2;margin:26px 0'>"
+    _hr = "<hr style='border:none;border-top:1px solid #e2e8e8;margin:26px 0'>"
     summary_header = f"<h2 style='{_H2}'>Summary</h2>"
     links_note = (
-        "<p style='font-size:0.85em;color:#666;margin:0 0 18px'>"
+        "<p style='font-size:0.85em;color:#5e6a6b;margin:0 0 18px'>"
         "<a href='https://ocha-dap.github.io/ds-storms-alerts/guide.html' "
-        "style='color:#0645ad'>Methodology &amp; documentation</a>"
+        "style='color:#1862d8'>Methodology &amp; documentation</a>"
         " &nbsp;|&nbsp; "
         "<a href='https://ocha-dap.github.io/ds-storms-alerts/' "
-        "style='color:#0645ad'>Sign up for alerts</a>"
+        "style='color:#1862d8'>Sign up for alerts</a>"
         " &nbsp;|&nbsp; "
         "<a href='https://ocha-dap.github.io/ds-storms-alerts/alerts/' "
-        "style='color:#0645ad'>Example alerts</a>"
+        "style='color:#1862d8'>Example alerts</a>"
         "</p>"
     )
     body = intro_html + _hr + summary_header + toc_html + links_note + already_passed_html

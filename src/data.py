@@ -540,21 +540,23 @@ def fetch_track_geo(
       - observed points: leadtime=0 rows with valid_time <= issued_time
       - forecast points: rows where issued_time = :issued_time and leadtime > 0
 
-    Returns GeoDataFrame with columns: atcf_id, valid_time, kind, geometry.
-    kind is one of 'observed' or 'forecast'.
+    Returns GeoDataFrame with columns: atcf_id, valid_time, wind_speed, kind,
+    geometry. kind is one of 'observed' or 'forecast'; wind_speed is max
+    sustained wind in kt (may be NaN on some points).
     """
     if not atcf_ids:
         return gpd.GeoDataFrame(
-            columns=["atcf_id", "valid_time", "kind", "geometry"], crs="EPSG:4326"
+            columns=["atcf_id", "valid_time", "wind_speed", "kind", "geometry"],
+            crs="EPSG:4326",
         )
     sql = text("""
-        SELECT atcf_id, valid_time, geometry, 'observed' AS kind
+        SELECT atcf_id, valid_time, wind_speed, geometry, 'observed' AS kind
         FROM storms.nhc_tracks_geo
         WHERE atcf_id IN :atcf_ids
           AND leadtime = 0
           AND valid_time <= :issued_time
         UNION ALL
-        SELECT atcf_id, valid_time, geometry, 'forecast' AS kind
+        SELECT atcf_id, valid_time, wind_speed, geometry, 'forecast' AS kind
         FROM storms.nhc_tracks_geo
         WHERE atcf_id IN :atcf_ids
           AND issued_time = :issued_time

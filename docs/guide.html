@@ -203,9 +203,9 @@
   </p>
   <p>Return periods above 3 years are colour-coded in the summary table:</p>
   <div class="rp-legend">
-    <span><span class="rp-swatch" style="background:#fff9c4"></span> &gt;3-year RP</span>
-    <span><span class="rp-swatch" style="background:#ffe8cc"></span> &gt;5-year RP</span>
-    <span><span class="rp-swatch" style="background:#ffcccc"></span> &gt;10-year RP</span>
+    <span><span class="rp-swatch" style="background:#f6e9d4"></span> &gt;3-year RP</span>
+    <span><span class="rp-swatch" style="background:#e5bc7f"></span> &gt;5-year RP</span>
+    <span><span class="rp-swatch" style="background:#e7b5af"></span> &gt;10-year RP</span>
   </div>
   <div class="callout">
     <p><strong>Return periods use the CHD estimate only.</strong> Unlike the headline
@@ -216,6 +216,16 @@
     the rounded displayed value, e.g. a 4.6-year RP shows as "5-year" and is coloured
     accordingly.)</p>
   </div>
+
+  <h3>Forecast landfall</h3>
+  <p>
+    When the forecast track's centre crosses a country, the storm section
+    opens with a landfall callout: where (nearest admin-1 unit), when (US
+    Eastern time, with lead time), and the storm's approximate intensity at
+    that point. This is computed directly from the NHC forecast track — a
+    country brushed by the wind field but never crossed by the centre shows
+    exposure but no landfall entry.
+  </p>
 
   <h3>Map</h3>
   <p>
@@ -229,34 +239,38 @@
 
   <h3>Strip charts</h3>
   <p>
-    Each affected country then gets one strip chart comparing the three source
-    estimates at that country's highest active wind threshold. The full set —
+    Each affected country then gets one chart comparing the three source
+    estimates — horizontal bars for CHD, ADAM and GDACS — at that country's
+    highest active wind threshold. The full set —
     every threshold, plus the probabilistic wind-speed-probability map — lives
     on the online full-detail layout, shown for a set of historical storms on
     the <a href="alerts/index.html">example alerts</a> page. The charts read as
     follows; the x-axis is population exposed.
   </p>
   <ul>
-    <li><strong>Grey marks</strong> — comparable historical storms since 2002, for scale.</li>
-    <li><strong>Observed up to present</strong> — cumulative population already within the
-      wind radius based on the observed (post-landfall) track.</li>
-    <li><strong>CHD / ADAM / GDACS</strong> — individual source estimates (forecast plus observed combined). See data sources below.</li>
-    <li><strong>Forecasted final exposure</strong> (bold mark) — the maximum across available sources; the headline figure for this advisory.</li>
-    <li><strong>Estimated final exposure</strong> (bold mark, final updates only) — same as above but for final-update advisories where all exposure is observed.</li>
+    <li><strong>Bars</strong> — the individual source estimates (CHD / ADAM /
+      GDACS, forecast plus observed combined), CHD on top. The consolidated
+      headline in the summary table is the maximum across these bars.</li>
+    <li><strong>Small ticks</strong> — comparable historical storms since 2002,
+      for scale; only the largest few are named.</li>
+    <li><strong>Dashed line ("observed so far")</strong> — cumulative population
+      already within the wind radius based on the observed track.</li>
     <li><strong>Shaded strip</strong> — when present, the probabilistic WSP
       forecast spread rather than a single deterministic value: the range of
       outcomes the wind-speed-probability forecast considers plausible, drawn
       in the threshold colour.</li>
+    <li><strong>Return-period pill</strong> — a country whose exposure is
+      historically rare (&gt;3-year RP) carries a colour-coded pill on its
+      heading, matching the summary table's colours.</li>
   </ul>
   <div class="callout">
-    <p><strong>Comparing the bold mark to history.</strong> The grey historical
-    marks (and the return period) use the <strong>CHD-only</strong> estimate, because
-    CHD is the only source with a consistent record back to 2002. The bold
-    "final exposure" mark, however, is the <strong>maximum across sources</strong>, so
-    it is intentionally at least as high as any single source and is <em>not</em>
-    directly comparable to the grey CHD-only distribution. For a like-for-like
-    historical read, use the individual <strong>CHD</strong> tick (and the return
-    period); the bold mark is the consolidated operational headline.</p>
+    <p><strong>Comparing the bars to history.</strong> The historical ticks
+    (and the return period) use the <strong>CHD-only</strong> estimate, because
+    CHD is the only source with a consistent record back to 2002. The summary
+    table's headline, however, is the <strong>maximum across sources</strong>,
+    so it is intentionally at least as high as any single bar. For a
+    like-for-like historical read, use the <strong>CHD</strong> bar and the
+    return period.</p>
   </div>
 
   <h3>Maps on the full-detail pages</h3>
