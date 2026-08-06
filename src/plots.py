@@ -1082,6 +1082,12 @@ def _add_stacked_legends(ax, fig, groups: list[tuple[str, list]]) -> None:
     stack), regardless of entry counts. The off-axes legends are captured by
     savefig(bbox_inches="tight").
     """
+    # Equal-aspect axes are LETTERBOXED at draw time: a very wide map (Beryl's
+    # Atlantic crossing) ends up a fraction of the subplot cell's height. The
+    # legend offsets are fractions of the axes height, so they must be
+    # computed against the aspect-applied box — measured before apply_aspect
+    # they come out too small and the stacked legends overlap.
+    ax.apply_aspect()
     renderer = fig.canvas.get_renderer()
     ax_h = ax.get_window_extent(renderer=renderer).height
     y = 1.0
