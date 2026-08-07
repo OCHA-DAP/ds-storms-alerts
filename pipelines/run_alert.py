@@ -50,6 +50,7 @@ from src.plots import (
     StormMark,
     WspPdf,
     country_strip_chart,
+    country_strip_stack,
     track_plot_buffers,
     track_plot_exposure,
     track_plot_wsp,
@@ -992,6 +993,22 @@ def generate_alert_html(
             _total_pop = iso3_to_total_pop.get(iso3, 0)
             _rp_by_wsp = {w["wsp"]: w["rp"] for w in _toc_wsps}
 
+            # The historical SAMPLE is fixed across thresholds: every storm
+            # that caused any exposure here since 2002, with its exposure at
+            # each threshold (zero when it never reached those winds). Using
+            # one sample makes the three curves comparable — the 64 kt curve
+            # concentrates at zero precisely because most storms never bring
+            # hurricane-force winds, which is how extreme ones stand out.
+            _hist_sample: list[dict[int, int]] = []
+            _hs_by_id: dict[str, dict[int, int]] = {}
+            for _, _hr0 in hist_df[hist_df["iso3"] == iso3].iterrows():
+                _hs_by_id.setdefault(_hr0["atcf_id"], {})[
+                    int(_hr0["wind_speed_kt"])
+                ] = int(_hr0["pop_exposed"])
+            _hist_sample = [
+                d for d in _hs_by_id.values() if d.get(34, 0) > 0
+            ]
+
             # Pre-pass: gather every threshold's data and how much x-range it
             # needs, so the country's charts can share ONE x-scale and read as
             # an aligned small-multiples stack.
@@ -1027,6 +1044,14 @@ def generate_alert_html(
                     {"our": our_val, "ADAM": adam_val, "GDACS": gdacs_val}.items()
                     if v > 0
                 }
+                # A source claiming more people than the country has renders
+                # AT the total population — the chart's axis ends there. The
+                # summary table keeps the raw figures.
+                if _total_pop > 0:
+                    active_sources = {
+                        k: min(v, _total_pop)
+                        for k, v in active_sources.items()
+                    }
 
                 # WSP data for this country/storm/wsp — needed for x_max and PDF.
                 wsp_sub = wsp_exp_df[
@@ -1061,6 +1086,10 @@ def generate_alert_html(
             _shared_xmax = max(
                 (p["xmax_need"] for p in _wsp_payloads), default=0.0
             )
+            # The axis never runs past the country: when exposure reaches the
+            # total population, the scale ends exactly there.
+            if _total_pop > 0:
+                _shared_xmax = min(_shared_xmax, float(_total_pop))
             # Show the "total pop." marker only when it is on-scale; shared
             # across the stack, so it can only appear once (last chart).
             _chart_total_pop = (
@@ -1068,17 +1097,13 @@ def generate_alert_html(
                 else None
             )
 
+            _stack_panels: list[dict] = []
             for _pi, _pl in enumerate(_wsp_payloads):
                 wsp = _pl["wsp"]
                 wsp_color = _pl["wsp_color"]
                 obsv_floor = _pl["obsv_floor"]
                 active_sources = _pl["active_sources"]
                 wsp_sub = _pl["wsp_sub"]
-                # Email stack: tick numbers + total-pop marker only on the
-                # bottom chart — the shared scale makes one axis row enough.
-                # The full page keeps every axis: its captions between charts
-                # break the visual stack.
-                _show_axis = full or _pi == len(_wsp_payloads) - 1
                 _rp = _rp_by_wsp.get(wsp)
                 _rp_lbl = "" if _rp is None else (
                     "<1-year RP" if _rp < 1 else f"{_rp:.0f}-year RP"
@@ -1117,6 +1142,25 @@ def generate_alert_html(
                 else:
                     combined_marks = hist_marks
 
+                # The historical density uses the FIXED per-country sample
+                # (every storm with any exposure since 2002), this threshold's
+                # value per storm, zeros included — not the filtered ticks.
+                _hist_vals = [
+                    float(d.get(wsp, 0)) for d in _hist_sample
+                ]
+
+                if not full:
+                    # Email: the country's thresholds accumulate into ONE
+                    # stacked figure — shared x-scale, one axis row, one zero
+                    # line — appended after the loop. No forecast curve.
+                    _stack_panels.append({
+                        "wind_speed_kt": wsp,
+                        "marks": combined_marks,
+                        "hist_values": _hist_vals,
+                        "rp_label": _rp_lbl,
+                    })
+                    continue
+
                 pdf = None
                 if not wsp_sub.empty:
                     pdf = WspPdf(
@@ -1128,23 +1172,10 @@ def generate_alert_html(
                         color=wsp_color,
                     )
 
-                # The historical density uses the FULL set of past nonzero
-                # exposures, not the filtered tick marks — the tick filter
-                # drops crowded storms, which would bias the curve's shape.
-                _hist_vals = [
-                    float(v) for v in hist_df[
-                        (hist_df["iso3"] == iso3)
-                        & (hist_df["wind_speed_kt"] == wsp)
-                    ]["pop_exposed"]
-                    if v > 0
-                ]
-
-                # The email chart carries no forecast-probability curve (it
-                # confused more than it informed); the full page shows it in
-                # BOTH styles — density and exceedance — for comparison. No
-                # per-threshold heading: the in-chart marker names quantity,
-                # threshold and its return period.
-                if full and pdf is not None:
+                # Full page: standalone panels, since captions interleave.
+                # The forecast curve shows in BOTH styles — density and
+                # exceedance — for comparison.
+                if pdf is not None:
                     _cap_style = (
                         "font-size:0.78em;color:#7e8e8f;margin:14px 0 2px;"
                         "font-weight:600"
@@ -1162,22 +1193,28 @@ def generate_alert_html(
                             hist_values=_hist_vals,
                             total_pop=_chart_total_pop,
                             rp_label=_rp_lbl,
-                            show_axis=_show_axis,
+                            show_axis=True,
                         )
                         combined_blocks.append(
                             f"<p style='{_cap_style}'>{_cap}</p>{_img}"
                         )
                 else:
-                    combined_img = country_strip_chart(
+                    combined_blocks.append(country_strip_chart(
                         iso3, wsp, combined_marks,
                         x_max=_shared_xmax,
-                        pdf=pdf if full else None,
+                        pdf=None,
                         hist_values=_hist_vals,
                         total_pop=_chart_total_pop,
                         rp_label=_rp_lbl,
-                        show_axis=_show_axis,
-                    )
-                    combined_blocks.append(combined_img)
+                        show_axis=True,
+                    ))
+
+            if _stack_panels:
+                combined_blocks.append(country_strip_stack(
+                    iso3, _stack_panels,
+                    x_max=_shared_xmax,
+                    total_pop=_chart_total_pop,
+                ))
 
             # The country's WORST RP across thresholds rides its heading as a
             # colour pill — deliberately louder than the per-threshold RP
@@ -1191,7 +1228,7 @@ def generate_alert_html(
                 _pc = _rp_color(_c_best_rp) or "#ebeff0"
                 _c_lbl = (
                     "&lt;1-year RP" if _c_best_rp < 1
-                    else f"up to {_c_best_rp:.0f}-year RP"
+                    else f"{_c_best_rp:.0f}-year RP"
                 )
                 _c_pill = (
                     f" <span style='display:inline-block;padding:2px 12px;"
@@ -1273,9 +1310,12 @@ def generate_alert_html(
                 "<b style='color:#5e6a6b'>vertical ticks</b> are past storms "
                 "since 2002, the most similar ones in bold &middot; the "
                 "<b style='color:#5e6a6b'>shaded curve</b>, where shown, is "
-                "the distribution of those past storms' exposure (drawn only "
-                "when there are enough past storms to make a distribution "
-                "meaningful)"
+                "the exposure distribution of every storm to affect the "
+                "country since 2002 &mdash; the same storms at every wind "
+                "speed, so at 50 and 64 kt it concentrates near zero (most "
+                "storms never bring those winds there) and a storm out in "
+                "the tail is genuinely rare &middot; the scale never runs "
+                "past the country's total population"
                 + _howto_fcast +
                 " &middot; a <b style='color:#5e6a6b'>dashed line</b> marks "
                 "exposure already observed.</p>"

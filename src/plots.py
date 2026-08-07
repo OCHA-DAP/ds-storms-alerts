@@ -341,6 +341,26 @@ def _place_labels(
                     pos[k], clamped = c, True
             if not clamped:
                 break
+        # Deterministic finish for boundary pile-ups the alternation can
+        # leave unresolved (labels crowding an axis END now that scales stop
+        # exactly at the total population): sweep right-to-left enforcing
+        # separation under the right bound, then left-to-right above the
+        # left bound. Only genuine more-label-than-axis overflow survives
+        # this, and `droppable` handles that case.
+        for k in range(len(pos) - 1, -1, -1):
+            hi_b = x_hi - hw[idx[k]] - margin
+            if k < len(pos) - 1:
+                hi_b = min(
+                    hi_b, pos[k + 1] - (hw[idx[k]] + hw[idx[k + 1]] + pad)
+                )
+            pos[k] = min(pos[k], hi_b)
+        for k in range(len(pos)):
+            lo_b = x_lo + hw[idx[k]] + margin
+            if k > 0:
+                lo_b = max(
+                    lo_b, pos[k - 1] + (hw[idx[k - 1]] + hw[idx[k]] + pad)
+                )
+            pos[k] = max(pos[k], lo_b)
         return pos
 
     live = list(range(len(order)))
@@ -476,17 +496,40 @@ def _draw_tier(
                 ])
 
 
-# Minimum number of past storms (nonzero exposure at this country + threshold)
-# before a historical density curve is drawn. Below this a "distribution" is
-# two or three bumps pretending to be a shape — the ticks alone say more.
+# Minimum number of storms in the historical sample before a density curve is
+# drawn. The sample is every storm that caused ANY exposure in the country
+# since 2002 (see run_alert), the same set at every threshold — zeros
+# included — so the 64 kt curve honestly concentrates at zero when most
+# storms never brought hurricane-force winds. Below this many storms a
+# "distribution" is two or three bumps pretending to be a shape.
 _HIST_KDE_MIN_STORMS = 5
 
+_PANEL_AXES_SCALE = 0.72     # inches of axes height per data unit of y_top
 
-def _strip_chart(
-    title: str,
-    x_label: str,
-    marks: list[StormMark],
-    x_max: float | None = None,
+
+def _prep_panel(marks: list[StormMark], x_hi: float) -> dict:
+    """Split marks into tiers and decide the panel's vertical extent.
+
+    Marks beyond x_hi are dropped — their ax.text objects at large data
+    coordinates would expand bbox_inches="tight" to data scale. (Source dots
+    are clamped to the total population upstream, so only historical context
+    ticks can fall out of range.)
+    """
+    nonzero = [m for m in marks if m.value > 0 and m.value <= x_hi]
+    hist = [m for m in nonzero if m.short]
+    tall = [m for m in nonzero if not m.short]
+    obs = [m for m in tall if m.bold or m.bold_prefix]
+    srcs = [m for m in tall if not (m.bold or m.bold_prefix)]
+    y_top = 1.30 if (hist or obs) else 0.62
+    return {
+        "hist": hist, "obs": obs, "srcs": srcs, "y_top": y_top,
+        "axes_in": y_top * _PANEL_AXES_SCALE,
+    }
+
+
+def _draw_strip_panel(
+    fig, ax, prep: dict, *,
+    x_hi: float,
     pdf: WspPdf | None = None,
     pdf_fill_color: str = GREY_FILL,
     pdf_edge_color: str = GREY_EDGE,
@@ -498,104 +541,62 @@ def _strip_chart(
     wind_chip_kt: int | None = None,
     rp_label: str = "",
     show_axis: bool = True,
-) -> str:
-    """Compact source-comparison chart for one country + wind threshold.
+) -> None:
+    """Draw one strip panel onto an existing axes.
 
-    A country's charts share one x-scale (the caller passes the same x_max),
-    reading as a small-multiples stack: `show_axis=False` on all but the last
-    chart suppresses the tick numbers and the total-population marker, whose
-    single copy at the bottom serves the whole stack. `rp_label` prints the
-    threshold's own return period under the wind marker.
-
-    Everything lives on ONE axis — population exposed:
+    Shared by the single-panel chart (full-detail page) and the per-country
+    stack (email). Everything lives on ONE x-axis — population exposed:
 
     - source-estimate dots sit directly on the axis line, their labels in a
       row just below it (so they can't collide with storm names above);
     - historical storms are ticks rising from the axis with VERTICAL name
-      labels — vertical packs several times more names into the same width;
-    - `hist_values` (the FULL unfiltered set of past nonzero exposures, not
-      just the labelled ticks) draws a grey historical density curve — only
-      when there are at least _HIST_KDE_MIN_STORMS of them;
+      labels; the "most similar storms" are bold and never dropped;
+    - `hist_values` — the per-storm exposure of EVERY storm in the country's
+      historical sample, zeros included — draws the historical density curve
+      when the sample is big enough;
     - `pdf` draws the probabilistic (WSP) forecast along the baseline, in one
-      of two styles: ``"density"`` (the smoothed comonotone pmf, capped at the
-      total population) or ``"exceedance"`` (the chance that final exposure
-      exceeds each value — starts at 100% and falls to zero). The email passes
-      no pdf at all; both styles render on the full-detail page;
+      of two styles: ``"density"`` (the smoothed comonotone pmf, capped at
+      the total population) or ``"exceedance"`` (the chance that final
+      exposure exceeds each value). The email passes no pdf at all;
     - a dashed line marks exposure already observed;
-    - the chip in the top-right names the wind threshold, replacing both the
-      old x-axis label and the per-chart heading.
+    - plain bold text top-right names the wind threshold, its return period
+      in muted ink beneath;
+    - the left spine is the shared zero line: visible on every panel so a
+      stack reads as one plot.
     """
-    # Drop marks that would be outside the chart's x range — their ax.text
-    # objects at large data coordinates expand bbox_inches="tight" to data
-    # scale.
-    nonzero = [
-        m for m in marks
-        if m.value > 0 and (x_max is None or x_max <= 0 or m.value <= x_max * 1.05)
-    ]
-    has_pdf = pdf is not None and any(n > 0 for _, n in pdf.bands)
-    if not nonzero and not has_pdf and x_max is None:
-        return ""
-
-    plt.rcParams["font.family"] = "sans-serif"
-    plt.rcParams["font.sans-serif"] = _FONT_STACK
-
-    hist = [m for m in nonzero if m.short]
-    _tall = [m for m in nonzero if not m.short]
-    obs = [m for m in _tall if m.bold or m.bold_prefix]
-    srcs = [m for m in _tall if not (m.bold or m.bold_prefix)]
-
-    # Vertical layout (data units above the axis). The band for vertical
-    # storm-name labels dominates; charts with no history stay shallow.
+    hist, obs, srcs = prep["hist"], prep["obs"], prep["srcs"]
+    y_top, axes_in = prep["y_top"], prep["axes_in"]
     _y_strip = 0.52          # forecast-distribution curve (tall on purpose)
     _y_rug = 0.16            # historical ticks
     _y_rug_label = 0.22      # vertical names start here
-    y_top = 1.30 if (hist or obs) else 0.62
 
-    # Fixed physical furniture: the axes area scales with y_top, the space
-    # below the axis (dot labels, and on the last chart of a stack the tick
-    # numbers + total-population marker) is a constant depth.
-    axes_in = y_top * 0.72
-    below_in = 0.60 if show_axis else 0.28
-    fig_h = axes_in + below_in + 0.06
-    fig, ax = plt.subplots(figsize=(_FIG_W_IN, fig_h))
-    fig.patch.set_facecolor(PANEL)
-    fig.subplots_adjust(
-        left=0.02, right=0.98,
-        top=1 - 0.06 / fig_h, bottom=below_in / fig_h,
-    )
-
-    if x_max is not None and x_max > 0:
-        x_hi = x_max * 1.12
-    else:
-        x_hi = max([float(m.value) for m in nonzero] or [1.0]) * 1.20
     x_lo = 0.0
     ax.set_xlim(x_lo, x_hi)
     ax.set_ylim(0, y_top)
+    ax.set_facecolor(PANEL)
     # x in data coordinates, y in axes fraction — for everything below the
     # axis line.
     below = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
 
-    # Baseline curves. Historical first (grey, behind), then the forecast
+    # Baseline curves. Historical first (pale, behind), then the forecast
     # probabilistic curve if a pdf was passed — the email passes none.
     sigma = (x_hi - x_lo) * 0.022
     legend_rows: list[tuple[str, str, float]] = []  # (label, colour, alpha)
 
-    # Historical density: a curve over ALL past nonzero exposures at this
-    # country + threshold (hist_values, not the filtered ticks — the ticks
-    # drop storms that crowd each other, which would bias the shape). Only
-    # drawn when there are enough storms for a distribution to mean anything.
-    # Same total-population cap as the forecast curve: past exposure can't
-    # exceed the country, so mass near the cap reflects back rather than
-    # smearing past it. Tinted to the wind threshold, but paler than the
-    # forecast curve so the two stay tellable-apart on the full page.
-    hvals = [float(v) for v in (hist_values or []) if v > 0]
+    # Historical density over the FULL sample (zeros included): at high
+    # thresholds most storms contribute a zero, so the curve spikes at the
+    # origin — which is the point: it shows how exceptional nonzero
+    # hurricane-force exposure is. Capped at the total population like the
+    # forecast curve; tinted to the wind threshold but paler, so the two stay
+    # tellable-apart on the full page.
+    hvals = [max(0.0, float(v)) for v in (hist_values or [])]
     if len(hvals) >= _HIST_KDE_MIN_STORMS:
         h_cap = float(total_pop) if total_pop and total_pop > 0 else None
         h_sigma = (x_hi - x_lo) * 0.045
         h_end = min(max(hvals) + 3 * h_sigma, x_hi)
         if h_cap is not None:
             h_end = min(h_end, h_cap)
-        hgrid = np.linspace(0.0, h_end, 480)
+        hgrid = np.linspace(0.0, max(h_end, x_hi * 0.05), 480)
         w = 1.0 / len(hvals)
         hdens = _kernel_density(
             [(min(v, h_cap) if h_cap is not None else v, w) for v in hvals],
@@ -618,6 +619,7 @@ def _strip_chart(
     # reflection piles cap-adjacent mass at the cap rather than smearing it
     # past). "exceedance" integrates the same smoothed density into a survival
     # curve P(exposure >= x): anchored at 100% on the left, falling to zero.
+    has_pdf = pdf is not None and any(n > 0 for _, n in pdf.bands)
     if has_pdf:
         cap = float(total_pop) if total_pop and total_pop > 0 else None
         atoms = _pdf_atoms(pdf, cap)
@@ -740,9 +742,9 @@ def _strip_chart(
         ])
 
     # Wind-threshold marker, top-right: plain bold text in the threshold
-    # colour (the pill box was visual noise), replacing the x-axis label and
-    # the per-chart heading. Its own return period sits right under it in
-    # muted ink — offset in points, so the spacing survives any chart height.
+    # colour, replacing the x-axis label and the per-chart heading. Its own
+    # return period sits right under it in muted ink — offset in points, so
+    # the spacing survives any panel height.
     if wind_chip_kt is not None:
         c = _NHC_WIND_COLOR.get(int(wind_chip_kt), INK_2)
         ax.text(
@@ -771,20 +773,20 @@ def _strip_chart(
             [path_effects.withStroke(linewidth=2.0, foreground=PANEL)])
 
     ax.set_yticks([])
-    if title:
-        ax.set_title(title, fontsize=11, fontweight="bold", loc="left",
-                     color=INK)
-    ax.set_xlabel("")
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(_fmt_pop))
     # Big pad drops the numeric labels below the source-label row. On the
-    # non-final charts of a stack the numbers are suppressed entirely — the
+    # non-final panels of a stack the numbers are suppressed entirely — the
     # shared axis at the bottom of the stack carries them once.
     ax.tick_params(axis="x", which="both", length=3, color=LINE,
                    labelsize=7.5, labelcolor=INK_3, pad=22,
                    labelbottom=show_axis)
-    for side in ("top", "right", "left"):
+    for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     ax.spines["bottom"].set_color(LINE)
+    # The left spine IS the y-axis: a zero line every panel shares, so a
+    # stacked country reads as one plot with one origin.
+    ax.spines["left"].set_color(LINE)
+    ax.spines["left"].set_linewidth(1.2)
 
     if show_axis and total_pop is not None and total_pop > 0:
         xfrac = (total_pop - x_lo) / (x_hi - x_lo)
@@ -803,9 +805,139 @@ def _strip_chart(
                 annotation_clip=False,
             )
 
+
+def _resolve_x_hi(x_max: float | None, marks: list[StormMark]) -> float:
+    """The axis ends exactly at x_max — which the callers set to the total
+    population whenever exposure reaches it — rather than padding past it.
+    Fallback for unknown range: the largest mark plus a little headroom."""
+    if x_max is not None and x_max > 0:
+        return float(x_max)
+    return max([float(m.value) for m in marks if m.value > 0] or [1.0]) * 1.2
+
+
+def _strip_chart(
+    title: str,
+    x_label: str,
+    marks: list[StormMark],
+    x_max: float | None = None,
+    pdf: WspPdf | None = None,
+    pdf_fill_color: str = GREY_FILL,
+    pdf_edge_color: str = GREY_EDGE,
+    pdf_style: str = "density",
+    hist_values: list[float] | None = None,
+    hist_fill_color: str = GREY_FILL,
+    hist_edge_color: str = GREY_EDGE,
+    total_pop: int | None = None,
+    wind_chip_kt: int | None = None,
+    rp_label: str = "",
+    show_axis: bool = True,
+) -> str:
+    """One strip panel as a standalone image (the full-detail page's unit)."""
+    x_hi = _resolve_x_hi(x_max, marks)
+    prep = _prep_panel(marks, x_hi)
+    has_pdf = pdf is not None and any(n > 0 for _, n in pdf.bands)
+    if not (prep["hist"] or prep["obs"] or prep["srcs"]) and not has_pdf \
+            and x_max is None:
+        return ""
+
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = _FONT_STACK
+
+    axes_in = prep["axes_in"]
+    below_in = 0.60 if show_axis else 0.28
+    fig_h = axes_in + below_in + 0.06
+    fig, ax = plt.subplots(figsize=(_FIG_W_IN, fig_h))
+    fig.patch.set_facecolor(PANEL)
+    fig.subplots_adjust(
+        left=0.02, right=0.98,
+        top=1 - 0.06 / fig_h, bottom=below_in / fig_h,
+    )
+    _draw_strip_panel(
+        fig, ax, prep, x_hi=x_hi,
+        pdf=pdf, pdf_fill_color=pdf_fill_color,
+        pdf_edge_color=pdf_edge_color, pdf_style=pdf_style,
+        hist_values=hist_values, hist_fill_color=hist_fill_color,
+        hist_edge_color=hist_edge_color, total_pop=total_pop,
+        wind_chip_kt=wind_chip_kt, rp_label=rp_label, show_axis=show_axis,
+    )
+    if title:
+        ax.set_title(title, fontsize=11, fontweight="bold", loc="left",
+                     color=INK)
     # Retina render: 2x the pixel density of the declared display size, so
     # the charts stay sharp in the email (see _fig_to_img_tag).
     return _fig_to_img_tag(fig, alt=title, dpi=200, display_scale=2.0)
+
+
+# Vertical clearance between stacked panels: enough for the upper panel's
+# source labels (which hang ~0.24 in below its axis) plus breathing room.
+_STACK_GAP_IN = 0.42
+_STACK_BOTTOM_IN = 0.62   # last panel keeps tick numbers + total-pop note
+_STACK_TOP_IN = 0.06
+
+
+def country_strip_stack(
+    iso3: str,
+    panels: list[dict],
+    x_max: float | None = None,
+    total_pop: int | None = None,
+) -> str:
+    """A country's thresholds as ONE image: stacked panels on one shared
+    x-scale, tick numbers only on the bottom panel, and a single continuous
+    zero line joining every baseline on the left.
+
+    Each entry of `panels`: {"wind_speed_kt", "marks", "hist_values",
+    "rp_label"}. The email uses this; the full-detail page keeps standalone
+    panels because its captions interleave between charts.
+    """
+    if not panels:
+        return ""
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = _FONT_STACK
+
+    all_marks = [m for p in panels for m in p["marks"]]
+    x_hi = _resolve_x_hi(x_max, all_marks)
+    preps = [_prep_panel(p["marks"], x_hi) for p in panels]
+
+    n = len(panels)
+    fig_h = (
+        _STACK_TOP_IN + sum(pr["axes_in"] for pr in preps)
+        + _STACK_GAP_IN * (n - 1) + _STACK_BOTTOM_IN
+    )
+    fig = plt.figure(figsize=(_FIG_W_IN, fig_h))
+    fig.patch.set_facecolor(PANEL)
+
+    axs = []
+    y_cursor = fig_h - _STACK_TOP_IN
+    for panel, prep in zip(panels, preps, strict=True):
+        h = prep["axes_in"]
+        ax = fig.add_axes([0.02, (y_cursor - h) / fig_h, 0.96, h / fig_h])
+        axs.append(ax)
+        y_cursor -= h + _STACK_GAP_IN
+        wsp = int(panel["wind_speed_kt"])
+        _draw_strip_panel(
+            fig, ax, prep, x_hi=x_hi,
+            hist_values=panel.get("hist_values"),
+            hist_fill_color=wind_speed_fill(wsp),
+            hist_edge_color=wind_speed_color(wsp),
+            total_pop=total_pop,
+            wind_chip_kt=wsp,
+            rp_label=panel.get("rp_label", ""),
+            show_axis=(panel is panels[-1]),
+        )
+
+    # The continuous zero line: one vertical stroke in figure coordinates
+    # from the bottom panel's baseline to the top panel's crown, bridging the
+    # inter-panel gaps that per-axes spines cannot cross.
+    y0 = axs[-1].get_position().y0
+    y1 = axs[0].get_position().y1
+    fig.add_artist(Line2D(
+        [0.02, 0.02], [y0, y1], transform=fig.transFigure,
+        color=LINE, linewidth=1.2, zorder=10,
+    ))
+
+    return _fig_to_img_tag(
+        fig, alt=f"{iso3} population exposure", dpi=200, display_scale=2.0,
+    )
 
 
 def wind_speed_color(wind_speed_kt: int) -> str:
