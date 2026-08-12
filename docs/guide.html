@@ -35,6 +35,7 @@
   }
   .wrap {
     max-width: 760px;
+    width: calc(100% - 32px);
     margin: 28px auto;
     background: #fff;
     border-radius: 8px;
@@ -143,12 +144,12 @@
     </thead>
     <tbody>
       <tr>
-        <td><strong>Storm Alerts – All Countries</strong></td>
-        <td>Any storm alert is issued, anywhere in the world.</td>
+        <td><strong>Storm Alerts – LAC</strong> (recommended)</td>
+        <td>An alert includes at least one Caribbean, Central American, or South/North American country (excluding USA and Canada). The recommended default: nearly all humanitarian-relevant NHC activity falls in this region.</td>
       </tr>
       <tr>
-        <td><strong>Storm Alerts – LAC</strong></td>
-        <td>An alert includes at least one Caribbean, Central American, or South/North American country (excluding USA and Canada).</td>
+        <td><strong>Storm Alerts – All Countries</strong></td>
+        <td>Any storm alert is issued, anywhere in the world.</td>
       </tr>
       <tr>
         <td><strong>Storm Alerts – [Country]</strong></td>
@@ -278,9 +279,10 @@
       exposure; capped at the country's total population), and an exceedance
       curve giving the chance that final exposure exceeds each value,
       starting at 100% and falling to zero.</li>
-    <li><strong>Return-period pill</strong> — every country heading carries
-      its highest return period as a pill, colour-coded when notable
-      (&gt;3-year RP), matching the summary table.</li>
+    <li><strong>Return periods</strong> — each chart prints its own
+      threshold's return period under the wind-speed marker, and the country
+      heading carries the worst across thresholds as a pill, colour-coded
+      when notable (&gt;3-year RP), matching the summary table.</li>
   </ul>
   <div class="callout">
     <p><strong>Comparing the estimates to history.</strong> The historical ticks
@@ -360,9 +362,10 @@
     contributed and flags any that were not available.
   </p>
 
-  <h3>Subnational (admin 1) figures in the attached CSV</h3>
+  <h3>Subnational (admin 1) figures in the attached spreadsheet</h3>
   <p>
-    Each storm's attached CSV now includes <strong>subnational (admin 1)</strong> rows
+    Each storm's attached spreadsheet (Excel workbook) includes
+    <strong>subnational (admin 1)</strong> rows
     in addition to the country (admin 0) rows, distinguished by an
     <code>admin_level</code> column (with <code>pcode</code> and <code>adm1_name</code>
     identifying each unit). The three sources report subnational areas differently, so
