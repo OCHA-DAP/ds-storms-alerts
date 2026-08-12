@@ -11,10 +11,11 @@
     font-size: 15px;
     color: #222;
     background: #f5f6f7;
-    padding: 0 16px 60px;
+    padding: 0 0 60px;
   }
   .wrap {
     max-width: 760px;
+    width: calc(100% - 32px);
     margin: 24px auto;
     background: #fff;
     border-radius: 8px;
@@ -73,12 +74,19 @@
 </style>
 </head>
 <body>
-<nav style="background:#007eb5;padding:11px 20px;display:flex;align-items:center;gap:24px;font-family:system-ui,sans-serif;font-size:0.95em"><span style="color:#fff;font-weight:700;margin-right:auto">Storm Alerts</span><a href="index.html" style="color:#fff;text-decoration:none;font-weight:700;border-bottom:2px solid #fff;padding-bottom:1px">Subscribe</a><a href="guide.html" style="color:#fff;text-decoration:none;font-weight:400;opacity:0.85">About the alerts</a></nav>
+<nav style="background:#007eb5;padding:11px 20px;display:flex;align-items:center;gap:24px;font-family:system-ui,sans-serif;font-size:0.95em"><span style="color:#fff;font-weight:700;margin-right:auto">Storm Alerts</span><a href="index.html" style="color:#fff;text-decoration:none;font-weight:700;border-bottom:2px solid #fff;padding-bottom:1px">Subscribe</a><a href="guide.html" style="color:#fff;text-decoration:none;font-weight:400;opacity:0.85">About the alerts</a><a href="alerts/index.html" style="color:#fff;text-decoration:none;font-weight:400;opacity:0.85">Example alerts</a></nav>
 <div class="wrap">
   <h1>Storm Alerts</h1>
   <p class="lead">
-    Subscribe to receive email alerts when tropical storms are forecast to affect
-    specific countries. Select the regions or countries you want to hear about.
+    These are automated email alerts sent whenever the US National Hurricane
+    Center forecasts a tropical cyclone to affect a country you follow: how
+    many people are in the storm's path, when and where it is expected to make
+    landfall, and how it compares with past storms. Updates arrive up to four
+    times a day per storm as forecasts change, from the OCHA Centre for
+    Humanitarian Data &mdash; see
+    <a href="guide.html" style="color:#007eb5">About the alerts</a> for the
+    methodology and <a href="alerts/index.html" style="color:#007eb5">example
+    alerts</a> for what they look like.
   </p>
 
   <form method="post" action="https://listmonk-demo-afhcg8e2hde0fxca.eastus2-01.azurewebsites.net/subscription/form">
@@ -95,7 +103,7 @@
 
   <fieldset class="agg">
     <legend>Bundled subscriptions</legend>
-    <div class="agg-row"><label class="cb"><input type="checkbox" name="l" value="320b0ed8-d6ff-4bab-8802-74d496cbd49e" checked> All Countries</label><span class="agg-desc">Receive every storm alert, regardless of region.</span></div><div class="agg-row"><label class="cb"><input type="checkbox" name="l" value="2c8d8d56-2fc4-48b3-88ba-d8faa747af31"> LAC</label><span class="agg-desc">Receive alerts that include at least one Caribbean, Central American, or South/North American country (excl. USA &amp; Canada).</span></div>
+    <div class="agg-row"><label class="cb"><input type="checkbox" name="l" value="2c8d8d56-2fc4-48b3-88ba-d8faa747af31" checked> LAC</label><span class="agg-desc"><strong style="color:#007eb5">Recommended.</strong> Receive alerts that include at least one Caribbean, Central American, or South/North American country (excl. USA &amp; Canada).</span></div><div class="agg-row"><label class="cb"><input type="checkbox" name="l" value="320b0ed8-d6ff-4bab-8802-74d496cbd49e"> All Countries</label><span class="agg-desc">Receive every storm alert, regardless of region.</span></div>
   </fieldset>
 
   <fieldset>

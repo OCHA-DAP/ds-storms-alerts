@@ -35,6 +35,7 @@
   }
   .wrap {
     max-width: 760px;
+    width: calc(100% - 32px);
     margin: 28px auto;
     background: #fff;
     border-radius: 8px;
@@ -84,6 +85,7 @@
   <span class="nav-brand">Storm Alerts</span>
   <a href="index.html">Subscribe</a>
   <a href="guide.html" class="active">About the alerts</a>
+  <a href="alerts/index.html">Example alerts</a>
 </nav>
 
 <div class="wrap">
@@ -142,12 +144,12 @@
     </thead>
     <tbody>
       <tr>
-        <td><strong>Storm Alerts – All Countries</strong></td>
-        <td>Any storm alert is issued, anywhere in the world.</td>
+        <td><strong>Storm Alerts – LAC</strong> (recommended)</td>
+        <td>An alert includes at least one Caribbean, Central American, or South/North American country (excluding USA and Canada). The recommended default: nearly all humanitarian-relevant NHC activity falls in this region.</td>
       </tr>
       <tr>
-        <td><strong>Storm Alerts – LAC</strong></td>
-        <td>An alert includes at least one Caribbean, Central American, or South/North American country (excluding USA and Canada).</td>
+        <td><strong>Storm Alerts – All Countries</strong></td>
+        <td>Any storm alert is issued, anywhere in the world.</td>
       </tr>
       <tr>
         <td><strong>Storm Alerts – [Country]</strong></td>
@@ -202,9 +204,9 @@
   </p>
   <p>Return periods above 3 years are colour-coded in the summary table:</p>
   <div class="rp-legend">
-    <span><span class="rp-swatch" style="background:#fff9c4"></span> &gt;3-year RP</span>
-    <span><span class="rp-swatch" style="background:#ffe8cc"></span> &gt;5-year RP</span>
-    <span><span class="rp-swatch" style="background:#ffcccc"></span> &gt;10-year RP</span>
+    <span><span class="rp-swatch" style="background:#f6e9d4"></span> &gt;3-year RP</span>
+    <span><span class="rp-swatch" style="background:#e5bc7f"></span> &gt;5-year RP</span>
+    <span><span class="rp-swatch" style="background:#e7b5af"></span> &gt;10-year RP</span>
   </div>
   <div class="callout">
     <p><strong>Return periods use the CHD estimate only.</strong> Unlike the headline
@@ -216,33 +218,83 @@
     accordingly.)</p>
   </div>
 
-  <h3>Strip charts</h3>
+  <h3>Forecast landfall</h3>
   <p>
-    Below the summary table, each storm and country has a set of horizontal strip charts —
-    one per active wind speed. The x-axis shows population exposed.
+    When the forecast track's centre crosses a country, the storm section
+    opens with a landfall callout: where (nearest admin-1 unit), when (US
+    Eastern time, with lead time), and the storm's approximate intensity at
+    that point. This is computed from the NHC forecast track densified the
+    same way the wind swaths are built (30-minute monotone-cubic
+    interpolation), so it sits on the same curved path as the map — a
+    country brushed by the wind field but never crossed by the centre shows
+    exposure but no landfall entry.
+  </p>
+
+  <h3>Map</h3>
+  <p>
+    Below the summary table, each storm has one map: the observed and forecast
+    track, the observed and forecasted wind swaths (34 / 50 / 64 kt), and the
+    population exposed shaded by admin-1 unit (darker = more people exposed;
+    small island territories that would be invisible at map scale are shown as
+    a colour-coded ring). The shading uses the same consolidated 34 kt figures
+    as the attached spreadsheet.
+  </p>
+
+  <h3>Charts</h3>
+  <p>
+    Each affected country then gets a chart per wind threshold at which at
+    least one source reports exposure (no chart when none does), comparing
+    the three source estimates — CHD, ADAM and GDACS as labelled dots on a
+    shared scale. The probabilistic distributions and the
+    wind-speed-probability map live on the online full-detail layout, shown
+    for a set of historical storms on the
+    <a href="alerts/index.html">example alerts</a> page. The charts read as
+    follows; the x-axis is population exposed.
   </p>
   <ul>
-    <li><strong>Grey marks</strong> — comparable historical storms since 2002, for scale.</li>
-    <li><strong>Observed up to present</strong> — cumulative population already within the
-      wind radius based on the observed (post-landfall) track.</li>
-    <li><strong>CHD / ADAM / GDACS</strong> — individual source estimates (forecast plus observed combined). See data sources below.</li>
-    <li><strong>Forecasted final exposure</strong> (bold mark) — the maximum across available sources; the headline figure for this advisory.</li>
-    <li><strong>Estimated final exposure</strong> (bold mark, final updates only) — same as above but for final-update advisories where all exposure is observed.</li>
-    <li><strong>Shaded area</strong> — when present, shows the probabilistic WSP forecast distribution: the spread of possible outcomes rather than a single deterministic value.</li>
+    <li><strong>Dots on the axis</strong> — the individual source estimates
+      (CHD / ADAM / GDACS, forecast plus observed combined), labelled beneath
+      the axis. The consolidated headline in the summary table is the maximum
+      across them.</li>
+    <li><strong>Vertical ticks</strong> — historical storms since 2002, named
+      vertically where space allows. The most similar past storms (the ones
+      the summary table names) are <strong>bold</strong> and always
+      labelled.</li>
+    <li><strong>Shaded curve in the threshold colour</strong> — the exposure
+      distribution of every storm to affect the country since 2002, using the
+      <em>same</em> storm set at every threshold (zeros included). At 50 and
+      64 kt it therefore concentrates near zero — most storms never bring
+      those winds — which is exactly what makes a storm out in the tail
+      visibly extreme. Drawn only where the sample is big enough; the x-scale
+      is shared across a country's charts and never runs past its total
+      population, with a common zero line joining the stack.</li>
+    <li><strong>Dashed line ("observed so far")</strong> — cumulative population
+      already within the wind radius based on the observed track.</li>
+    <li><strong>Stronger-coloured curves (full-detail pages only)</strong> —
+      the forecast probabilistic distribution of exposure, derived from NHC's
+      wind-speed probabilities under a single-severity-draw model, shown two
+      ways: a probability density (its mass sums to one, which is why it
+      usually spikes near zero — a country whose highest wind-probability band
+      is 10% carries roughly 90% probability of little or no further
+      exposure; capped at the country's total population), and an exceedance
+      curve giving the chance that final exposure exceeds each value,
+      starting at 100% and falling to zero.</li>
+    <li><strong>Return periods</strong> — each chart prints its own
+      threshold's return period under the wind-speed marker, and the country
+      heading carries the worst across thresholds as a pill, colour-coded
+      when notable (&gt;3-year RP), matching the summary table.</li>
   </ul>
   <div class="callout">
-    <p><strong>Comparing the bold mark to history.</strong> The grey historical
-    marks (and the return period) use the <strong>CHD-only</strong> estimate, because
-    CHD is the only source with a consistent record back to 2002. The bold
-    "final exposure" mark, however, is the <strong>maximum across sources</strong>, so
-    it is intentionally at least as high as any single source and is <em>not</em>
-    directly comparable to the grey CHD-only distribution. For a like-for-like
-    historical read, use the individual <strong>CHD</strong> tick (and the return
-    period); the bold mark is the consolidated operational headline.</p>
+    <p><strong>Comparing the estimates to history.</strong> The historical ticks
+    (and the return period) use the <strong>CHD-only</strong> estimate, because
+    CHD is the only source with a consistent record back to 2002. The summary
+    table's headline, however, is the <strong>maximum across sources</strong>,
+    so it is intentionally at least as high as any single estimate. For a
+    like-for-like historical read, use the <strong>CHD</strong> dot and the
+    return period.</p>
   </div>
 
-  <h3>Maps</h3>
-  <p>Up to two maps are included per storm when the relevant data is available:</p>
+  <h3>Maps on the full-detail pages</h3>
   <ul>
     <li><strong>Deterministic forecast</strong> — the observed and forecast track with
       the wind-radius swaths (34 / 50 / 64 kt) along it: where tropical-storm- to
@@ -250,8 +302,17 @@
     <li><strong>Probabilistic forecast</strong> — the NHC wind-speed-probability (WSP)
       model at the 34 kt threshold: the probability of tropical-storm-force winds
       across the forecast, capturing track and intensity uncertainty rather than a
-      single line. Omitted when no WSP data is available for the advisory.</li>
+      single line. Omitted when no WSP data is available for the advisory.
+      Probability is shaded on a single blue ramp, pale to deep — deeper means
+      more likely.</li>
   </ul>
+  <p style="font-size:0.9em;color:#555">
+    Basemap tiles &copy; <a href="https://carto.com/attributions">CARTO</a>, data
+    &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>
+    contributors. If the tile service is unreachable when an alert is generated,
+    the maps fall back to a plain boundary background — the storm layers are
+    unaffected.
+  </p>
 
   <h3>Data sources</h3>
   <p>All exposure estimates are derived from <a href="https://www.nhc.noaa.gov">NOAA NHC</a>
@@ -301,9 +362,10 @@
     contributed and flags any that were not available.
   </p>
 
-  <h3>Subnational (admin 1) figures in the attached CSV</h3>
+  <h3>Subnational (admin 1) figures in the attached spreadsheet</h3>
   <p>
-    Each storm's attached CSV now includes <strong>subnational (admin 1)</strong> rows
+    Each storm's attached spreadsheet (Excel workbook) includes
+    <strong>subnational (admin 1)</strong> rows
     in addition to the country (admin 0) rows, distinguished by an
     <code>admin_level</code> column (with <code>pcode</code> and <code>adm1_name</code>
     identifying each unit). The three sources report subnational areas differently, so

@@ -1,4 +1,9 @@
+import functools
+import hashlib
 import logging
+import math
+import os
+import pickle
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -15,6 +20,60 @@ from src import fm_matching as fm
 logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(
     logging.WARNING
 )
+
+# ---------------------------------------------------------------------------
+# Optional disk cache over the fetch layer. Off unless the environment sets
+# STORMS_ALERTS_DATA_CACHE to a directory; then every decorated fetch pickles
+# its result keyed on (function, arguments), and a repeat call with the same
+# arguments reads the pickle instead of the DB / blob storage. This exists for
+# pipelines/generate_showcase.py, which re-renders the same five historical
+# advisories after every layout change — the data behind them never changes,
+# only the plots do. The production Databricks job never sets the variable, so
+# it always reads live.
+#
+# Each hit unpickles a fresh object, so callers can mutate results safely.
+# ---------------------------------------------------------------------------
+
+
+def _cache_token(v: object) -> object:
+    """A stable, repr-able stand-in for one argument in the cache key.
+
+    Engines are identity-irrelevant (same stage, same data) and their repr
+    carries a memory address, so they collapse to a constant.
+    """
+    if isinstance(v, Engine):
+        return "<engine>"
+    if isinstance(v, set):
+        return tuple(_cache_token(x) for x in sorted(v))
+    if isinstance(v, (list, tuple)):
+        return tuple(_cache_token(x) for x in v)
+    return repr(v)
+
+
+def _disk_cached(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        cache_dir = os.environ.get("STORMS_ALERTS_DATA_CACHE")
+        if not cache_dir:
+            return fn(*args, **kwargs)
+        payload = repr((
+            fn.__name__,
+            tuple(_cache_token(a) for a in args),
+            tuple(sorted((k, _cache_token(v)) for k, v in kwargs.items())),
+        ))
+        digest = hashlib.sha256(payload.encode()).hexdigest()[:24]
+        path = Path(cache_dir) / f"{fn.__name__}-{digest}.pkl"
+        if path.exists():
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        out = fn(*args, **kwargs)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        with open(tmp, "wb") as f:
+            pickle.dump(out, f)
+        tmp.replace(path)
+        return out
+    return wrapper
 
 _FIELDMAPS_ADM1_URL = (
     "https://data.fieldmaps.io/edge-matched/humanitarian/intl/adm1_polygons.parquet"
@@ -45,6 +104,7 @@ _WIND_SPEEDS_KT = (34, 50, 64)
 _ISSUED_OFFSET_HOURS = 3
 
 
+@_disk_cached
 def fetch_fcast_exposure(engine: Engine, issued_time: datetime) -> pd.DataFrame:
     """Forecast-only exposure for all wind speeds at issued_time (admin0, > 0).
 
@@ -69,6 +129,7 @@ def fetch_fcast_exposure(engine: Engine, issued_time: datetime) -> pd.DataFrame:
         return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
 
 
+@_disk_cached
 def fetch_current_obsv_exposure(
     engine: Engine, atcf_ids: list[str], issued_time: datetime
 ) -> pd.DataFrame:
@@ -105,6 +166,7 @@ def fetch_current_obsv_exposure(
         return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
 
 
+@_disk_cached
 def fetch_gdacs_current_exposure(
     engine: Engine, atcf_ids: list[str], issued_time: datetime
 ) -> pd.DataFrame:
@@ -146,6 +208,7 @@ def fetch_gdacs_current_exposure(
         return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
 
 
+@_disk_cached
 def fetch_adam_current_exposure(
     engine: Engine, atcf_ids: list[str], issued_time: datetime
 ) -> pd.DataFrame:
@@ -202,6 +265,7 @@ def fetch_adam_current_exposure(
 # ─────────────────────────────────────────────────────────────────────
 
 
+@_disk_cached
 def fetch_fcast_exposure_adm1(
     engine: Engine, issued_time: datetime
 ) -> pd.DataFrame:
@@ -229,6 +293,7 @@ def fetch_fcast_exposure_adm1(
         return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
 
 
+@_disk_cached
 def fetch_current_obsv_exposure_adm1(
     engine: Engine, atcf_ids: list[str], issued_time: datetime
 ) -> pd.DataFrame:
@@ -296,6 +361,7 @@ def _fetch_gdacs_adm1_window_rows(
         return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
 
 
+@_disk_cached
 def fetch_gdacs_current_exposure_adm1(
     engine: Engine, atcf_ids: list[str], issued_time: datetime
 ) -> pd.DataFrame:
@@ -356,6 +422,7 @@ def _fetch_adam_adm1_window_rows(
         return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
 
 
+@_disk_cached
 def fetch_adam_current_exposure_adm1(
     engine: Engine, atcf_ids: list[str], issued_time: datetime
 ) -> pd.DataFrame:
@@ -382,6 +449,7 @@ def fetch_adam_current_exposure_adm1(
         "n_src_admins": "n_adam_admins", "src_admins": "adam_admins"})[cols]
 
 
+@_disk_cached
 def fetch_lookup_caveats(engine: Engine, iso3s: list[str]) -> pd.DataFrame:
     """Caveat rows for the workbook's `caveats` tab, scoped to `iso3s`:
     country-level adm1 policy (adm0 rows carrying a caveat) plus the per-unit
@@ -415,6 +483,7 @@ def fetch_lookup_caveats(engine: Engine, iso3s: list[str]) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)[cols]
 
 
+@_disk_cached
 def fetch_fm_names(engine: Engine, iso3s: list[str]) -> dict[str, str]:
     """Return {fm_pcode: fm_name} at admin_level=1, UNIONed across the GDACS and
     ADAM lookups (scoped to `iso3s`).
@@ -446,6 +515,7 @@ def fetch_fm_names(engine: Engine, iso3s: list[str]) -> dict[str, str]:
     return {r[0]: r[1] for r in rows if r[1] is not None}
 
 
+@_disk_cached
 def fetch_adam_historical_exposure(
     engine: Engine, iso3s: list[str], exclude_atcf_ids: list[str]
 ) -> pd.DataFrame:
@@ -488,6 +558,7 @@ def fetch_adam_historical_exposure(
     return df[cols].reset_index(drop=True)
 
 
+@_disk_cached
 def fetch_gdacs_historical_exposure(
     engine: Engine, iso3s: list[str], exclude_atcf_ids: list[str]
 ) -> pd.DataFrame:
@@ -531,6 +602,7 @@ def fetch_gdacs_historical_exposure(
     return df[cols].reset_index(drop=True)
 
 
+@_disk_cached
 def fetch_track_geo(
     engine: Engine, atcf_ids: list[str], issued_time: datetime
 ) -> gpd.GeoDataFrame:
@@ -540,32 +612,87 @@ def fetch_track_geo(
       - observed points: leadtime=0 rows with valid_time <= issued_time
       - forecast points: rows where issued_time = :issued_time and leadtime > 0
 
-    Returns GeoDataFrame with columns: atcf_id, valid_time, kind, geometry.
-    kind is one of 'observed' or 'forecast'.
+    Returns GeoDataFrame with columns: atcf_id, valid_time, wind_speed, kind,
+    geometry. kind is one of 'observed' or 'forecast'; wind_speed is max
+    sustained wind in kt (may be NaN on some points).
     """
     if not atcf_ids:
         return gpd.GeoDataFrame(
-            columns=["atcf_id", "valid_time", "kind", "geometry"], crs="EPSG:4326"
+            columns=["atcf_id", "valid_time", "wind_speed", "kind", "geometry"],
+            crs="EPSG:4326",
         )
     sql = text("""
-        SELECT atcf_id, valid_time, geometry, 'observed' AS kind
+        SELECT atcf_id, valid_time, wind_speed, geometry, 'observed' AS kind
         FROM storms.nhc_tracks_geo
         WHERE atcf_id IN :atcf_ids
           AND leadtime = 0
           AND valid_time <= :issued_time
         UNION ALL
-        SELECT atcf_id, valid_time, geometry, 'forecast' AS kind
+        SELECT atcf_id, valid_time, wind_speed, geometry, 'forecast' AS kind
         FROM storms.nhc_tracks_geo
         WHERE atcf_id IN :atcf_ids
           AND issued_time = :issued_time
           AND leadtime > 0
     """).bindparams(bindparam("atcf_ids", expanding=True))
-    return gpd.read_postgis(
+    gdf = gpd.read_postgis(
         sql,
         engine,
         params={"atcf_ids": atcf_ids, "issued_time": issued_time},
         geom_col="geometry",
     )
+    return _drop_implausible_observed(gdf)
+
+
+# A tropical cyclone's translation speed tops out around 90 km/h even in
+# extreme high-latitude accelerations; anything faster is a garbled position.
+# Real case: Erin 2025's 06Z Aug 16 advisory carried a 0-hour position 7.3
+# degrees west of the 00Z one (~127 km/h implied motion, 4x its actual speed),
+# which drew the observed track teleporting ahead of the forecast and back.
+_MAX_TRACK_SPEED_KMH = 110
+
+
+def _drop_implausible_observed(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Drop observed track points implying impossible storm motion.
+
+    Greedy forward pass per storm: a point is kept only if the great-circle
+    speed from the last KEPT point is plausible, so a single bad fix is
+    dropped while the good points on either side of it survive. Upstream data
+    error, but one that can land in a live advisory — the alert should degrade
+    to a slightly shorter observed line, not a teleporting one.
+    """
+    if gdf.empty:
+        return gdf
+    keep_idx: list = []
+    obs = gdf[gdf["kind"] == "observed"]
+    for _, storm in obs.groupby("atcf_id"):
+        storm = storm.sort_values("valid_time")
+        last = None
+        for idx, r in storm.iterrows():
+            if r.geometry is None or r.geometry.is_empty:
+                continue
+            if last is not None:
+                dt_h = (
+                    r["valid_time"] - last["valid_time"]
+                ).total_seconds() / 3600
+                if dt_h <= 0:
+                    continue
+                # Equirectangular distance is plenty at these scales.
+                dx = (r.geometry.x - last.geometry.x) * math.cos(
+                    math.radians((r.geometry.y + last.geometry.y) / 2))
+                dy = r.geometry.y - last.geometry.y
+                km = math.hypot(dx, dy) * 111.32
+                if km / dt_h > _MAX_TRACK_SPEED_KMH:
+                    logging.getLogger(__name__).warning(
+                        f"Dropping implausible observed position for "
+                        f"{r['atcf_id']} at {r['valid_time']} "
+                        f"({km / dt_h:.0f} km/h implied motion)"
+                    )
+                    continue
+            keep_idx.append(idx)
+            last = r
+    return gdf[
+        (gdf["kind"] != "observed") | gdf.index.isin(keep_idx)
+    ].copy()
 
 
 def _load_one_adm1(iso3: str) -> gpd.GeoDataFrame:
@@ -635,6 +762,7 @@ def _load_one_adm0(iso3: str) -> gpd.GeoDataFrame:
         return dissolved[["iso_3", "geometry"]].reset_index(drop=True)
 
 
+@_disk_cached
 def load_adm0_boundaries(iso3s: list[str]) -> gpd.GeoDataFrame:
     """Load adm0 boundaries from the dedicated adm0 blob (pre-dissolved).
 
@@ -649,11 +777,13 @@ def load_adm0_boundaries(iso3s: list[str]) -> gpd.GeoDataFrame:
     ).reset_index(drop=True)
 
 
+@_disk_cached
 def load_background_countries() -> gpd.GeoDataFrame:
     """Load Natural Earth 110m world country outlines for map backgrounds."""
     return gpd.read_parquet(_NE_BACKGROUND_PATH)
 
 
+@_disk_cached
 def load_adm1_boundaries(iso3s: list[str]) -> gpd.GeoDataFrame:
     """Load adm1 boundaries for the given iso3s.
 
@@ -664,6 +794,7 @@ def load_adm1_boundaries(iso3s: list[str]) -> gpd.GeoDataFrame:
     return _load_adm1_from_cache(iso3s)
 
 
+@_disk_cached
 def fetch_wsp_fcastonly_exposure(
     engine: Engine, atcf_ids: list[str], issued_time: datetime
 ) -> pd.DataFrame:
@@ -707,6 +838,7 @@ def fetch_wsp_fcastonly_exposure(
         return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
 
 
+@_disk_cached
 def fetch_wsp_fcastonly_polygons(
     engine: Engine,
     atcf_ids: list[str],
@@ -751,6 +883,7 @@ def fetch_wsp_fcastonly_polygons(
     )
 
 
+@_disk_cached
 def fetch_prev_any_pairs(
     engine: Engine, issued_time: datetime, prev_hours: int = 6
 ) -> list[dict]:
@@ -820,6 +953,7 @@ def fetch_prev_any_pairs(
     return [{"atcf_id": r[0], "iso3": r[1], "name": r[2], "season": r[3]} for r in rows]
 
 
+@_disk_cached
 def fetch_buffers(
     engine: Engine, atcf_ids: list[str], issued_time: datetime
 ) -> gpd.GeoDataFrame:
@@ -860,6 +994,7 @@ def fetch_buffers(
     )
 
 
+@_disk_cached
 def fetch_historical_obsv_exposure(
     engine: Engine, iso3s: list[str], exclude_atcf_ids: list[str]
 ) -> pd.DataFrame:
@@ -893,6 +1028,7 @@ def fetch_historical_obsv_exposure(
     return df[~df["atcf_id"].isin(exclude_atcf_ids)].reset_index(drop=True)
 
 
+@_disk_cached
 def fetch_all_prior_country_pairs(
     engine: Engine, atcf_ids: list[str], issued_time: datetime
 ) -> dict[tuple[str, str], datetime]:
@@ -925,6 +1061,7 @@ def fetch_all_prior_country_pairs(
     return {(r[0], r[1]): r[2] for r in rows}
 
 
+@_disk_cached
 def fetch_admin_population(engine: Engine, iso3s: list[str]) -> dict[str, int]:
     """Return {iso3: total_pop} from storms.admin_population at admin_level=0."""
     if not iso3s:
@@ -938,6 +1075,7 @@ def fetch_admin_population(engine: Engine, iso3s: list[str]) -> dict[str, int]:
     return {r[0]: int(r[1]) for r in rows}
 
 
+@_disk_cached
 def fetch_active_storm_meta(engine: Engine, issued_time: datetime) -> list[dict]:
     """Return basic metadata for all storms with forecast track data at issued_time.
 
@@ -961,6 +1099,7 @@ def fetch_active_storm_meta(engine: Engine, issued_time: datetime) -> list[dict]
     return [{"atcf_id": r[0], "name": r[1], "season": r[2]} for r in rows]
 
 
+@_disk_cached
 def fetch_all_monitored_countries(engine: Engine) -> list[str]:
     """Return all iso3s that have ever had non-zero exposure in either fcast table."""
     sql = text("""
