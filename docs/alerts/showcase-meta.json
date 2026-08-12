@@ -1,0 +1,26 @@
+{
+ "beryl-2024": {
+  "storms": "Beryl",
+  "n_countries": 16
+ },
+ "melissa-2025": {
+  "storms": "Melissa",
+  "n_countries": 14
+ },
+ "oscar-2024": {
+  "storms": "Oscar",
+  "n_countries": 7
+ },
+ "monitoring-2026": {
+  "storms": "Cristobal, One-C",
+  "n_countries": 0
+ },
+ "erin-2025": {
+  "storms": "Erin",
+  "n_countries": 18
+ },
+ "jerry-2025": {
+  "storms": "Jerry, Priscilla",
+  "n_countries": 18
+ }
+}

@@ -22,6 +22,7 @@ import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.transforms as mtransforms
+import shapely.geometry as sgeom
 from matplotlib.lines import Line2D
 
 from src.landfall import densify_observed, densify_track
@@ -1257,17 +1258,59 @@ def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
                 )
 
 
+# Zoom-out-to-land parameters. A storm in the open ocean otherwise renders as
+# a track on a featureless blue rectangle with no way to tell WHERE it is.
+_MIN_LAND_DEG2 = 2.5      # ~3x Puerto Rico: an identifiable landmass
+_MAX_VIEW_SPAN_DEG = 70.0  # give up past basin scale — some storms ARE remote
+_LAND_GROW_FACTOR = 1.35
+
+
+def _expand_to_land(
+    xlim: tuple[float, float],
+    ylim: tuple[float, float],
+    land_gdf: gpd.GeoDataFrame | None,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Grow an open-ocean view until an identifiable landmass is in frame.
+
+    Expands symmetrically around the view centre until at least
+    _MIN_LAND_DEG2 square degrees of land intersect the view (Natural Earth
+    110m carries no specks, so any hit is a recognisable coastline), or the
+    view reaches _MAX_VIEW_SPAN_DEG across. Views that already show land are
+    returned untouched.
+    """
+    if land_gdf is None or land_gdf.empty:
+        return xlim, ylim
+    for _ in range(12):
+        view = sgeom.box(xlim[0], ylim[0], xlim[1], ylim[1])
+        land = float(land_gdf.geometry.intersection(view).area.sum())
+        span = max(xlim[1] - xlim[0], ylim[1] - ylim[0])
+        if land >= _MIN_LAND_DEG2 or span >= _MAX_VIEW_SPAN_DEG:
+            break
+        cx = (xlim[0] + xlim[1]) / 2
+        cy = (ylim[0] + ylim[1]) / 2
+        hx = (xlim[1] - xlim[0]) / 2 * _LAND_GROW_FACTOR
+        hy = (ylim[1] - ylim[0]) / 2 * _LAND_GROW_FACTOR
+        xlim = (cx - hx, cx + hx)
+        # Latitude stays on the globe; longitude is unclamped (NHC basins
+        # sit comfortably inside -180..0).
+        ylim = (max(cy - hy, -85.0), min(cy + hy, 85.0))
+    return xlim, ylim
+
+
 def _forecast_view_bbox(
     tracks: gpd.GeoDataFrame,
     forecast_features: gpd.GeoDataFrame,
     obsv_buffers: gpd.GeoDataFrame | None = None,
     n_tail_obs: int = 5,
+    land_gdf: gpd.GeoDataFrame | None = None,
 ) -> tuple[tuple[float, float], tuple[float, float]]:
     """Bbox covering the forecast features plus the most recent N observed points.
 
     obsv_buffers: when provided and there is no forecast, these are added to the
     bbox so the map shows the full cross-sectional width of the current
     wind-radius rings rather than just the tight bounding box of the track tail.
+    land_gdf: when provided, an open-ocean view is expanded until some
+    identifiable landmass is in frame (see _expand_to_land).
     """
     obs = tracks[tracks["kind"] == "observed"].sort_values("valid_time")
     obs_tail = obs.tail(n_tail_obs)
@@ -1288,7 +1331,9 @@ def _forecast_view_bbox(
     maxy = max(p.total_bounds[3] for p in pieces)
     pad_x = (maxx - minx) * 0.10 or 2
     pad_y = (maxy - miny) * 0.10 or 2
-    return (minx - pad_x, maxx + pad_x), (miny - pad_y, maxy + pad_y)
+    return _expand_to_land(
+        (minx - pad_x, maxx + pad_x), (miny - pad_y, maxy + pad_y), land_gdf,
+    )
 
 
 def _finalize_map(ax, title: str, legend_handles: list) -> None:
@@ -1430,7 +1475,8 @@ def track_plot_exposure(
         return ""
     _fcast_buf = buffers[buffers["kind"] == "forecast"] if not buffers.empty else buffers
     _obsv_buf = buffers[buffers["kind"] == "observed"] if not buffers.empty else buffers
-    xlim, ylim = _forecast_view_bbox(tracks, _fcast_buf, obsv_buffers=_obsv_buf)
+    xlim, ylim = _forecast_view_bbox(
+        tracks, _fcast_buf, obsv_buffers=_obsv_buf, land_gdf=background)
     fig, ax = plt.subplots(figsize=(9, 6))
     ax.set_aspect("equal")
     ax.set_xlim(*xlim)
@@ -1588,7 +1634,8 @@ def track_plot_buffers(
         return ""
     _fcast_buf = buffers[buffers["kind"] == "forecast"] if not buffers.empty else buffers
     _obsv_buf = buffers[buffers["kind"] == "observed"] if not buffers.empty else buffers
-    xlim, ylim = _forecast_view_bbox(tracks, _fcast_buf, obsv_buffers=_obsv_buf)
+    xlim, ylim = _forecast_view_bbox(
+        tracks, _fcast_buf, obsv_buffers=_obsv_buf, land_gdf=background)
     fig, ax = plt.subplots(figsize=(9, 6))
     # Aspect and limits first, in that order: contextily picks its tile extent
     # from the axes' current view, and set_aspect can move the limits. Fetching
@@ -1651,7 +1698,7 @@ def track_plot_wsp(
     # (otherwise this would render as a bare track/buffer plot with no probabilities).
     if tracks.empty or wsp.empty:
         return ""
-    xlim, ylim = _forecast_view_bbox(tracks, wsp)
+    xlim, ylim = _forecast_view_bbox(tracks, wsp, land_gdf=background)
     fig, ax = plt.subplots(figsize=(9, 6))
     # Aspect and limits first, in that order: contextily picks its tile extent
     # from the axes' current view, and set_aspect can move the limits. Fetching
