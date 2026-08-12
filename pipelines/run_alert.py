@@ -160,6 +160,26 @@ def _oxford(items: list[str]) -> str:
     return f"{', '.join(items[:-1])}, and {items[-1]}"
 
 
+_BASIN_BY_PREFIX = {
+    "AL": "Atlantic",
+    "EP": "Eastern Pacific",
+    "CP": "Central Pacific",
+}
+
+
+def _basin_chip(atcf_id: str) -> str:
+    """Muted basin tag for a storm heading — "where in the world is this",
+    answered before the reader even looks at the map."""
+    basin = _BASIN_BY_PREFIX.get(str(atcf_id)[:2].upper(), "")
+    if not basin:
+        return ""
+    return (
+        f" <span style='font-size:0.6em;font-weight:600;color:#7e8e8f;"
+        f"letter-spacing:0.05em;text-transform:uppercase;margin-left:8px;"
+        f"vertical-align:3px;white-space:nowrap'>{basin} basin</span>"
+    )
+
+
 def _build_subject(
     issued_time_dt: datetime, storm_names: list[str], prefix: str = ""
 ) -> str:
@@ -421,7 +441,9 @@ def generate_monitoring_html(
         aid_buffers = buffers_gdf[buffers_gdf["atcf_id"] == aid]
         aid_wsp_poly = wsp_gdf[wsp_gdf["atcf_id"] == aid]
 
-        parts: list[str] = [f"<h2 style='{_H2}'>{storm_label}</h2>"]
+        parts: list[str] = [
+            f"<h2 style='{_H2}'>{storm_label}{_basin_chip(aid)}</h2>"
+        ]
         buf_m = track_plot_buffers(
             aid_tracks, aid_buffers, background_gdf, storm_name=storm_label,
         )
@@ -1322,7 +1344,8 @@ def generate_alert_html(
             )
         if storm_map_parts or country_sections:
             sections.append(
-                f"<h2 id='storm-{aid}' style='{_H2}'>{storm_h2_label}</h2>"
+                f"<h2 id='storm-{aid}' style='{_H2}'>{storm_h2_label}"
+                f"{_basin_chip(aid)}</h2>"
                 + landfall_html
                 + "".join(storm_map_parts)
                 + howto_html

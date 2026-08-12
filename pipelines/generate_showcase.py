@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import logging
 import os
 import re
@@ -46,7 +47,12 @@ import ocha_stratus as stratus
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipelines.run_alert import _build_subject, generate_alert_html  # noqa: E402
+from pipelines.run_alert import (  # noqa: E402
+    _build_subject,
+    generate_alert_html,
+    generate_monitoring_html,
+)
+from src.data import fetch_active_storm_meta  # noqa: E402
 from src.preview import PreviewUnavailable, render_with_template  # noqa: E402
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".showcase-cache"
@@ -55,6 +61,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 DOCS_ALERTS = Path(__file__).resolve().parent.parent / "docs" / "alerts"
+# Per-entry generation metadata (storms, country count), merged across runs so
+# a partial --only run can still rebuild the full index page.
+META_PATH = DOCS_ALERTS / "showcase-meta.json"
 
 # One entry per example. `blurb` is the browser-page description — why this
 # storm is in the set. The advisory chosen is the peak-exposure one (checked in
@@ -97,6 +106,18 @@ SHOWCASE = [
         ),
     },
     {
+        "slug": "monitoring-2026",
+        "issued": "2026-08-12T15",
+        "title": "Cyclone monitoring — August 2026",
+        "monitoring": True,
+        "blurb": (
+            "The no-exposure variant: two storms active in the open ocean "
+            "(one Atlantic, one Central Pacific), neither forecast to affect "
+            "a monitored country — maps zoom out until an identifiable "
+            "landmass anchors the view."
+        ),
+    },
+    {
         "slug": "jerry-2025",
         "issued": "2025-10-09T12",
         "title": "Tropical Storm Jerry — October 2025",
@@ -125,19 +146,30 @@ _NAV = (
 
 def _banner(entry: dict, variant: str) -> str:
     """The strip above each example page: what it is + the layout switcher."""
-    other = (
-        f'<a href="{entry["slug"]}-full.html" style="color:#007eb5">'
-        "switch to the full-detail version</a>"
-        if variant == "email"
-        else f'<a href="{entry["slug"]}.html" style="color:#007eb5">'
-        "switch to the email version</a>"
-    )
-    label = (
-        "Condensed email layout (the real email also carries a spreadsheet "
-        "attachment with all admin-1 figures)."
-        if variant == "email"
-        else "Full-detail layout — everything the condensed email links out to."
-    )
+    if variant == "monitoring":
+        other = ""
+        label = (
+            "Cyclone monitoring layout — sent when storms are active but "
+            "none is forecast to affect a monitored country."
+        )
+    elif variant == "email":
+        other = (
+            f'<a href="{entry["slug"]}-full.html" style="color:#007eb5">'
+            "switch to the full-detail version</a>"
+        )
+        label = (
+            "Condensed email layout (the real email also carries a "
+            "spreadsheet attachment with all admin-1 figures)."
+        )
+    else:
+        other = (
+            f'<a href="{entry["slug"]}.html" style="color:#007eb5">'
+            "switch to the email version</a>"
+        )
+        label = (
+            "Full-detail layout — everything the condensed email links "
+            "out to."
+        )
     return (
         '<div style="background:#fff8e1;border-bottom:1px solid #e0d5a8;'
         "padding:10px 20px;font-family:system-ui,sans-serif;font-size:0.9em;"
@@ -207,12 +239,22 @@ def main() -> None:
         t = datetime.strptime(entry["issued"], "%Y-%m-%dT%H")
         logger.info(f"=== {entry['slug']} ({entry['issued']})")
 
-        logger.info("  condensed email layout...")
-        result = generate_alert_html(engine, t, full=False)
-        if result is None:
-            logger.warning(f"  no exposure at {entry['issued']} — skipping")
-            continue
-        body_email, iso3s, names = result
+        if entry.get("monitoring"):
+            active_meta = fetch_active_storm_meta(engine, t)
+            if not active_meta:
+                logger.warning(f"  no active storms at {entry['issued']} — skipping")
+                continue
+            body_email = generate_monitoring_html(engine, t, active_meta)
+            iso3s, names = [], sorted(
+                str(m["name"]).strip().title() for m in active_meta
+            )
+        else:
+            logger.info("  condensed email layout...")
+            result = generate_alert_html(engine, t, full=False)
+            if result is None:
+                logger.warning(f"  no exposure at {entry['issued']} — skipping")
+                continue
+            body_email, iso3s, names = result
         subject = _build_subject(t, names)
         try:
             page_email = render_with_template(
@@ -222,18 +264,20 @@ def main() -> None:
         except PreviewUnavailable as exc:
             logger.warning(f"  Listmonk unavailable ({exc}); plain wrapper")
             page_email = _plain_wrap(body_email, subject)
-        page_email = _inject_after_body(page_email, _NAV + _banner(entry, "email"))
+        _variant = "monitoring" if entry.get("monitoring") else "email"
+        page_email = _inject_after_body(page_email, _NAV + _banner(entry, _variant))
         (DOCS_ALERTS / f"{entry['slug']}.html").write_text(
             page_email, encoding="utf-8")
 
-        logger.info("  full-detail layout...")
-        body_full, _, _ = generate_alert_html(engine, t, full=True)
-        page_full = _inject_after_body(
-            _plain_wrap(body_full, f"{subject} — full detail"),
-            _NAV + _banner(entry, "full"),
-        )
-        (DOCS_ALERTS / f"{entry['slug']}-full.html").write_text(
-            page_full, encoding="utf-8")
+        if not entry.get("monitoring"):
+            logger.info("  full-detail layout...")
+            body_full, _, _ = generate_alert_html(engine, t, full=True)
+            page_full = _inject_after_body(
+                _plain_wrap(body_full, f"{subject} — full detail"),
+                _NAV + _banner(entry, "full"),
+            )
+            (DOCS_ALERTS / f"{entry['slug']}-full.html").write_text(
+                page_full, encoding="utf-8")
 
         rows.append({
             **entry,
@@ -242,31 +286,53 @@ def main() -> None:
         })
         logger.info(f"  done: storms={names} countries={len(iso3s)}")
 
+    # Merge this run's metadata over previous runs', then rebuild the index
+    # for every SHOWCASE entry that has ever been generated — so a partial
+    # --only run still produces a complete index page.
+    meta = {}
+    if META_PATH.exists():
+        meta = json.loads(META_PATH.read_text())
+    for r in rows:
+        meta[r["slug"]] = {
+            "storms": r["storms"], "n_countries": r["n_countries"],
+        }
+    META_PATH.write_text(json.dumps(meta, indent=1))
+    rows = [
+        {**e, **meta[e["slug"]]} for e in SHOWCASE if e["slug"] in meta
+    ]
+
     # ---- browser page ----------------------------------------------------
-    if args.only:
-        logger.info(f"Wrote {len(rows)} example(s); index.html untouched (--only)")
-        return
-    cards = "".join(
-        f"""
+    def _card(r: dict) -> str:
+        if r.get("monitoring"):
+            count = "no exposure (monitoring email)"
+            full_btn = ""
+        else:
+            count = (
+                f"{r['n_countries']} "
+                f"countr{'y' if r['n_countries'] == 1 else 'ies'}"
+            )
+            full_btn = (
+                f'<a href="{r["slug"]}-full.html" style="display:inline-block;'
+                f'color:#007eb5;text-decoration:none;padding:7px 14px;'
+                f'font-size:0.9em">Full detail version</a>'
+            )
+        return f"""
   <div style="background:#fff;border:1px solid #e2e2e2;border-radius:8px;
               padding:18px 22px;margin:0 0 14px">
     <div style="font-size:1.1em;font-weight:600;margin-bottom:2px">
       {html.escape(r["title"])}</div>
     <div style="font-size:0.85em;color:#888;margin-bottom:8px">
       Advisory {r["issued"]} UTC &middot; storms in this email:
-      {html.escape(r["storms"])} &middot; {r["n_countries"]}
-      countr{"y" if r["n_countries"] == 1 else "ies"}</div>
+      {html.escape(r["storms"])} &middot; {count}</div>
     <p style="margin:0 0 12px;color:#444;font-size:0.95em;line-height:1.5">
       {html.escape(r["blurb"])}</p>
     <a href="{r["slug"]}.html" style="display:inline-block;background:#007eb5;
        color:#fff;text-decoration:none;padding:7px 14px;border-radius:4px;
        font-size:0.9em;font-weight:600">Email version</a>
-    <a href="{r["slug"]}-full.html" style="display:inline-block;color:#007eb5;
-       text-decoration:none;padding:7px 14px;font-size:0.9em">
-       Full detail version</a>
+    {full_btn}
   </div>"""
-        for r in rows
-    )
+
+    cards = "".join(_card(r) for r in rows)
     index = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -279,11 +345,12 @@ def main() -> None:
 <div style="max-width:760px;margin:0 auto;padding:28px 20px">
   <h1 style="font-size:1.5em;color:#007eb5;margin:0 0 8px">Example alerts</h1>
   <p style="color:#555;line-height:1.6;margin:0 0 6px">
-    Five historical advisories re-rendered in the current alert layout — from
-    the busiest email the system produces down to the quietest. Each comes in
-    two versions: the <strong>condensed email</strong> subscribers receive, and
-    the <strong>full-detail</strong> page it links to (all maps and
-    per-threshold exposure charts).</p>
+    Historical advisories re-rendered in the current alert layout — from the
+    busiest email the system produces down to the quietest, plus the
+    no-exposure <strong>cyclone monitoring</strong> format. Exposure alerts
+    come in two versions: the <strong>condensed email</strong> subscribers
+    receive, and the <strong>full-detail</strong> page it links to (all maps
+    and per-threshold exposure charts).</p>
   <p style="color:#555;line-height:1.6;margin:0 0 22px">
     These pages exist to collect feedback on the format —
     <a href="https://github.com/OCHA-DAP/ds-storms-alerts/issues"
