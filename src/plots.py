@@ -2,6 +2,7 @@ import base64
 import html as _html
 import io
 import logging
+import math
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,6 +11,8 @@ from zoneinfo import ZoneInfo
 import geopandas as gpd
 import matplotlib
 import numpy as np
+import pandas as pd
+import shapely.affinity as saffinity
 matplotlib.use("Agg")  # must be before pyplot import
 from PIL import Image
 
@@ -23,6 +26,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.transforms as mtransforms
 import shapely.geometry as sgeom
+import shapely.ops as sops
 from matplotlib.lines import Line2D
 
 from src.landfall import densify_observed, densify_track
@@ -1023,7 +1027,7 @@ _BASEMAP_MAX_ZOOM = 6
 _basemap_failed = False
 
 
-def _add_basemap(ax) -> bool:
+def _add_basemap(ax, enabled: bool = True) -> bool:
     """Draw a tile basemap under the storm layers. True if it landed.
 
     Tiles are a network call inside a scheduled job, so failure has to be
@@ -1031,9 +1035,13 @@ def _add_basemap(ax) -> bool:
     packaged Natural Earth polygons, which need no network. The first failure
     latches, so one outage doesn't mean a timeout per map for the rest of the
     run.
+
+    enabled=False skips the fetch without latching: a dateline-straddling view
+    extends past ±180°, outside the Web Mercator tile domain, so those maps go
+    straight to the offline layer while every other map keeps its tiles.
     """
     global _basemap_failed
-    if _basemap_failed:
+    if not enabled or _basemap_failed:
         return False
     try:
         import contextily as ctx
@@ -1258,6 +1266,109 @@ def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
                 )
 
 
+# ---------------------------------------------------------------------------
+# Antimeridian handling. Track and polygon data arrive in [-180, 180]; a storm
+# crossing 180° (Lala, CP012026) flips longitude sign between consecutive
+# points, which — fed raw into min/max view bounds and interpolation — drew a
+# whole-globe map with the track sweeping the long way round. The maps instead
+# work in a continuous-longitude frame local to the storm: storm layers are
+# shifted onto the 360°-branch nearest the track, the world background is
+# replicated at ±360° so whichever branch the view lands on has coastlines,
+# and tile fetching is skipped (the view extends past ±180°, outside the Web
+# Mercator domain) in favour of the offline layer.
+# ---------------------------------------------------------------------------
+
+
+def _dateline_mode(tracks: gpd.GeoDataFrame) -> bool:
+    """True when any single storm's path jumps >180° in longitude between
+    consecutive fixes — the signature of an antimeridian crossing stored in
+    [-180, 180] coordinates."""
+    pts = tracks[~(tracks.geometry.is_empty | tracks.geometry.isna())]
+    for _, storm in pts.groupby("atcf_id"):
+        lons = storm.sort_values("valid_time").geometry.x.to_numpy()
+        if len(lons) >= 2 and np.any(np.abs(np.diff(lons)) > 180.0):
+            return True
+    return False
+
+
+def _track_lon_center(tracks: gpd.GeoDataFrame) -> float:
+    """Longitude of the track's midpoint on its continuous branch."""
+    pts = tracks[~(tracks.geometry.is_empty | tracks.geometry.isna())]
+    lo, hi = math.inf, -math.inf
+    for _, storm in pts.groupby("atcf_id"):
+        lons = storm.sort_values("valid_time").geometry.x.to_numpy()
+        if not len(lons):
+            continue
+        cont = np.unwrap(lons.astype(float), period=360.0)
+        lo, hi = min(lo, cont.min()), max(hi, cont.max())
+    return (lo + hi) / 2.0 if lo <= hi else 0.0
+
+
+def _shift_to_branch(
+    gdf: gpd.GeoDataFrame | None, center: float
+) -> gpd.GeoDataFrame | None:
+    """Copy of a storm-layer gdf with each geometry moved onto the 360°-branch
+    nearest `center`, so points and polygons end up on the same continuous
+    branch as the track and min/max bounds and drawing behave. Per-geometry,
+    not per-layer: an observed swath left behind near Hawaii and a forecast
+    point past the dateline shift by different amounts.
+
+    A geometry more than 180° wide can't sit on one branch as stored. Two
+    causes, told apart by a repair attempt: a legitimately dateline-crossing
+    polygon saved in raw [-180, 180] coordinates (NHC WSP bands split at the
+    line; Alaska with its trans-dateline Aleutians) becomes narrow again once
+    vertices are remapped into [0, 360) — keep it; a polygon whose vertices
+    genuinely sweep the globe (an upstream wind buffer interpolated through
+    the ±180 flip) stays wide under any remap — DROP it, because one such
+    smear painted into the view is worse than a missing swath. Safe only in
+    dateline mode: the [0, 360) remap would shred polygons crossing Greenwich.
+    """
+    if gdf is None or gdf.empty:
+        return gdf
+
+    def _fix(g):
+        if g is None or g.is_empty:
+            return g
+        minx, _, maxx, _ = g.bounds
+        if maxx - minx > 180.0:
+            g = sops.transform(lambda x, y: (np.mod(x, 360.0), y), g)
+            minx, _, maxx, _ = g.bounds
+            if maxx - minx > 180.0:
+                return None
+        k = round((center - g.centroid.x) / 360.0)
+        return saffinity.translate(g, xoff=360.0 * k) if k else g
+
+    out = gdf.copy()
+    out.geometry = out.geometry.apply(_fix)
+    bad = out.geometry.isna()
+    if bad.any():
+        logging.getLogger(__name__).warning(
+            f"Dropped {int(bad.sum())} globe-spanning geometry(ies) from a "
+            f"storm layer near the antimeridian (irreparable raw crossing)."
+        )
+        out = out[~bad].copy()
+    return out
+
+
+def _replicate_world(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """A background layer plus ±360°-shifted copies, so a view on any branch
+    finds land under it; the axes limits clip the two unused copies. Only for
+    draw/intersection layers — the copies would corrupt any per-row lookup."""
+    if gdf is None or gdf.empty:
+        return gdf
+    parts = [gdf]
+    for off in (-360.0, 360.0):
+        c = gdf.copy()
+        c.geometry = c.geometry.apply(
+            lambda g, off=off: saffinity.translate(g, xoff=off)
+            if g is not None and not g.is_empty else g
+        )
+        parts.append(c)
+    return gpd.GeoDataFrame(
+        pd.concat(parts, ignore_index=True), crs=gdf.crs
+    )
+
+
 # Zoom-out-to-land parameters. A storm in the open ocean otherwise renders as
 # a track on a featureless blue rectangle with no way to tell WHERE it is.
 _MIN_LAND_DEG2 = 2.5      # ~3x Puerto Rico: an identifiable landmass
@@ -1291,8 +1402,9 @@ def _expand_to_land(
         hx = (xlim[1] - xlim[0]) / 2 * _LAND_GROW_FACTOR
         hy = (ylim[1] - ylim[0]) / 2 * _LAND_GROW_FACTOR
         xlim = (cx - hx, cx + hx)
-        # Latitude stays on the globe; longitude is unclamped (NHC basins
-        # sit comfortably inside -180..0).
+        # Latitude stays on the globe; longitude is unclamped on purpose —
+        # a dateline-straddling view legitimately extends past ±180 in the
+        # continuous frame, and the background layer is replicated there.
         ylim = (max(cy - hy, -85.0), min(cy + hy, 85.0))
     return xlim, ylim
 
@@ -1473,6 +1585,14 @@ def track_plot_exposure(
     """
     if tracks.empty:
         return ""
+    dateline = _dateline_mode(tracks)
+    if dateline:
+        center = _track_lon_center(tracks)
+        tracks = _shift_to_branch(tracks, center)
+        buffers = _shift_to_branch(buffers, center)
+        adm1_gdf = _shift_to_branch(adm1_gdf, center)
+        adm0_gdf = _shift_to_branch(adm0_gdf, center)
+        background = _replicate_world(background)
     _fcast_buf = buffers[buffers["kind"] == "forecast"] if not buffers.empty else buffers
     _obsv_buf = buffers[buffers["kind"] == "observed"] if not buffers.empty else buffers
     xlim, ylim = _forecast_view_bbox(
@@ -1481,7 +1601,7 @@ def track_plot_exposure(
     ax.set_aspect("equal")
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
-    on_basemap = _add_basemap(ax)
+    on_basemap = _add_basemap(ax, enabled=not dateline)
     _draw_countries(ax, background, on_basemap)
 
     # Swath fills go down FIRST; the exposure choropleth (also zorder 2, drawn
@@ -1632,6 +1752,13 @@ def track_plot_buffers(
     """
     if tracks.empty:
         return ""
+    dateline = _dateline_mode(tracks)
+    if dateline:
+        center = _track_lon_center(tracks)
+        tracks = _shift_to_branch(tracks, center)
+        buffers = _shift_to_branch(buffers, center)
+        adm1_gdf = _shift_to_branch(adm1_gdf, center)
+        background = _replicate_world(background)
     _fcast_buf = buffers[buffers["kind"] == "forecast"] if not buffers.empty else buffers
     _obsv_buf = buffers[buffers["kind"] == "observed"] if not buffers.empty else buffers
     xlim, ylim = _forecast_view_bbox(
@@ -1643,7 +1770,7 @@ def track_plot_buffers(
     ax.set_aspect("equal")
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
-    on_basemap = _add_basemap(ax)
+    on_basemap = _add_basemap(ax, enabled=not dateline)
     _draw_countries(ax, background, on_basemap)
     if adm1_gdf is not None and not adm1_gdf.empty:
         _draw_adm1(ax, adm1_gdf, on_basemap)
@@ -1698,6 +1825,14 @@ def track_plot_wsp(
     # (otherwise this would render as a bare track/buffer plot with no probabilities).
     if tracks.empty or wsp.empty:
         return ""
+    dateline = _dateline_mode(tracks)
+    if dateline:
+        center = _track_lon_center(tracks)
+        tracks = _shift_to_branch(tracks, center)
+        buffers = _shift_to_branch(buffers, center)
+        wsp = _shift_to_branch(wsp, center)
+        adm1_gdf = _shift_to_branch(adm1_gdf, center)
+        background = _replicate_world(background)
     xlim, ylim = _forecast_view_bbox(tracks, wsp, land_gdf=background)
     fig, ax = plt.subplots(figsize=(9, 6))
     # Aspect and limits first, in that order: contextily picks its tile extent
@@ -1706,7 +1841,7 @@ def track_plot_wsp(
     ax.set_aspect("equal")
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
-    on_basemap = _add_basemap(ax)
+    on_basemap = _add_basemap(ax, enabled=not dateline)
     _draw_countries(ax, background, on_basemap)
     if adm1_gdf is not None and not adm1_gdf.empty:
         _draw_adm1(ax, adm1_gdf, on_basemap)
