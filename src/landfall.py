@@ -15,7 +15,11 @@ lat/lon on a 30-minute grid, linear for wind speed, mirroring
 point sits on the same curved path the swaths on the map are built from.
 The full ocha-lens dependency chain (xarray, netcdf4, ...) is deliberately
 not imported for these thirty lines; if lens's interpolation ever changes,
-change this to match.
+change this to match. Known deliberate divergence: lens (>= 0.5.0) unwraps
+longitudes across the antimeridian and wraps the result back to [-180, 180];
+this mirror also unwraps but RETURNS the continuous branch, because the
+plotting code draws in that frame — landfall containment wraps back at the
+point of use (``wrap_lon``).
 """
 
 from __future__ import annotations

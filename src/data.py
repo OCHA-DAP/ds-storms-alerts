@@ -931,11 +931,17 @@ def fetch_prev_any_pairs(
             WHERE e.admin_level = :admin_level AND e.pop_exposed > 0
         ),
         prev_wsp_times AS (
+            -- Later of the two candidate zips REGARDLESS of exposure,
+            -- mirroring fetch_wsp_fcastonly_exposure's selection: ~9% of
+            -- zips are all-zero for a storm, and conditioning the zip
+            -- choice on pop > 0 would fall back to the earlier zip and
+            -- claim exposure the previous alert (which used the later
+            -- zip) never listed — double-firing the final notice. The
+            -- pop > 0 test belongs on the pair join below, not here.
             SELECT atcf_id, MAX(issued_time) AS prev_time
             FROM storms.nhc_wsp_fcastonly_exposure
             WHERE issued_time IN (:prev_wsp_exact, :prev_wsp_offset)
               AND admin_level = :admin_level
-              AND pop_exposed > 0
             GROUP BY atcf_id
         ),
         wsp_pairs AS (

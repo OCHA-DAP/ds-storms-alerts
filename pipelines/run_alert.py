@@ -1740,7 +1740,9 @@ def _email_readme_blocks(storm_label, aid, issued_time_dt, adm0, adm1, cav):
           "column flags GDACS/ADAM boundary-matching caveats for that unit."),
         B("bullet", "is_final_alert = TRUE marks the last update for that "
           "country: the storm no longer poses a forecast threat there and the "
-          "figures reflect observed exposure."),
+          "figures reflect observed exposure. Final updates are only issued "
+          "for countries with observed exposure; for a near miss (forecast "
+          "only, storm never arrived) the country's updates simply stop."),
     ]
 
 
