@@ -15,7 +15,11 @@ lat/lon on a 30-minute grid, linear for wind speed, mirroring
 point sits on the same curved path the swaths on the map are built from.
 The full ocha-lens dependency chain (xarray, netcdf4, ...) is deliberately
 not imported for these thirty lines; if lens's interpolation ever changes,
-change this to match.
+change this to match. Known deliberate divergence: lens (>= 0.5.0) unwraps
+longitudes across the antimeridian and wraps the result back to [-180, 180];
+this mirror also unwraps but RETURNS the continuous branch, because the
+plotting code draws in that frame — landfall containment wraps back at the
+point of use (``wrap_lon``).
 """
 
 from __future__ import annotations
@@ -195,6 +199,13 @@ def nearest_adm1_name(point: Point, adm1_gdf: gpd.GeoDataFrame, iso3: str) -> st
     sub = sub[sub["adm1_name"].notna()]
     if sub.empty:
         return ""
-    dists = sub.geometry.distance(point)
+    # Distance on all three 360°-branches of the point: near the antimeridian
+    # a naive distance can be ~360° to a unit that is physically adjacent
+    # (the Aleutians are split across the seam), which would name a unit on
+    # the far side of the country instead.
+    dists = None
+    for dx in (0.0, 360.0, -360.0):
+        d = sub.geometry.distance(Point(point.x + dx, point.y))
+        dists = d if dists is None else np.minimum(dists, d)
     name = sub.loc[dists.idxmin(), "adm1_name"]
     return str(name) if name else ""
