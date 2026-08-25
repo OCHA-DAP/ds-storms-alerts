@@ -1039,9 +1039,19 @@ def _add_basemap(ax, enabled: bool = True) -> bool:
     enabled=False skips the fetch without latching: a dateline-straddling view
     extends past ±180°, outside the Web Mercator tile domain, so those maps go
     straight to the offline layer while every other map keeps its tiles.
+
+    The same out-of-domain guard is applied to the axes' own limits: a
+    non-dateline storm near ±180 can still get view padding past the edge,
+    and letting that request reach contextily would raise — latching
+    _basemap_failed and silently stripping tiles from every LATER map in the
+    run. Out-of-domain views skip without latching; only real fetch failures
+    (network, provider) latch.
     """
     global _basemap_failed
-    if not enabled or _basemap_failed:
+    xlo, xhi = ax.get_xlim()
+    if not enabled or xlo < -180.0 or xhi > 180.0:
+        return False
+    if _basemap_failed:
         return False
     try:
         import contextily as ctx
@@ -1291,6 +1301,27 @@ def _dateline_mode(tracks: gpd.GeoDataFrame) -> bool:
     return False
 
 
+def _has_wide_geometry(*gdfs: gpd.GeoDataFrame | None) -> bool:
+    """True when any storm-layer geometry spans more than 180° of longitude
+    as stored — a dateline-crossing polygon saved in raw [-180, 180]
+    coordinates, or an upstream globe smear. Engages dateline handling even
+    when the advisory's own track stays entirely on one side of the line
+    (the swath reaches across before the centre does). Only for storm layers:
+    country layers legitimately hold trans-dateline units (Alaska) that must
+    not flip every USA map into dateline mode.
+    """
+    for gdf in gdfs:
+        if gdf is None or gdf.empty:
+            continue
+        for g in gdf.geometry:
+            if g is None or g.is_empty:
+                continue
+            minx, _, maxx, _ = g.bounds
+            if maxx - minx > 180.0:
+                return True
+    return False
+
+
 def _track_lon_center(tracks: gpd.GeoDataFrame) -> float:
     """Longitude of the track's midpoint on its continuous branch."""
     pts = tracks[~(tracks.geometry.is_empty | tracks.geometry.isna())]
@@ -1339,8 +1370,14 @@ def _shift_to_branch(
         return saffinity.translate(g, xoff=360.0 * k) if k else g
 
     out = gdf.copy()
+    # Rows that arrive with no geometry pass through _fix unchanged; only a
+    # geometry that BECAME None (repair refused) counts as dropped, so a
+    # null-geometry row upstream doesn't trigger a bogus globe-spanning
+    # warning or get silently removed here (downstream draw code already
+    # filters empties).
+    pre_null = out.geometry.isna() | out.geometry.is_empty
     out.geometry = out.geometry.apply(_fix)
-    bad = out.geometry.isna()
+    bad = out.geometry.isna() & ~pre_null
     if bad.any():
         logging.getLogger(__name__).warning(
             f"Dropped {int(bad.sum())} globe-spanning geometry(ies) from a "
@@ -1585,7 +1622,7 @@ def track_plot_exposure(
     """
     if tracks.empty:
         return ""
-    dateline = _dateline_mode(tracks)
+    dateline = _dateline_mode(tracks) or _has_wide_geometry(buffers)
     if dateline:
         center = _track_lon_center(tracks)
         tracks = _shift_to_branch(tracks, center)
@@ -1752,7 +1789,7 @@ def track_plot_buffers(
     """
     if tracks.empty:
         return ""
-    dateline = _dateline_mode(tracks)
+    dateline = _dateline_mode(tracks) or _has_wide_geometry(buffers)
     if dateline:
         center = _track_lon_center(tracks)
         tracks = _shift_to_branch(tracks, center)
@@ -1825,7 +1862,7 @@ def track_plot_wsp(
     # (otherwise this would render as a bare track/buffer plot with no probabilities).
     if tracks.empty or wsp.empty:
         return ""
-    dateline = _dateline_mode(tracks)
+    dateline = _dateline_mode(tracks) or _has_wide_geometry(buffers, wsp)
     if dateline:
         center = _track_lon_center(tracks)
         tracks = _shift_to_branch(tracks, center)

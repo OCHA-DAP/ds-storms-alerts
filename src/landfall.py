@@ -199,6 +199,13 @@ def nearest_adm1_name(point: Point, adm1_gdf: gpd.GeoDataFrame, iso3: str) -> st
     sub = sub[sub["adm1_name"].notna()]
     if sub.empty:
         return ""
-    dists = sub.geometry.distance(point)
+    # Distance on all three 360°-branches of the point: near the antimeridian
+    # a naive distance can be ~360° to a unit that is physically adjacent
+    # (the Aleutians are split across the seam), which would name a unit on
+    # the far side of the country instead.
+    dists = None
+    for dx in (0.0, 360.0, -360.0):
+        d = sub.geometry.distance(Point(point.x + dx, point.y))
+        dists = d if dists is None else np.minimum(dists, d)
     name = sub.loc[dists.idxmin(), "adm1_name"]
     return str(name) if name else ""
