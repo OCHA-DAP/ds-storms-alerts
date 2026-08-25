@@ -888,14 +888,27 @@ def fetch_prev_any_pairs(
     engine: Engine, issued_time: datetime, prev_hours: int = 6
 ) -> list[dict]:
     """Return (atcf_id, iso3, name, season) rows for storm-country pairs that had
-    non-zero forecasted exposure at ANY wind speed in the advisory issued in the
-    previous 6-hour window [issued_time - prev_hours, issued_time).
+    non-zero forecasted exposure at ANY wind speed in the PREVIOUS advisory
+    (issued_time - prev_hours).
 
-    Using a single 6-hour window (matching the NHC advisory cadence) means the
-    final-update notice fires exactly once — in the run immediately after a
+    Looking at exactly one previous advisory (matching the NHC cadence) means
+    the final-update notice fires exactly once — in the run immediately after a
     storm's last advisory — rather than repeatedly for the following 7 days.
+
+    The track and WSP tables key that advisory differently. Track exposure is
+    issued on the advisory hour, so a [prev, issued_time) window finds it. WSP
+    zips are usually published ~_ISSUED_OFFSET_HOURS earlier than the matching
+    advisory (fetch_wsp_fcastonly_exposure matches issued_time OR the offset
+    and keeps the later), so the previous advisory's WSP must be matched at
+    (prev) OR (prev - offset) — the same two-candidate rule, shifted back one
+    advisory. The old [issued_time - 6h, issued_time) window could never
+    contain an offset WSP: it only re-found the CURRENT advisory's WSP, which
+    subtracts out as still-current, so a pair whose last exposure was
+    WSP-only silently ended with no final update (Cristina/NIC, 2026-06-10).
     """
     cutoff = issued_time - timedelta(hours=prev_hours)
+    prev_wsp_exact = cutoff
+    prev_wsp_offset = cutoff - timedelta(hours=_ISSUED_OFFSET_HOURS)
     sql = text("""
         WITH prev_track_times AS (
             SELECT atcf_id, MAX(issued_time) AS prev_time
@@ -920,8 +933,7 @@ def fetch_prev_any_pairs(
         prev_wsp_times AS (
             SELECT atcf_id, MAX(issued_time) AS prev_time
             FROM storms.nhc_wsp_fcastonly_exposure
-            WHERE issued_time < :issued_time
-              AND issued_time >= :cutoff
+            WHERE issued_time IN (:prev_wsp_exact, :prev_wsp_offset)
               AND admin_level = :admin_level
               AND pop_exposed > 0
             GROUP BY atcf_id
@@ -947,6 +959,8 @@ def fetch_prev_any_pairs(
             {
                 "issued_time": issued_time,
                 "cutoff": cutoff,
+                "prev_wsp_exact": prev_wsp_exact,
+                "prev_wsp_offset": prev_wsp_offset,
                 "admin_level": _ADMIN_LEVEL,
             },
         ).fetchall()
