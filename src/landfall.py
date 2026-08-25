@@ -39,6 +39,11 @@ class Landfall:
     already_inland: bool    # centre already over this country at forecast start
 
 
+def wrap_lon(lon: float) -> float:
+    """Back to [-180, 180) from any continuous-longitude branch."""
+    return (lon + 180.0) % 360.0 - 180.0
+
+
 def saffir_simpson(wind_kt: float | None) -> str:
     """Category label for a max sustained wind in kt."""
     if wind_kt is None or math.isnan(wind_kt):
@@ -65,8 +70,12 @@ def densify_track(
     time grid: (times, lons, lats, winds). winds is None when unavailable.
 
     Mirrors ocha-lens interpolate_track: PCHIP for lat/lon when 3+ points,
-    linear otherwise; linear for wind. No antimeridian handling — this system
-    alerts on NHC (Atlantic / East Pacific) storms, which don't cross it.
+    linear otherwise; linear for wind. Longitudes are unwrapped onto a
+    continuous branch before interpolating and returned that way (possibly
+    outside [-180, 180]) — a Central Pacific storm crossing the antimeridian
+    (Lala, CP012026) otherwise interpolates through the ±180 sign flip and
+    sweeps the whole globe. Callers that test containment against real-world
+    polygons must wrap points back with `wrap_lon`.
     """
     fcs = tracks[tracks["kind"] == "forecast"].sort_values("valid_time")
     if fcs.empty:
@@ -111,6 +120,12 @@ def _densify_rows(
     if len(times) < 2:
         return [], np.array([]), np.array([]), None
 
+    # Continuous longitudes: an antimeridian crossing shows up as a ~360°
+    # jump between consecutive fixes, and interpolating through it draws the
+    # path the long way round the globe. Unwrapped values keep the raw branch
+    # of the first fix, so a track that never crosses is returned unchanged.
+    lons = list(np.unwrap(np.asarray(lons, dtype=float), period=360.0))
+
     t0 = times[0]
     x = np.array([(tv - t0).total_seconds() for tv in times])
     step = freq_minutes * 60
@@ -147,7 +162,9 @@ def compute_landfalls(
     times, lons, lats, winds = densify_track(tracks)
     if not times:
         return []
-    pts = [Point(x, y) for x, y in zip(lons, lats, strict=True)]
+    # Densified longitudes live on a continuous branch; country polygons live
+    # in [-180, 180], so wrap back before containment.
+    pts = [Point(wrap_lon(x), y) for x, y in zip(lons, lats, strict=True)]
 
     out: list[Landfall] = []
     for iso3, geom in country_geoms.items():
