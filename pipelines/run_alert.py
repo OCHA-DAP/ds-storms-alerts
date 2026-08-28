@@ -307,8 +307,15 @@ def resolve_country_list_ids(client, iso3s: list[str]) -> list[int]:
       a redundant cross-check on top of the no-exposure monitoring email they get
       from the other branch.
 
-    Raises RuntimeError if any per-country iso3 has no list.
+    Raises RuntimeError if any per-country iso3 has no list, or if iso3s is
+    empty — the aggregate lists are appended unconditionally, so an empty
+    input would target real subscribers with an alert that names no country.
     """
+    if not iso3s:
+        raise RuntimeError(
+            "resolve_country_list_ids called with no iso3s — refusing to "
+            "target the aggregate lists with a country-less alert."
+        )
     all_lists = client.fetch_all_lists(tag=COUNTRY_LIST_TAG)
     iso3_to_list: dict[str, int] = {}
     aggregate_all_id: int | None = None
@@ -469,11 +476,12 @@ def generate_alert_html(
 
     Two layouts share one data pass:
 
-    - ``full=False`` (the email, and the default): letter, summary table, ONE
-      map per storm (track + swath edges + admin-1 exposure choropleth), and
-      any final-update notices. No per-country strip charts, no probabilistic
-      map — the numbers live in the table and the attached workbook, the full
-      charts live online. This is the condensed layout the alert ships with.
+    - ``full=False`` (the email, and the default): letter, summary table, per
+      storm a combined map (track + swath edges + admin-1 exposure choropleth)
+      plus the WSP probability map, and any final-update notices. No
+      per-country strip charts — the numbers live in the table and the
+      attached workbook, the full charts live online. This is the condensed
+      layout the alert ships with.
     - ``full=True``: the everything version — deterministic + probabilistic
       maps and the per-country, per-threshold strip charts. Rendered to the
       online example pages, not emailed.
@@ -539,6 +547,18 @@ def generate_alert_html(
         (r.atcf_id, r.iso3) for r in obsv_df.itertuples() if r.pop_exposed > 0
     }
     final_update_pairs = {pair for pair in final_update_pairs if pair in obsv_pairs}
+
+    # Re-check after the observed filter. The pre-filter check above can pass
+    # on final-update candidates alone; if none of them had observed exposure
+    # the set is now empty and there is nothing to say — without this bail-out
+    # the run renders a zero-storm alert email and mails it to the aggregate
+    # lists (campaigns 1520/1529, Dolly post-dissipation, 2026-08-28).
+    if not current_any_pairs and not final_update_pairs:
+        logger.info(
+            "No current exposure and no final-update pair survived the "
+            "observed-exposure filter — nothing to send."
+        )
+        return None
 
     # Recompute render lists after observed filter.
     extra_iso3s = sorted({iso3 for _, iso3 in final_update_pairs} - set(iso3s))
@@ -873,8 +893,9 @@ def generate_alert_html(
                 storm_map_parts.append(
                     f"<h3 style='{_H3}'>Probabilistic forecast</h3>{wsp_m}"
                 )
-        # Email mode: the single combined map is built AFTER the country loop —
-        # it needs the consolidated per-country 34 kt totals collected there.
+        # Email mode: the maps (combined exposure map + WSP probability map)
+        # are built AFTER the country loop — the exposure map needs the
+        # consolidated per-country 34 kt totals collected there.
 
         toc_countries: list[dict] = []
         country_sections: list[str] = []
@@ -1310,6 +1331,19 @@ def generate_alert_html(
             )
             if exp_m:
                 storm_map_parts.append(exp_m)
+            # The WSP probability map, same as the monitoring email and the
+            # online pages. aid_wsp_poly was already fetched "for map" above
+            # but was only ever drawn in full mode — so every alert email
+            # shipped without its WSPs (raised for Dolly, 2026-08-27/28).
+            wsp_m = track_plot_wsp(
+                aid_tracks, aid_buffers, aid_wsp_poly, background_gdf,
+                wind_threshold_kt=34, adm1_gdf=aid_adm1,
+                storm_name=storm_h2_label,
+            )
+            if wsp_m:
+                storm_map_parts.append(
+                    f"<h3 style='{_H3}'>Probabilistic forecast</h3>{wsp_m}"
+                )
 
         howto_html = ""
         if country_sections:
