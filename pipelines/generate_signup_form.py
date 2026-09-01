@@ -100,23 +100,21 @@ def generate(listmonk_url: str, all_lists: list[dict]) -> str:
             elif tag.startswith("aggregate:"):
                 aggregates[tag[len("aggregate:"):]] = lst
 
-    agg_all = aggregates.get("all")
+    # aggregate:all is deliberately NOT offered on the form. It used to be
+    # a pre-checked row, so anyone subscribing for LAC silently landed on
+    # the global list too (surfaced in the 2026-08-28 empty-email audit —
+    # the list's sole subscriber never chose it). Global-alert subscribers
+    # are added by admins in Listmonk; the public form offers LAC, checked
+    # by default as the sensible regional bundle for this form's audience.
     agg_lac = aggregates.get("lac")
 
     agg_html = ""
-    if agg_all or agg_lac:
-        rows = []
-        if agg_all:
-            rows.append(
-                f'<div class="agg-row">{_checkbox(agg_all, checked=True)}'
-                f'<span class="agg-desc">Receive every storm alert, regardless of region.</span></div>'
-            )
-        if agg_lac:
-            rows.append(
-                f'<div class="agg-row">{_checkbox(agg_lac)}'
-                f'<span class="agg-desc">Receive alerts that include at least one Caribbean, '
-                f'Central American, or South/North American country (excl. USA &amp; Canada).</span></div>'
-            )
+    if agg_lac:
+        rows = [
+            f'<div class="agg-row">{_checkbox(agg_lac, checked=True)}'
+            f'<span class="agg-desc">Receive alerts that include at least one Caribbean, '
+            f'Central American, or South/North American country (excl. USA &amp; Canada).</span></div>'
+        ]
         agg_html = f"""
   <fieldset class="agg">
     <legend>Bundled subscriptions</legend>

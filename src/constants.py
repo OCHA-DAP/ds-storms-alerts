@@ -1,8 +1,9 @@
 PROJECT_PREFIX = "ds-storms-alerts"
 
-# "[TEST] Storm Alerts - Internal Test" — private Listmonk list (id 110), members:
-# tristan.downing@un.org, downing.tristan@gmail.com, leonardo.milano@un.org.
-# Test/preview sends go here instead of the live country lists.
+# "[TEST] Storm Alerts - Internal Test" — private Listmonk list (id 110).
+# Sole member: tristan.downing@un.org (trimmed 2026-08-31 so test sends
+# reach only the operator). Test/preview sends go here instead of the
+# live country lists.
 TEST_LIST_ID = 110
 TEST_LIST_IDS = [TEST_LIST_ID]
 
