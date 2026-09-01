@@ -89,12 +89,15 @@ resources:
         git_branch: ${var.git_branch}
 
       schedule:
-        # 03:30 / 09:30 / 15:30 / 21:30 UTC — ~30 min after each NHC advisory,
-        # giving the upstream ds-storms-pipeline time to land its outputs.
+        # 03:50 / 09:50 / 15:50 / 21:50 UTC — ~50 min after each NHC advisory.
+        # Was :30, which raced the upstream NHC chain: its :00 run lands
+        # exposure ~:15-:25 and its :30 WSP-retry can update WSP tables right
+        # as the alert reads them (an upstream hiccup then left the email a
+        # full issuance behind — Dolly, 2026-08-27). :50 clears both runs.
         # No explicit pause_status: prod (production mode) runs it; the dev
         # target (development mode) auto-pauses it. Setting UNPAUSED here would
         # override dev's auto-pause and make dev fire too — don't.
-        quartz_cron_expression: "0 30 3,9,15,21 * * ?"
+        quartz_cron_expression: "0 50 3,9,15,21 * * ?"
         timezone_id: UTC
 
       max_concurrent_runs: 1
