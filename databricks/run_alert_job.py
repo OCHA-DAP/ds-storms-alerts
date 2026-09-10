@@ -11,10 +11,11 @@ The bundle's ``spark_python_task`` passes the job parameters positionally:
 DBX (the GHA workflow runs the same script). This wrapper is the only DBX-specific
 glue and does two things:
 
-1. Inject the listmonk credentials. The reused cluster carries the ``DSCI_AZ_*``
-   DB/blob env vars (used by ds-storms-pipeline) but NOT the listmonk ones, so we
-   read those from the ``dsci`` secret scope and export them, alongside the
-   run-mode env vars run_alert.py reads at import (``TEST_EMAIL`` / ``DRY_RUN``).
+1. Inject the listmonk credentials. Both computes (the Job Compute policy on prod,
+   the personal cluster on dev) carry the ``DSCI_AZ_*`` DB/blob env vars but NOT
+   the listmonk ones, so we read those from the ``dsci`` secret scope and export
+   them, alongside the run-mode env vars run_alert.py reads at import
+   (``TEST_EMAIL`` / ``DRY_RUN``).
 
 2. Shell out to ``pipelines/run_alert.py`` with ``PYTHONPATH`` set to the repo
    root so ``from src ...`` resolves — under ``source: GIT`` the repo is cloned
@@ -49,7 +50,7 @@ TEST_EMAIL = _arg(2, "True")
 DRY_RUN = _arg(3, "True")
 STAGE = _arg(4, "dev")
 
-# Listmonk config — absent from the reused cluster's env, pulled from the dsci scope
+# Listmonk config — absent from the cluster env on both targets, pulled from the dsci scope
 # (base URL + API creds, so dev/prod can't drift and repointing needs no code edit).
 # Tolerated if missing so a dry-run (no send) still validates DB/blob/plotting;
 # run_alert.py only builds the ListmonkClient when actually sending, and will then
