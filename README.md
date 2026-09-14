@@ -26,7 +26,7 @@ previously ran it but is disabled — Databricks is the runner now.)
 | `pipelines/generate_showcase.py` | Regenerates the historical example alerts under `docs/alerts/`. |
 | `pipelines/setup_country_lists.py` | Provisions the per-country Listmonk subscriber lists. |
 | `src/data.py` | Data access (DB + blob) via `ocha-stratus`. |
-| `src/plots.py` | Strip charts and storm maps (matplotlib / geopandas / contextily). |
+| `src/plots.py` | Strip charts and storm maps (matplotlib / geopandas). |
 | `src/preview.py` | Renders a body through the real Listmonk template, no send. |
 | `databricks/` | Databricks Asset Bundle + the thin job wrapper, and its README. |
 | `docs/` | GitHub Pages site — the subscribe form and about page. |
@@ -77,7 +77,10 @@ lifted into `src/plots.py` as hex constants (matplotlib can't import the CSS
 bundle). Wind thresholds use the status ramp (amber → deep red); wind-speed
 probability uses the primary blue ramp, pale to deep.
 
-The maps draw a **CartoDB Voyager** tile basemap via `contextily`, which is the
-one runtime network call in the pipeline. It is not load-bearing: on any tile
-failure the first attempt latches and every map falls back to the packaged
-Natural Earth boundary layer under `data/`, with a warning in the log.
+The maps are drawn entirely **offline** from the packaged Natural Earth boundary
+layer under `data/` (pale-blue ocean, off-white land, hairline borders). There is
+deliberately no tile basemap: the pipeline used CartoDB tiles via `contextily`
+until Sep 2026, when CARTO began serving "API KEY REQUIRED" watermark tiles with
+a normal HTTP 200, so the tile-failure fallback never fired and the watermark
+went out in live alert emails. A third-party tile server must never again be
+able to put content into the email, so the rendering has no network dependency.

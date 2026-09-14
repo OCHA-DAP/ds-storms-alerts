@@ -46,6 +46,18 @@ GREY_FILL = "#d8e0e1"  # --hdx-neutral-2
 GREY_EDGE = "#9db1b3"  # --hdx-neutral-5
 PANEL = "#ffffff"      # --hdx-neutral-0
 
+# Map background. The maps are drawn entirely offline from the packaged Natural
+# Earth polygons — no tile basemap. There used to be one (CartoDB Voyager via
+# contextily) with this layer as the fallback, until Sep 2026 when CARTO began
+# serving "API KEY REQUIRED" watermark tiles with a normal HTTP 200: the
+# fallback never fired and the watermark went out in live alert emails. A
+# third-party tile server must never again be able to put pixels into the
+# email, so the map has no network dependency at all.
+OCEAN = "#e3ecf0"       # pale blue-grey, so sea reads as sea
+LAND = "#f7f6f2"        # warm off-white, distinct from OCEAN and from the pale
+                        # end of the WSP probability ramp
+LAND_EDGE = "#c5cdd2"   # coastlines and adm boundaries
+
 # Chart text. Roboto per the style guide; the stack degrades to the nearest
 # grotesque rather than matplotlib's DejaVu default when Roboto isn't installed
 # (it is not, on the Databricks runner).
@@ -89,8 +101,8 @@ _NHC_WSP_COLOR = {
     90: "#0a2756",  # --hdx-primary-8
 }
 
-# Swath opacity. Both are lower than they were: over a tile basemap an opaque
-# swath hides the coastlines and place names that are the reason for having one.
+# Swath opacity. Kept low so coastlines and admin boundaries read through the
+# swaths rather than being hidden under them.
 _OBSV_BUFFER_ALPHA = 0.20
 _FCAST_BUFFER_ALPHA = 0.52
 # The probability bands nest, so the visible colour of an inner band is its own
@@ -1016,69 +1028,6 @@ def adam_strip_chart(
     )
 
 
-# Tile basemap. CartoDB Voyager: light, but with a real ocean blue and place
-# names, while the wind swaths stay the loudest thing on the map. Everything
-# here is plotted in EPSG:4326; contextily warps the tiles rather than us
-# reprojecting the storm geometry.
-_BASEMAP_CRS = "EPSG:4326"
-# Cap the zoom: contextily's auto-zoom fetches a lot of tiles for a basin-scale
-# view, and detail past this is invisible at email render size anyway.
-_BASEMAP_MAX_ZOOM = 6
-_basemap_failed = False
-
-
-def _add_basemap(ax, enabled: bool = True) -> bool:
-    """Draw a tile basemap under the storm layers. True if it landed.
-
-    Tiles are a network call inside a scheduled job, so failure has to be
-    survivable: on any error this returns False and the caller falls back to the
-    packaged Natural Earth polygons, which need no network. The first failure
-    latches, so one outage doesn't mean a timeout per map for the rest of the
-    run.
-
-    enabled=False skips the fetch without latching: a dateline-straddling view
-    extends past ±180°, outside the Web Mercator tile domain, so those maps go
-    straight to the offline layer while every other map keeps its tiles.
-
-    The same out-of-domain guard is applied to the axes' own limits: a
-    non-dateline storm near ±180 can still get view padding past the edge,
-    and letting that request reach contextily would raise — latching
-    _basemap_failed and silently stripping tiles from every LATER map in the
-    run. Out-of-domain views skip without latching; only real fetch failures
-    (network, provider) latch.
-    """
-    global _basemap_failed
-    xlo, xhi = ax.get_xlim()
-    if not enabled or xlo < -180.0 or xhi > 180.0:
-        return False
-    if _basemap_failed:
-        return False
-    try:
-        import contextily as ctx
-
-        ctx.add_basemap(
-            ax,
-            crs=_BASEMAP_CRS,
-            # Voyager over Positron: proper light-blue ocean and warmer land,
-            # so sea reads as sea instead of a grey void.
-            source=ctx.providers.CartoDB.Voyager,
-            # One zoom level deeper than contextily's choice: the maps render
-            # at 150 dpi (see _fig_to_img_tag), so the auto zoom — picked for
-            # the 100 dpi canvas — comes out soft.
-            zoom_adjust=1,
-            zorder=0,
-            attribution_size=5,
-        )
-        return True
-    except Exception as exc:  # noqa: BLE001 — any tile failure is non-fatal
-        _basemap_failed = True
-        logging.getLogger(__name__).warning(
-            f"Basemap tiles unavailable ({exc}); using the offline boundary "
-            f"layer instead."
-        )
-        return False
-
-
 def _drop_tiny_parts(geom, min_area: float = 0.05):
     """Drop polygon parts smaller than min_area (sq degrees) from a MultiPolygon."""
     if geom is None or geom.is_empty:
@@ -1092,33 +1041,25 @@ def _drop_tiny_parts(geom, min_area: float = 0.05):
     return geom
 
 
-def _draw_countries(ax, countries: gpd.GeoDataFrame, on_basemap: bool) -> None:
-    """Draw adm0 outlines — the offline world background layer.
-
-    Skipped entirely when tiles loaded: Positron already draws coastlines and
-    national borders, and a second set of outlines over them is just noise. This
-    layer exists so the map still reads when the tile fetch fails.
-    """
-    if countries.empty or on_basemap:
+def _draw_background(ax, countries: gpd.GeoDataFrame) -> None:
+    """Paint the offline world background: OCEAN under everything, then the
+    Natural Earth adm0 polygons as LAND with hairline coastlines/borders."""
+    ax.set_facecolor(OCEAN)
+    if countries.empty:
         return
-    countries.plot(ax=ax, facecolor="#f4f5f7", edgecolor="#cdd2d9",
+    countries.plot(ax=ax, facecolor=LAND, edgecolor=LAND_EDGE,
                    linewidth=0.5, zorder=1)
 
 
-def _draw_adm1(ax, adm1_gdf: gpd.GeoDataFrame, on_basemap: bool) -> None:
+def _draw_adm1(ax, adm1_gdf: gpd.GeoDataFrame) -> None:
     """Draw adm1 polygons for affected countries with internal division lines."""
     if adm1_gdf.empty:
         return
-    adm1_gdf.plot(
-        ax=ax,
-        facecolor="none" if on_basemap else "#f4f5f7",
-        edgecolor=GREY_EDGE if on_basemap else "#cdd2d9",
-        linewidth=0.35, zorder=1,
-    )
+    adm1_gdf.plot(ax=ax, facecolor=LAND, edgecolor=LAND_EDGE,
+                  linewidth=0.35, zorder=1)
     # Emphasise the national (adm0) border with a slightly thicker line.
     outer = adm1_gdf.dissolve(by="iso_3", as_index=False)
-    outer.plot(ax=ax, facecolor="none",
-               edgecolor=INK_2 if on_basemap else "#9aa0a8",
+    outer.plot(ax=ax, facecolor="none", edgecolor="#9aa0a8",
                linewidth=0.8, zorder=1)
 
 
@@ -1283,9 +1224,7 @@ def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
 # whole-globe map with the track sweeping the long way round. The maps instead
 # work in a continuous-longitude frame local to the storm: storm layers are
 # shifted onto the 360°-branch nearest the track, the world background is
-# replicated at ±360° so whichever branch the view lands on has coastlines,
-# and tile fetching is skipped (the view extends past ±180°, outside the Web
-# Mercator domain) in favour of the offline layer.
+# replicated at ±360° so whichever branch the view lands on has coastlines.
 # ---------------------------------------------------------------------------
 
 
@@ -1507,8 +1446,8 @@ def _finalize_map(ax, title: str, legend_handles: list) -> None:
 def _add_time_note(ax, tracks: gpd.GeoDataFrame) -> None:
     """Small footnote clarifying all point times are ET (forecast points only).
 
-    Bottom-RIGHT: contextily puts the tile attribution bottom-left, and the two
-    overprinted each other into an unreadable smudge.
+    Bottom-right, clear of the legends stacked off the right edge and of
+    anything drawn bottom-left.
     """
     if tracks.empty or not (tracks["kind"] == "forecast").any():
         return
@@ -1638,8 +1577,7 @@ def track_plot_exposure(
     ax.set_aspect("equal")
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
-    on_basemap = _add_basemap(ax, enabled=not dateline)
-    _draw_countries(ax, background, on_basemap)
+    _draw_background(ax, background)
 
     # Swath fills go down FIRST; the exposure choropleth (also zorder 2, drawn
     # later) covers them on shaded land. Net effect: swaths show over water and
@@ -1801,20 +1739,16 @@ def track_plot_buffers(
     xlim, ylim = _forecast_view_bbox(
         tracks, _fcast_buf, obsv_buffers=_obsv_buf, land_gdf=background)
     fig, ax = plt.subplots(figsize=(9, 6))
-    # Aspect and limits first, in that order: contextily picks its tile extent
-    # from the axes' current view, and set_aspect can move the limits. Fetching
-    # before either is settled leaves part of the frame with no tiles under it.
     ax.set_aspect("equal")
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
-    on_basemap = _add_basemap(ax, enabled=not dateline)
-    _draw_countries(ax, background, on_basemap)
+    _draw_background(ax, background)
     if adm1_gdf is not None and not adm1_gdf.empty:
-        _draw_adm1(ax, adm1_gdf, on_basemap)
+        _draw_adm1(ax, adm1_gdf)
     obsv_proxies = _draw_obsv_buffers(ax, buffers)
     fcast_proxies = _draw_fcast_buffers(ax, buffers)
     _draw_tracks(ax, tracks)
-    # add_basemap snaps the view out to whole tiles; restore the intended frame.
+    # geopandas .plot() can widen the view; restore the intended frame.
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     # No on-plot legend — titled legends stacked off the right edge.
@@ -1872,16 +1806,12 @@ def track_plot_wsp(
         background = _replicate_world(background)
     xlim, ylim = _forecast_view_bbox(tracks, wsp, land_gdf=background)
     fig, ax = plt.subplots(figsize=(9, 6))
-    # Aspect and limits first, in that order: contextily picks its tile extent
-    # from the axes' current view, and set_aspect can move the limits. Fetching
-    # before either is settled leaves part of the frame with no tiles under it.
     ax.set_aspect("equal")
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
-    on_basemap = _add_basemap(ax, enabled=not dateline)
-    _draw_countries(ax, background, on_basemap)
+    _draw_background(ax, background)
     if adm1_gdf is not None and not adm1_gdf.empty:
-        _draw_adm1(ax, adm1_gdf, on_basemap)
+        _draw_adm1(ax, adm1_gdf)
     obsv_proxies = _draw_obsv_buffers(ax, buffers)
     wsp_proxies = _draw_wsp_polygons(ax, wsp, wind_threshold_kt)
     _draw_tracks(ax, tracks)
