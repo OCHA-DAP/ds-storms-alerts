@@ -26,7 +26,7 @@ wrapper if Listmonk is unreachable) and dev-DB access via ocha-stratus.
 DB and blob results are cached on disk in ``.showcase-cache/`` (the archived
 advisories never change; only the plots do), so re-runs after a layout change
 skip every fetch. ``--refresh`` clears the cache first; ``--no-cache``
-bypasses it entirely. Basemap tiles cache alongside via contextily.
+bypasses it entirely.
 """
 
 from __future__ import annotations
@@ -42,7 +42,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import contextily as ctx
 import ocha_stratus as stratus
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -228,7 +227,6 @@ def main() -> None:
         os.environ.pop("STORMS_ALERTS_DATA_CACHE", None)
     else:
         os.environ.setdefault("STORMS_ALERTS_DATA_CACHE", str(CACHE_DIR))
-        ctx.set_cache_dir(str(CACHE_DIR / "tiles"))
         logger.info(f"Data cache: {os.environ['STORMS_ALERTS_DATA_CACHE']}")
 
     DOCS_ALERTS.mkdir(parents=True, exist_ok=True)
