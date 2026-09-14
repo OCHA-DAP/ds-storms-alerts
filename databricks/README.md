@@ -15,9 +15,11 @@ trigger latency had degraded to ~1 hour late (vs ~10 min a year earlier); the GH
   listmonk creds from the `dsci` secret scope, sets the send-mode env vars, and shells
   out to `pipelines/run_alert.py`. Pipeline code (`pipelines/`, `src/`) stays pure
   Python and DBX-agnostic.
-- Compute: the existing cluster `${var.existing_cluster_id}`, which already carries the
-  `DSCI_AZ_*` DB/blob env vars. `run_alert.py` is hardcoded to `stage="dev"`, so it
-  reads the **dev** database regardless of target.
+- Compute is per target (same split as `ds-storms-pipeline`): **prod** runs on an
+  ephemeral **Job Compute** cluster under policy `000C79D951EAF0D6`, which injects the
+  `DSCI_AZ_*` DB/blob env vars from the `dsci` scope; **dev** runs on the personal
+  interactive cluster `${var.existing_cluster_id}` (instant start). The `stage` param
+  (default `dev`) selects which database is read, independent of the target.
 
 ## Target model — one live job, dev on demand
 

@@ -34,7 +34,10 @@ sync:
 
 variables:
   existing_cluster_id:
-    description: Interactive cluster the job runs on (carries the DSCI_AZ_* env vars)
+    # Dev target only. Prod runs on ephemeral Job Compute (see the prod target);
+    # a scheduled job pinned to a personal cluster breaks when that cluster goes
+    # away. Same split as ds-storms-pipeline.
+    description: Interactive cluster the DEV target runs on (carries the DSCI_AZ_* env vars)
     default: "0515-161935-i2w5mxhc"
   git_branch:
     description: Branch the job pulls the pipeline from
@@ -59,17 +62,46 @@ variables:
 targets:
   prod:
     # The live job (default target). Production mode runs the schedule as defined.
-    # (run_as / a shared root_path can be revisited when cutting over off a
-    # personal identity.)
+    # (A shared root_path can be revisited when cutting over off a personal
+    # identity.)
     mode: production
     default: true
     workspace:
       profile: default
       root_path: /Workspace/Users/adm.tdowning@global.un.org/.bundle/${bundle.name}/${bundle.target}
+    # Explicit for production mode, and pins the SINGLE_USER job cluster's
+    # identity (mirrors ds-storms-pipeline).
+    run_as:
+      user_name: adm.tdowning@global.un.org
     variables:
       # Live: send to the real per-country subscriber lists (not the test list).
-      # Still reads the DEV database (run_alert.py is stage="dev").
+      # Still reads the DEV database (stage var defaults to "dev").
       test_email: "False"
+    # Prod runs on an ephemeral Job Compute cluster, not the personal
+    # interactive cluster.
+    resources:
+      jobs:
+        storm_alert:
+          job_clusters:
+            - job_cluster_key: alert_cluster
+              new_cluster:
+                # Job Compute policy (000C79D951EAF0D6): fixes cluster_type=job,
+                # num_workers=1, STANDARD engine, and injects all dsci secret
+                # env vars (DEV+PROD DB/blob) — so no spark_env_vars block.
+                # Listmonk creds are not in the policy; the wrapper pulls them
+                # from the dsci scope via dbutils.secrets at run time.
+                policy_id: "000C79D951EAF0D6"
+                apply_policy_default_values: true
+                spark_version: "18.2.x-scala2.13"
+                # DS4_v2 (28 GB) matches the personal cluster the job ran on
+                # before (also DS4_v2), so this isn't a step down. The Python
+                # runs on the driver; the policy-mandated worker idles.
+                node_type_id: "Standard_DS4_v2"
+                num_workers: 1
+                data_security_mode: SINGLE_USER
+          tasks:
+            - task_key: run_alert
+              job_cluster_key: alert_cluster
   dev:
     # On-demand feature-branch testing only — deploy with --var git_branch=<branch>.
     # Development mode auto-pauses the schedule and prefixes the job name
@@ -78,6 +110,14 @@ targets:
     mode: development
     workspace:
       profile: default
+    # Dev runs on the personal interactive cluster (instant start, no per-run
+    # library install) — fine for on-demand feature testing.
+    resources:
+      jobs:
+        storm_alert:
+          tasks:
+            - task_key: run_alert
+              existing_cluster_id: ${var.existing_cluster_id}
 
 resources:
   jobs:
@@ -121,8 +161,9 @@ resources:
           default: ${var.stage}
 
       tasks:
+        # Compute (existing_cluster_id vs job_cluster_key) is supplied per
+        # target above: dev -> personal cluster; prod -> ephemeral job cluster.
         - task_key: run_alert
-          existing_cluster_id: ${var.existing_cluster_id}
           spark_python_task:
             python_file: databricks/run_alert_job.py
             source: GIT
@@ -131,10 +172,18 @@ resources:
               - "{{job.parameters.test_email}}"
               - "{{job.parameters.dry_run}}"
               - "{{job.parameters.stage}}"
+          # The prod job cluster is created fresh every run, so this list is
+          # the ENTIRE non-DBR environment — nothing is hand-installed on it.
+          # Keep it in step with pyproject [project.dependencies]. (The first
+          # Job Compute test run, 2026-09-10, died on `No module named
+          # openpyxl`: it had only ever been installed by hand on the personal
+          # cluster.)
           libraries:
             - pypi: { package: "ocha-stratus>=0.1.7" }
             - pypi:
                 package: "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@2d4870749faa4235e65164b731e0a574a2e209ab"
             - pypi: { package: "matplotlib>=3.9" }
             - pypi: { package: "geopandas" }
+            - pypi: { package: "openpyxl>=3.1.5" }
+            - pypi: { package: "scipy>=1.17.1" }
             - pypi: { package: "databricks-sdk" }
