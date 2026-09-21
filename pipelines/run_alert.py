@@ -526,9 +526,15 @@ def generate_alert_html(
         if (r["atcf_id"], r["iso3"]) in final_update_pairs
     }
 
+    # Nothing forecast now and nothing that just ended: no email. This is the
+    # ONLY bail-out — final_update_pairs is never narrowed after this point, so
+    # it cannot empty out underneath us. It used to be filtered down to pairs
+    # with observed exposure, and a run where every candidate failed that
+    # filter fell through and mailed a zero-storm email to the aggregate lists
+    # (campaigns 1520/1529, Dolly post-dissipation, 2026-08-28).
     if not current_any_pairs and not final_update_pairs:
+        logger.info("No current exposure and no pair just ended — nothing to send.")
         return None
-
 
     # Extend fetch lists to cover final-update storms/countries.
     extra_atcf_ids = sorted({aid for aid, _ in final_update_pairs} - set(atcf_ids))
@@ -542,25 +548,15 @@ def generate_alert_html(
     logger.info("Fetching current observed exposure...")
     obsv_df = fetch_current_obsv_exposure(engine, all_fetch_atcf_ids, issued_time_dt)
 
-    # Filter final_update_pairs: only keep pairs with observed exposure (cumulative).
-    obsv_pairs = {
-        (r.atcf_id, r.iso3) for r in obsv_df.itertuples() if r.pop_exposed > 0
-    }
-    final_update_pairs = {pair for pair in final_update_pairs if pair in obsv_pairs}
+    # NOTE: observed exposure is deliberately NOT used to narrow
+    # final_update_pairs. EVERY pair that loses its forecast gets a final
+    # notice, whether or not the storm arrived; the country loop picks the
+    # wording from the figures it ends up with. Gating the notice on observed
+    # exposure meant a near miss simply stopped receiving email with no
+    # explanation, which is the more confusing failure (Cristina/GTM/SLV,
+    # 2026-06-11).
 
-    # Re-check after the observed filter. The pre-filter check above can pass
-    # on final-update candidates alone; if none of them had observed exposure
-    # the set is now empty and there is nothing to say — without this bail-out
-    # the run renders a zero-storm alert email and mails it to the aggregate
-    # lists (campaigns 1520/1529, Dolly post-dissipation, 2026-08-28).
-    if not current_any_pairs and not final_update_pairs:
-        logger.info(
-            "No current exposure and no final-update pair survived the "
-            "observed-exposure filter — nothing to send."
-        )
-        return None
-
-    # Recompute render lists after observed filter.
+    # Recompute render lists now that final-update pairs are known.
     extra_iso3s = sorted({iso3 for _, iso3 in final_update_pairs} - set(iso3s))
     all_render_iso3s = iso3s + extra_iso3s
     all_render_atcf_ids = sorted(
@@ -576,14 +572,14 @@ def generate_alert_html(
     iso3_to_total_pop = fetch_admin_population(engine, all_render_iso3s)
 
     all_prior_pairs = fetch_all_prior_country_pairs(engine, all_render_atcf_ids, issued_time_dt)
-    obsv_with_exposure = {
-        (r.atcf_id, r.iso3) for r in obsv_df.itertuples() if r.pop_exposed > 0
-    }
+    # Every pair that ended on an earlier advisory — not just the ones the
+    # storm reached. Each of them got a final notice in the run where it
+    # dropped out, so "see past emails" now points at something real for all
+    # of them; before, a near miss was left out here as well as there.
     already_passed_pairs: dict[tuple[str, str], datetime] = {
         k: v for k, v in all_prior_pairs.items()
         if k not in current_any_pairs
         and k not in final_update_pairs
-        and k in obsv_with_exposure
     }
 
     logger.info("Fetching GDACS current exposure...")
@@ -901,26 +897,7 @@ def generate_alert_html(
         country_sections: list[str] = []
         adm0_exp_34: dict[str, int] = {}
         for iso3 in sorted(storm_to_iso3s[aid], key=lambda c: -_country_rp_score(aid, c)):
-            # Final update notice for this (storm, country) pair.
-            notice_html = ""
-            if (aid, iso3) in final_update_pairs:
-                storm_lbl = (
-                    name_aid.strip().title()
-                    if isinstance(name_aid, str) and name_aid
-                    else aid
-                )
-                _cn = _cname(iso3)
-                notice_html = (
-                    f"<p style='background:#fbf4ea;border-left:4px solid #d48f2a;"
-                    f"padding:10px 14px;margin:12px 0;font-size:0.95em'>"
-                    f"This is the last update for <strong>{storm_lbl}</strong> in "
-                    f"<strong>{_cn}</strong> as there is no further forecasted "
-                    f"exposure. Figures below and attached data indicate purely "
-                    f"observed exposure and will not change, unless the track of the "
-                    f"storm changes significantly and returns towards {_cn} again. "
-                    f"In this case another update will be issued for "
-                    f"{storm_lbl} in {_cn}.</p>"
-                )
+            _is_final = (aid, iso3) in final_update_pairs
 
             # Only render wind speeds that have current data for this (storm, country).
             active_wsps = [
@@ -935,7 +912,11 @@ def generate_alert_html(
                     or _obsv_for(obsv_df, aid, iso3, wsp) > 0
                 )
             ]
-            if not active_wsps:
+            # A near-miss ending has no data at any threshold: no forecast, no
+            # WSP band, nothing observed. It is exactly the case that used to
+            # vanish silently, so it still gets a section, a notice and a table
+            # row. Everything else with no data is skipped as before.
+            if not active_wsps and not _is_final:
                 continue
 
             _toc_wsps: list[dict] = []
@@ -1018,10 +999,65 @@ def generate_alert_html(
 
                 toc_countries.append({
                     "name": _cname(iso3),
-                    "is_final": (aid, iso3) in final_update_pairs,
+                    "is_final": _is_final,
                     "wsps": _toc_wsps,
                     "similar": _similar,
                 })
+            elif _is_final:
+                # Near-miss ending: nothing to put in the exposure column, but
+                # the country still needs its "(final)" row. Dropping it here
+                # is what left subscribers with a normal-looking last email.
+                # wsp=None renders as a single "none observed" row.
+                toc_countries.append({
+                    "name": _cname(iso3),
+                    "is_final": True,
+                    "wsps": [{"wsp": None, "total": 0, "rp": None, "pct": None}],
+                    "similar": [],
+                })
+
+            # Final-update notice, written once the figures are known. Which
+            # wording applies turns on whether ANY source (CHD observed, ADAM,
+            # GDACS) still reports exposure here — i.e. exactly what _toc_wsps
+            # holds — not on CHD observed alone. Keying it to CHD observed told
+            # El Salvador "no exposure was observed" in the same email whose
+            # workbook reported 1.29M exposed per ADAM and GDACS
+            # (Cristina/SLV, 2026-06-11).
+            notice_html = ""
+            if _is_final:
+                storm_lbl = (
+                    name_aid.strip().title()
+                    if isinstance(name_aid, str) and name_aid
+                    else aid
+                )
+                _cn = _cname(iso3)
+                _returns = (
+                    f"unless the track of the storm changes significantly and "
+                    f"returns towards {_cn} again. In this case another update "
+                    f"will be issued for {storm_lbl} in {_cn}."
+                )
+                if _toc_wsps:
+                    _notice_body = (
+                        f"This is the last update for <strong>{storm_lbl}</strong> "
+                        f"in <strong>{_cn}</strong> as there is no further "
+                        f"forecasted exposure. Figures below and attached data "
+                        f"indicate purely observed exposure and will not change, "
+                        f"{_returns}"
+                    )
+                else:
+                    _notice_body = (
+                        f"This is the last update for <strong>{storm_lbl}</strong> "
+                        f"in <strong>{_cn}</strong>. The storm is no longer "
+                        f"forecast to expose anyone in {_cn}, and no exposure "
+                        f"has been reported there &mdash; earlier alerts were "
+                        f"based on forecast tracks that have since moved away. "
+                        f"Figures below and in the attached data are zero and "
+                        f"will not change, {_returns}"
+                    )
+                notice_html = (
+                    f"<p style='background:#fbf4ea;border-left:4px solid #d48f2a;"
+                    f"padding:10px 14px;margin:12px 0;font-size:0.95em'>"
+                    f"{_notice_body}</p>"
+                )
 
             # Charts render only for thresholds where at least one SOURCE
             # (CHD deterministic+observed, GDACS, ADAM) has a nonzero
@@ -1167,7 +1203,6 @@ def generate_alert_html(
                     # action, see _tot in the ToC loop) lives in the summary
                     # table; on the chart it is by definition the longest bar,
                     # so it is not drawn a second time.
-                    _is_final = (aid, iso3) in final_update_pairs
                     source_ticks = [
                         StormMark(value=v, label=_SRC_LABELS[k], color=wsp_color, short=False)
                         for k, v in active_sources.items()
@@ -1453,19 +1488,33 @@ def generate_alert_html(
                         f"color:#7e8e8f'>{_sim_html}</td>"
                     )
                     _c_first = False
-                _pct_part = ""
-                if _w.get("pct") is not None:
-                    _pct_int = min(int(round(_w["pct"])), 100)
-                    _pct_part = (
-                        f" <span style='color:#9db1b3;font-size:0.85em'>"
-                        f"({_pct_int}%)</span>"
+                if _w["wsp"] is None:
+                    # Near-miss ending: no threshold reached, so there is no
+                    # figure to print — only the statement that nothing was
+                    # exposed. Keeps the row (and its "(final)" tag) in the
+                    # table instead of dropping the country.
+                    _row += (
+                        f"<td style='{_TD};text-align:center;color:#9db1b3'>"
+                        f"&mdash;</td>"
+                        f"<td style='{_TD};text-align:right;color:#5e6a6b;"
+                        f"white-space:nowrap'>none observed</td>"
+                    )
+                else:
+                    _pct_part = ""
+                    if _w.get("pct") is not None:
+                        _pct_int = min(int(round(_w["pct"])), 100)
+                        _pct_part = (
+                            f" <span style='color:#9db1b3;font-size:0.85em'>"
+                            f"({_pct_int}%)</span>"
+                        )
+                    _row += (
+                        f"<td style='{_TD};text-align:center;color:#5e6a6b;"
+                        f"white-space:nowrap'>{_w['wsp']} kt</td>"
+                        f"<td style='{_TD};text-align:right;white-space:nowrap'>"
+                        f"<b style='color:#1f2324'>{_fmt_pop_toc(_w['total'])}</b>"
+                        f"{_pct_part}</td>"
                     )
                 _row += (
-                    f"<td style='{_TD};text-align:center;color:#5e6a6b;"
-                    f"white-space:nowrap'>{_w['wsp']} kt</td>"
-                    f"<td style='{_TD};text-align:right;white-space:nowrap'>"
-                    f"<b style='color:#1f2324'>{_fmt_pop_toc(_w['total'])}</b>"
-                    f"{_pct_part}</td>"
                     f"<td style='{_TD}'>{_rp_pill(_w['rp'])}</td>"
                     f"</tr>"
                 )
@@ -1773,10 +1822,11 @@ def _email_readme_blocks(storm_label, aid, issued_time_dt, adm0, adm1, cav):
           "they do NOT necessarily sum to the country total. The caveat "
           "column flags GDACS/ADAM boundary-matching caveats for that unit."),
         B("bullet", "is_final_alert = TRUE marks the last update for that "
-          "country: the storm no longer poses a forecast threat there and the "
-          "figures reflect observed exposure. Final updates are only issued "
-          "for countries with observed exposure; for a near miss (forecast "
-          "only, storm never arrived) the country's updates simply stop."),
+          "country: the storm no longer poses a forecast threat there. Every "
+          "country that was alerted gets one, including a near miss the storm "
+          "never reached — its rows then read pop_exposed = 0 with an empty "
+          "sources column, meaning no exposure was ever observed. Figures on a "
+          "final row will not change unless the track turns back."),
     ]
 
 
@@ -1846,18 +1896,39 @@ def generate_exposure_workbook(
     prev_any_rows = fetch_prev_any_pairs(engine, issued_time_dt)
     prev_any_pairs = {(r["atcf_id"], r["iso3"]) for r in prev_any_rows}
 
-    current_any_pairs = {(r.atcf_id, r.iso3) for r in fcast_df.itertuples()}
+    # "Still active" is defined exactly as in generate_alert_html — track
+    # forecast OR WSP band — because is_final_alert has to agree with the
+    # notice in the email body this workbook is attached to. Testing the track
+    # table alone marked a WSP-only pair final while the email still reported
+    # it as active; that stayed hidden only because the observed-exposure
+    # filter went on to discard most such pairs.
+    prev_atcf_ids = sorted({r["atcf_id"] for r in prev_any_rows})
+    wsp_exp_df = fetch_wsp_fcastonly_exposure(
+        engine, sorted(set(all_atcf_ids) | set(prev_atcf_ids)), issued_time_dt
+    )
+    current_any_pairs = (
+        {(r.atcf_id, r.iso3) for r in fcast_df.itertuples()}
+        | {(r.atcf_id, r.iso3) for r in wsp_exp_df.itertuples() if r.pop_exposed > 0}
+    )
+    # No observed-exposure filter: a pair that loses its forecast is final
+    # whether or not the storm arrived. A near miss then reports rows of 0 with
+    # an empty sources column, which is the honest record of what happened.
     final_update_pairs: set[tuple[str, str]] = prev_any_pairs - current_any_pairs
 
-    all_fetch_ids = sorted(set(all_atcf_ids) | {aid for aid, _ in final_update_pairs})
+    # Which pairs get rows. Deliberately NOT current_any_pairs: this workbook
+    # carries deterministic figures (CHD/ADAM/GDACS), not WSP probability
+    # bands, so a WSP-only pair has nothing to report and would fill the sheet
+    # with zeros. It starts appearing the moment it has real figures — or ends,
+    # which is when its zeros carry the meaning "the storm never arrived".
+    row_pairs = {
+        (r.atcf_id, r.iso3) for r in fcast_df.itertuples()
+    } | final_update_pairs
+
+    all_fetch_ids = sorted({aid for aid, _ in row_pairs})
     if not all_fetch_ids:
         return []
 
     obsv_df = fetch_current_obsv_exposure(engine, all_fetch_ids, issued_time_dt)
-    obsv_pairs = {
-        (r.atcf_id, r.iso3) for r in obsv_df.itertuples() if r.pop_exposed > 0
-    }
-    final_update_pairs = {p for p in final_update_pairs if p in obsv_pairs}
 
     gdacs_cur_df = fetch_gdacs_current_exposure(engine, all_fetch_ids, issued_time_dt)
     adam_cur_df = fetch_adam_current_exposure(engine, all_fetch_ids, issued_time_dt)
@@ -1901,7 +1972,7 @@ def generate_exposure_workbook(
 
     # Group pairs by storm
     storm_to_pairs: dict[str, list[tuple[str, str]]] = {}
-    for aid, iso3 in current_any_pairs | final_update_pairs:
+    for aid, iso3 in row_pairs:
         storm_to_pairs.setdefault(aid, []).append((aid, iso3))
 
     # Country name lookup
