@@ -57,6 +57,12 @@ from src.plots import (
     wind_speed_color,
 )
 
+# Minimum distinct seasons the historical obsv-exposure sample must cover
+# (since 2002) before return periods are shown. See the rp_enabled gate in
+# main(). 2026-09-22: prod history is empty until it is backfilled.
+RP_MIN_HIST_SEASONS = 20
+
+
 _HIST_COLOR = "#888888"
 _SRC_LABELS = {"our": "CHD", "ADAM": "ADAM", "GDACS": "GDACS"}
 
@@ -568,6 +574,20 @@ def generate_alert_html(
         engine, all_render_iso3s, exclude_atcf_ids=all_render_atcf_ids
     )
     hist_df = hist_df[hist_df["season"] >= 2002].reset_index(drop=True)
+    # Return periods assume the history covers every season since 2002
+    # (n_seasons is fixed, exceedances are counted from hist_df). A thin
+    # history — the prod DB right after the 2026-09-22 cutover holds no
+    # backfilled obsv exposure yet — would not make RPs missing but WRONG
+    # (every exposed country prints a red "26-year RP"). Gate RPs on the
+    # history actually covering (almost) the whole window; the pills,
+    # heading and chart labels all render cleanly for rp=None.
+    _hist_seasons = int(hist_df["season"].nunique()) if not hist_df.empty else 0
+    rp_enabled = _hist_seasons >= RP_MIN_HIST_SEASONS
+    if not rp_enabled:
+        logger.warning(
+            f"Historical obsv exposure covers {_hist_seasons} season(s) "
+            f"(< {RP_MIN_HIST_SEASONS}) — return periods disabled for this run."
+        )
 
     iso3_to_total_pop = fetch_admin_population(engine, all_render_iso3s)
 
@@ -806,7 +826,7 @@ def generate_alert_html(
         return str(int(x))
 
     def _rp_numeric(forecast_val: float, iso3: str, wsp: int) -> float | None:
-        if forecast_val <= 0:
+        if not rp_enabled or forecast_val <= 0:
             return None
         hist_vals = hist_df[
             (hist_df["iso3"] == iso3) & (hist_df["wind_speed_kt"] == wsp)
@@ -1381,7 +1401,7 @@ def generate_alert_html(
                 )
 
         howto_html = ""
-        if country_sections:
+        if country_sections and rp_enabled:
             _howto_fcast = (
                 " &middot; the <b style='color:#5e6a6b'>coloured curves</b> "
                 "are the forecast probabilistic distribution of exposure "

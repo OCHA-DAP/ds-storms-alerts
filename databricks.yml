@@ -52,12 +52,13 @@ variables:
     description: '"True" = Tristan-only test list; "False" = real per-country subscriber lists'
     default: "True"
   stage:
-    # ocha-stratus DB/blob stage the pipeline reads exposure data from. Currently
-    # "dev" for all targets — that's where the storm pipeline writes (the cluster
-    # has no prod-write). Flip a target to "prod" once prod data lands; keeping it
-    # a variable means the data source can't silently disagree with the target.
+    # ocha-stratus DB/blob stage the pipeline reads exposure data from. "prod"
+    # since 2026-09-22: the dev DB lost public network access that day and
+    # ds-storms-pipeline's prod jobs now write the prod storms.* tables.
+    # Keeping it a variable means the data source can't silently disagree
+    # with the target (override per run with --params stage=dev if ever needed).
     description: '"dev" | "prod" — DB/blob stage to read from'
-    default: "dev"
+    default: "prod"
 
 targets:
   prod:
@@ -75,7 +76,6 @@ targets:
       user_name: adm.tdowning@global.un.org
     variables:
       # Live: send to the real per-country subscriber lists (not the test list).
-      # Still reads the DEV database (stage var defaults to "dev").
       test_email: "False"
     # Prod runs on an ephemeral Job Compute cluster, not the personal
     # interactive cluster.
