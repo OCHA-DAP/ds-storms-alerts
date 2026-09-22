@@ -51,6 +51,14 @@ variables:
     # Default is the safe test list; the prod target overrides to "False" (see below).
     description: '"True" = Tristan-only test list; "False" = real per-country subscriber lists'
     default: "True"
+  email_backend:
+    # TEMPORARY "ses" (direct SMTP through the humdata SES account, explicit
+    # recipients in src/constants.py) while Listmonk is down — it runs on the
+    # dev DB, which lost public network access on 2026-09-22. Flip back to
+    # "listmonk" once Listmonk is migrated. Needs DSCI_AWS_EMAIL_* in the dsci
+    # secret scope (the wrapper injects them like the Listmonk creds).
+    description: '"listmonk" | "ses" — send backend (see src/ses_mail.py)'
+    default: "ses"
   stage:
     # ocha-stratus DB/blob stage the pipeline reads exposure data from. "prod"
     # since 2026-09-22: the dev DB lost public network access that day and
@@ -159,6 +167,8 @@ resources:
           default: ${var.dry_run}
         - name: stage            # DB/blob stage to read from (see variables block)
           default: ${var.stage}
+        - name: email_backend    # "listmonk" | "ses" (see variables block)
+          default: ${var.email_backend}
 
       tasks:
         # Compute (existing_cluster_id vs job_cluster_key) is supplied per
@@ -172,6 +182,7 @@ resources:
               - "{{job.parameters.test_email}}"
               - "{{job.parameters.dry_run}}"
               - "{{job.parameters.stage}}"
+              - "{{job.parameters.email_backend}}"
           # The prod job cluster is created fresh every run, so this list is
           # the ENTIRE non-DBR environment — nothing is hand-installed on it.
           # Keep it in step with pyproject [project.dependencies]. (The first

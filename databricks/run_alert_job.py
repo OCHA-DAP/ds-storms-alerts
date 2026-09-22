@@ -6,6 +6,7 @@ The bundle's ``spark_python_task`` passes the job parameters positionally:
     sys.argv[2] = test_email    # "True" | "False"
     sys.argv[3] = dry_run       # "True" | "False"
     sys.argv[4] = stage         # "dev" | "prod" (ocha-stratus DB/blob stage)
+    sys.argv[5] = email_backend # "listmonk" | "ses" (see src/ses_mail.py)
 
 ``pipelines/run_alert.py`` and ``src/`` stay pure Python — they don't know about
 DBX (the GHA workflow runs the same script). This wrapper is the only DBX-specific
@@ -31,7 +32,7 @@ import sys
 def _find_script_dir() -> str:
     """spark_python_task's exec context doesn't always define __file__."""
     try:
-        return os.path.dirname(os.path.abspath(__file__))  # noqa: F821
+        return os.path.dirname(os.path.abspath(__file__))
     except NameError:
         pass
     if sys.argv and sys.argv[0]:
@@ -49,6 +50,7 @@ ISSUED_TIME = _arg(1)
 TEST_EMAIL = _arg(2, "True")
 DRY_RUN = _arg(3, "True")
 STAGE = _arg(4, "dev")
+EMAIL_BACKEND = _arg(5, "listmonk")
 
 # Listmonk config — absent from the cluster env on both targets, pulled from the dsci scope
 # (base URL + API creds, so dev/prod can't drift and repointing needs no code edit).
@@ -57,19 +59,26 @@ STAGE = _arg(4, "dev")
 # raise a clear missing-env error.
 from databricks.sdk.runtime import dbutils  # noqa: E402
 
+# The SES (direct SMTP) backend needs the DSCI_AWS_EMAIL_* set instead — same
+# scope, same tolerance.
 for _key in (
     "DSCI_LISTMONK_BASE_URL",
     "DSCI_LISTMONK_API_USERNAME",
     "DSCI_LISTMONK_API_KEY",
+    "DSCI_AWS_EMAIL_HOST",
+    "DSCI_AWS_EMAIL_ADDRESS",
+    "DSCI_AWS_EMAIL_USERNAME",
+    "DSCI_AWS_EMAIL_PASSWORD",
 ):
     try:
         os.environ[_key] = dbutils.secrets.get("dsci", _key)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"[run_alert_job] WARNING: dsci/{_key} unavailable ({exc}); "
-              "real sends will fail until it is set.")
+              "sends via that backend will fail until it is set.")
 
 os.environ["TEST_EMAIL"] = TEST_EMAIL
 os.environ["DRY_RUN"] = DRY_RUN
+os.environ["EMAIL_BACKEND"] = EMAIL_BACKEND
 
 # Make `src` importable for the child process (repo isn't pip-installed here).
 env = dict(os.environ)
@@ -87,7 +96,8 @@ if __name__ == "__main__":
     print(
         f"[run_alert_job] repo_root={REPO_ROOT} STAGE={STAGE} "
         f"TEST_EMAIL={TEST_EMAIL} "
-        f"DRY_RUN={DRY_RUN} issued_time={ISSUED_TIME or '(realtime)'}"
+        f"DRY_RUN={DRY_RUN} EMAIL_BACKEND={EMAIL_BACKEND} "
+        f"issued_time={ISSUED_TIME or '(realtime)'}"
     )
     rc = subprocess.run(cmd, cwd=REPO_ROOT, env=env, check=False).returncode
     # DBX treats a top-level sys.exit()/SystemExit (even code 0) as a task

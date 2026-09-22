@@ -15,7 +15,14 @@ from zoneinfo import ZoneInfo
 
 import ocha_stratus as stratus
 
-from src.constants import COUNTRY_LIST_TAG, LAC_ISO3S, TEST_LIST_IDS
+from src import fm_matching as fm
+from src.constants import (
+    COUNTRY_LIST_TAG,
+    LAC_ISO3S,
+    SES_RECIPIENTS_LIVE,
+    SES_RECIPIENTS_TEST,
+    TEST_LIST_IDS,
+)
 from src.data import (
     fetch_active_storm_meta,
     fetch_adam_current_exposure,
@@ -34,18 +41,15 @@ from src.data import (
     fetch_gdacs_historical_exposure,
     fetch_historical_obsv_exposure,
     fetch_lookup_caveats,
-    fetch_track_geo,
     fetch_prev_any_pairs,
+    fetch_track_geo,
     fetch_wsp_fcastonly_exposure,
     fetch_wsp_fcastonly_polygons,
     load_adm0_boundaries,
     load_adm1_boundaries,
     load_background_countries,
 )
-from src import fm_matching as fm
 from src.landfall import compute_landfalls, nearest_adm1_name, saffir_simpson
-from src.preview import PreviewUnavailable, render_with_template
-from src.xlsx_style import build_readme, style_data_sheet
 from src.plots import (
     StormMark,
     WspPdf,
@@ -56,6 +60,9 @@ from src.plots import (
     track_plot_wsp,
     wind_speed_color,
 )
+from src.preview import PreviewUnavailable, render_with_template
+from src.ses_mail import recipients_from_env, send_via_ses, wrap_html
+from src.xlsx_style import build_readme, style_data_sheet
 
 # Minimum distinct seasons the historical obsv-exposure sample must cover
 # (since 2002) before return periods are shown. See the rp_enabled gate in
@@ -298,6 +305,14 @@ def _most_recent_advisory_time() -> datetime:
 
 
 TEST_EMAIL = _parse_bool_env("TEST_EMAIL", default=True)
+# "listmonk" (default) or "ses" — see src/ses_mail.py. Env-driven like the
+# TEST_EMAIL / DRY_RUN switches so the DBX wrapper and GHA can set it.
+_backend = os.environ.get("EMAIL_BACKEND", "listmonk").strip().lower()
+EMAIL_BACKEND = _backend or "listmonk"
+if EMAIL_BACKEND not in ("listmonk", "ses"):
+    raise SystemExit(
+        f"EMAIL_BACKEND must be 'listmonk' or 'ses', got {EMAIL_BACKEND!r}"
+    )
 DRY_RUN = _parse_bool_env("DRY_RUN", default=True)
 
 
@@ -2136,7 +2151,7 @@ if __name__ == "__main__":
         TEST_EMAIL, DRY_RUN = True, False
     logger.info(
         f"Starting alert pipeline: {issued_time=} {stage=} "
-        f"{TEST_EMAIL=} {DRY_RUN=} {preview=}"
+        f"{TEST_EMAIL=} {DRY_RUN=} {preview=} {EMAIL_BACKEND=}"
     )
 
     engine = stratus.get_engine(stage=stage)
@@ -2208,8 +2223,28 @@ if __name__ == "__main__":
             else f"countries {active_iso3s}"
         )
         logger.info(
-            f"DRY_RUN=True — skipping email. "
+            f"DRY_RUN=True — skipping email ({EMAIL_BACKEND}). "
             f"Would have sent: {subject!r} to {target}"
+        )
+    elif EMAIL_BACKEND == "ses":
+        # Direct SMTP: explicit recipients instead of Listmonk lists, CID
+        # inline images instead of media uploads, no template chrome.
+        # Monitoring emails go to the same people (they ARE the monitoring
+        # audience while Listmonk is down).
+        if args.send_test or TEST_EMAIL:
+            recipients = recipients_from_env(SES_RECIPIENTS_TEST, "SES_TEST_RECIPIENTS")
+        else:
+            recipients = recipients_from_env(SES_RECIPIENTS_LIVE)
+        attachments: list[tuple[str, bytes]] = []
+        if not is_monitoring:
+            logger.info("Generating exposure workbook attachments...")
+            attachments = generate_exposure_workbook(engine, issued_time_dt)
+        send_via_ses(
+            subject,
+            wrap_html(body),
+            recipients,
+            attachments=attachments,
+            text_fallback=subject,
         )
     else:
         from ocha_relay.listmonk import ListmonkClient
