@@ -181,7 +181,7 @@ resources:
           libraries:
             - pypi: { package: "ocha-stratus>=0.1.7" }
             - pypi:
-                package: "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@2d4870749faa4235e65164b731e0a574a2e209ab"
+                package: "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@v0.3.0"
             - pypi: { package: "matplotlib>=3.9" }
             - pypi: { package: "geopandas" }
             - pypi: { package: "openpyxl>=3.1.5" }
