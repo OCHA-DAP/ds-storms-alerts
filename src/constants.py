@@ -29,5 +29,6 @@ SES_RECIPIENTS_LIVE = [
     "tristan.downing@un.org",
     "zachary.arno@un.org",
     "leonardo.milano@un.org",
+    "hannah.ker@un.org",
 ]
 SES_RECIPIENTS_TEST = ["tristan.downing@un.org"]
