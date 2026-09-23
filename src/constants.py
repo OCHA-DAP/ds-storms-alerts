@@ -20,3 +20,14 @@ LAC_ISO3S: frozenset[str] = frozenset({
     "NIC", "PAN", "PRI", "SLV", "SPM", "SUR", "SXM",
     "TCA", "TTO", "VCT", "VEN", "VGB", "VIR",
 })
+
+# SES (direct SMTP) backend — stop-gap while Listmonk is down (it runs on the
+# dev DB, which lost public network access on 2026-09-22). Selected with
+# EMAIL_BACKEND=ses; recipients can be overridden with SES_RECIPIENTS
+# (comma-separated). See src/ses_mail.py.
+SES_RECIPIENTS_LIVE = [
+    "tristan.downing@un.org",
+    "zachary.arno@un.org",
+    "leonardo.milano@un.org",
+]
+SES_RECIPIENTS_TEST = ["tristan.downing@un.org"]
