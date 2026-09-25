@@ -52,13 +52,14 @@ variables:
     description: '"True" = Tristan-only test list; "False" = real per-country subscriber lists'
     default: "True"
   email_backend:
-    # TEMPORARY "ses" (direct SMTP through the humdata SES account, explicit
-    # recipients in src/constants.py) while Listmonk is down — it runs on the
-    # dev DB, which lost public network access on 2026-09-22. Flip back to
-    # "listmonk" once Listmonk is migrated. Needs DSCI_AWS_EMAIL_* in the dsci
-    # secret scope (the wrapper injects them like the Listmonk creds).
+    # "listmonk" (default) sends through the team's Listmonk instance. "ses"
+    # (direct SMTP through the humdata SES account, explicit recipients in
+    # src/constants.py) is the escape hatch used 2026-09-22..25 while Listmonk
+    # was down; it needs DSCI_AWS_EMAIL_* in the dsci secret scope (the wrapper
+    # injects them like the Listmonk creds). Override per deploy with
+    # --var email_backend=ses if Listmonk goes down again.
     description: '"listmonk" | "ses" — send backend (see src/ses_mail.py)'
-    default: "ses"
+    default: "listmonk"
   stage:
     # ocha-stratus DB/blob stage the pipeline reads exposure data from. "prod"
     # since 2026-09-22: the dev DB lost public network access that day and
