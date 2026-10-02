@@ -139,15 +139,22 @@ resources:
         git_branch: ${var.git_branch}
 
       schedule:
-        # 03:50 / 09:50 / 15:50 / 21:50 UTC — ~50 min after each NHC advisory.
-        # Was :30, which raced the upstream NHC chain: its :00 run lands
-        # exposure ~:15-:25 and its :30 WSP-retry can update WSP tables right
-        # as the alert reads them (an upstream hiccup then left the email a
-        # full issuance behind — Dolly, 2026-08-27). :50 clears both runs.
+        # TEMPORARY (cost saving, 2026-09-30): 04:15 / 10:15 / 16:15 / 22:15
+        # UTC. ds-storms-pipeline temporarily runs NHC ONCE per advisory, at
+        # :30 of 03/09/15/21 (tracks + WSP in one run, ~15-30 min), so :50
+        # would race it. :15 of the next hour clears even a slow run; the
+        # realtime issued_time is still the latest 03/09/15/21 advisory
+        # (_most_recent_advisory_time). Revert with the NHC schedule to:
+        # "0 50 3,9,15,21 * * ?" — 03:50 / 09:50 / 15:50 / 21:50, ~50 min
+        # after each advisory. (That was itself moved from :30, which raced
+        # the upstream NHC chain: its :00 run lands exposure ~:15-:25 and its
+        # :30 WSP-retry can update WSP tables right as the alert reads them —
+        # an upstream hiccup then left the email a full issuance behind —
+        # Dolly, 2026-08-27. :50 clears both runs.)
         # No explicit pause_status: prod (production mode) runs it; the dev
         # target (development mode) auto-pauses it. Setting UNPAUSED here would
         # override dev's auto-pause and make dev fire too — don't.
-        quartz_cron_expression: "0 50 3,9,15,21 * * ?"
+        quartz_cron_expression: "0 15 4,10,16,22 * * ?"
         timezone_id: UTC
 
       max_concurrent_runs: 1
