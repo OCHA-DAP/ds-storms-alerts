@@ -3,18 +3,18 @@
 # There is one live job (the `prod` target, the default). It handles both the
 # scheduled runs and any ad-hoc manual runs (override params per run):
 #
-#   databricks bundle deploy -p default                                  # deploy prod
-#   databricks bundle run storm_alert -p default                         # manual run (live params)
-#   databricks bundle run storm_alert -p default --params issued_time=2025-10-24T18
-#   databricks bundle run storm_alert -p default --params test_email=True,dry_run=True
+#   databricks bundle deploy -p DEFAULT                                  # deploy prod
+#   databricks bundle run storm_alert -p DEFAULT                         # manual run (live params)
+#   databricks bundle run storm_alert -p DEFAULT --params issued_time=2025-10-24T18
+#   databricks bundle run storm_alert -p DEFAULT --params test_email=True,dry_run=True
 #
 # The `dev` target is for feature work: deploy it on-demand pointed at a feature
 # branch — it auto-pauses the schedule and uses the test list, so it never
 # competes with prod. Tear it down when the feature merges:
 #
-#   databricks bundle deploy  -t dev -p default --var git_branch=my-feature
-#   databricks bundle run     storm_alert -t dev -p default              # manual test run
-#   databricks bundle destroy -t dev -p default
+#   databricks bundle deploy  -t dev -p DEFAULT --var git_branch=my-feature
+#   databricks bundle run     storm_alert -t dev -p DEFAULT              # manual test run
+#   databricks bundle destroy -t dev -p DEFAULT
 #
 # The job clones this repo (source: GIT) at ${var.git_branch} and runs the thin
 # wrapper databricks/run_alert_job.py, which shells out to pipelines/run_alert.py.
@@ -77,7 +77,7 @@ targets:
     mode: production
     default: true
     workspace:
-      profile: default
+      profile: DEFAULT
       root_path: /Workspace/Users/adm.tdowning@global.un.org/.bundle/${bundle.name}/${bundle.target}
     # Explicit for production mode, and pins the SINGLE_USER job cluster's
     # identity (mirrors ds-storms-pipeline).
@@ -118,7 +118,7 @@ targets:
     # so it never competes with the live prod job. Destroy when done.
     mode: development
     workspace:
-      profile: default
+      profile: DEFAULT
     # Dev runs on the personal interactive cluster (instant start, no per-run
     # library install) — fine for on-demand feature testing.
     resources:
