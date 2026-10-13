@@ -16,7 +16,7 @@ trigger latency had degraded to ~1 hour late (vs ~10 min a year earlier); the GH
   out to `pipelines/run_alert.py`. Pipeline code (`pipelines/`, `src/`) stays pure
   Python and DBX-agnostic.
 - Compute is per target (same split as `ds-storms-pipeline`): **prod** runs on an
-  ephemeral **Job Compute** cluster under policy `000C79D951EAF0D6`, which injects the
+  ephemeral **Job Compute (single node)** cluster under policy `0017962FF5D1E3B9`, which injects the
   `DSCI_AZ_*` DB/blob env vars from the `dsci` scope; **dev** runs on the personal
   interactive cluster `${var.existing_cluster_id}` (instant start). The `stage` param
   (default `dev`) selects which database is read, independent of the target.

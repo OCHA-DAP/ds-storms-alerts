@@ -94,19 +94,19 @@ targets:
           job_clusters:
             - job_cluster_key: alert_cluster
               new_cluster:
-                # Job Compute policy (000C79D951EAF0D6): fixes cluster_type=job,
-                # num_workers=1, STANDARD engine, and injects all dsci secret
-                # env vars (DEV+PROD DB/blob) — so no spark_env_vars block.
+                # Job Compute (single node) policy (0017962FF5D1E3B9): fixes
+                # cluster_type=job, num_workers=0 (so it is not set here),
+                # STANDARD engine, and injects all dsci secret env vars
+                # (DEV+PROD DB/blob) — so no spark_env_vars block.
                 # Listmonk creds are not in the policy; the wrapper pulls them
                 # from the dsci scope via dbutils.secrets at run time.
-                policy_id: "000C79D951EAF0D6"
+                policy_id: "0017962FF5D1E3B9"
                 apply_policy_default_values: true
                 spark_version: "18.2.x-scala2.13"
                 # DS4_v2 (28 GB) matches the personal cluster the job ran on
                 # before (also DS4_v2), so this isn't a step down. The Python
-                # runs on the driver; the policy-mandated worker idles.
+                # runs on the driver, which is the cluster's only VM.
                 node_type_id: "Standard_DS4_v2"
-                num_workers: 1
                 data_security_mode: SINGLE_USER
           tasks:
             - task_key: run_alert
