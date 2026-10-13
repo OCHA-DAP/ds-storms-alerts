@@ -37,16 +37,16 @@ twice per advisory and cause confusion.
 
 ```bash
 # --- Live job (prod is the default target) ---
-databricks bundle validate -p default
-databricks bundle deploy   -p default                 # deploy/update the live job
-databricks bundle run storm_alert -p default          # manual run — SENDS FOR REAL
-databricks bundle run storm_alert -p default --params issued_time=2025-10-24T18   # backfill
-databricks bundle run storm_alert -p default --params test_email=True,dry_run=True # safe manual test
+databricks bundle validate -p DEFAULT
+databricks bundle deploy   -p DEFAULT                 # deploy/update the live job
+databricks bundle run storm_alert -p DEFAULT          # manual run — SENDS FOR REAL
+databricks bundle run storm_alert -p DEFAULT --params issued_time=2025-10-24T18   # backfill
+databricks bundle run storm_alert -p DEFAULT --params test_email=True,dry_run=True # safe manual test
 
 # --- Feature development (throwaway dev job from your branch) ---
-databricks bundle deploy  -t dev -p default --var git_branch=my-feature
-databricks bundle run     storm_alert -t dev -p default   # paused schedule, test list
-databricks bundle destroy -t dev -p default               # when the feature merges
+databricks bundle deploy  -t dev -p DEFAULT --var git_branch=my-feature
+databricks bundle run     storm_alert -t dev -p DEFAULT   # paused schedule, test list
+databricks bundle destroy -t dev -p DEFAULT               # when the feature merges
 ```
 
 ## Send-mode params (the GHA-vars analog)
@@ -70,9 +70,9 @@ real**. For a safe manual check pass `--params test_email=True,dry_run=True`, or
    `ds-storms-pipeline`).
 2. Listmonk config in the `dsci` secret scope (base URL + API creds):
    ```bash
-   databricks secrets put-secret dsci DSCI_LISTMONK_BASE_URL     -p default
-   databricks secrets put-secret dsci DSCI_LISTMONK_API_USERNAME -p default
-   databricks secrets put-secret dsci DSCI_LISTMONK_API_KEY      -p default
+   databricks secrets put-secret dsci DSCI_LISTMONK_BASE_URL     -p DEFAULT
+   databricks secrets put-secret dsci DSCI_LISTMONK_API_USERNAME -p DEFAULT
+   databricks secrets put-secret dsci DSCI_LISTMONK_API_KEY      -p DEFAULT
    ```
 
 ## Gotchas / best practices (learned the hard way)
@@ -101,5 +101,5 @@ Re-enable the GitHub Actions schedule if needed:
 ```bash
 gh workflow enable "Run Storm Alert"
 ```
-Revert the DBX job to the test list: `databricks bundle deploy -p default --var test_email=True`.
+Revert the DBX job to the test list: `databricks bundle deploy -p DEFAULT --var test_email=True`.
 Pause it entirely: pause the job in the workspace UI.
