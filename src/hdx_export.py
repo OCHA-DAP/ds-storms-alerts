@@ -33,7 +33,13 @@ every country of the storm that is not still active at the CURRENT advisory
 forecast OR WSP band exposure. A storm with no advisory at `as_of` is
 therefore final everywhere — the scraper's earlier per-storm test compared a
 storm's last advisory with the one before it, so a storm that dissipated
-while still forecast over a country stayed FALSE for good.
+while still forecast over a country stayed FALSE for good. The flip side is
+the alert's own race: if the storms pipeline has not landed the `as_of`
+advisory when this runs, a live storm looks ended for one cycle. The job runs
+well after the NHC run for that reason.
+
+latest/ only moves forward: a backfill run (an older issued_time) writes its
+dated folder but leaves latest/ alone.
 """
 
 import json
@@ -42,6 +48,7 @@ from datetime import UTC, datetime
 
 import ocha_stratus as stratus
 import pandas as pd
+from azure.core.exceptions import ResourceNotFoundError
 from sqlalchemy import Engine, text
 
 from src.constants import PROJECT_PREFIX
@@ -347,6 +354,15 @@ class CountryNames:
         return {i: self._names.get(i, i) for i in iso3s}
 
 
+def _manifest_as_of(blob: str) -> datetime | None:
+    """as_of of the manifest at `blob`, or None if there is none yet."""
+    try:
+        manifest = json.loads(stratus.load_blob_data(blob, stage=BLOB_STAGE))
+    except ResourceNotFoundError:
+        return None
+    return datetime.fromisoformat(manifest["as_of"])
+
+
 def export_season(
     engine: Engine,
     as_of: datetime,
@@ -428,7 +444,20 @@ def export_season(
         body = json.dumps(manifest, indent=1)
         # Dated copy first, latest/ last: a reader of latest/ only ever sees a
         # manifest whose CSVs are all already in place.
-        for name in (f"{folder}/manifest.json", f"{root}/latest/manifest.json"):
+        names = [f"{folder}/manifest.json"]
+        latest = f"{root}/latest/manifest.json"
+        latest_as_of = _manifest_as_of(latest)
+        # latest/ only moves forward. A backfill run of the job (an older
+        # issued_time) would otherwise point the scraper at that advisory's
+        # storms — another season's, even — and it would publish them.
+        if latest_as_of is None or as_of >= latest_as_of:
+            names.append(latest)
+        else:
+            logger.warning(
+                "HDX export: latest/ is at %s, after %s; writing the dated "
+                "folder only.", latest_as_of, as_of,
+            )
+        for name in names:
             stratus.upload_blob_data(
                 body, name, stage=BLOB_STAGE, content_type="application/json"
             )
