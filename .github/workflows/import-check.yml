@@ -3,9 +3,10 @@
 # cluster) crashes the pipeline at import, silently killing every alert email.
 #
 # This job recreates the CLUSTER's environment — install from requirements.txt,
-# NOT uv sync — and import-loads pipelines/run_alert.py exactly as the DBX
-# wrapper does. Any import-time breakage (missing dep, syntax error, moved
-# module) fails the PR instead of the 21:30 UTC production run.
+# NOT uv sync — and import-loads pipelines/run_alert.py (and export_hdx.py, the
+# hdx_export task) exactly as the DBX wrappers do. Any import-time breakage
+# (missing dep, syntax error, moved module) fails the PR instead of the 21:30
+# UTC production run.
 name: Import check (cluster env parity)
 
 on:
@@ -29,9 +30,10 @@ jobs:
           python - <<'EOF'
           import importlib.util, sys
           sys.path.insert(0, ".")
-          spec = importlib.util.spec_from_file_location(
-              "run_alert", "pipelines/run_alert.py")
-          mod = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(mod)
-          print("pipelines/run_alert.py imports cleanly")
+          for name in ("run_alert", "export_hdx"):
+              spec = importlib.util.spec_from_file_location(
+                  name, f"pipelines/{name}.py")
+              mod = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(mod)
+              print(f"pipelines/{name}.py imports cleanly")
           EOF

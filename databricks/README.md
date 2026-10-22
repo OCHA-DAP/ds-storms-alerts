@@ -7,7 +7,13 @@ trigger latency had degraded to ~1 hour late (vs ~10 min a year earlier); the GH
 
 ## Architecture
 
-- One job, `storm_alert`, a single `spark_python_task`.
+- One job, `storm_alert`, with two independent `spark_python_task`s on the same
+  cluster: `run_alert` (the email) and `hdx_export` (per-storm CSVs on blob for
+  `hdx-scraper-storms`, via `databricks/run_hdx_export_job.py`). Neither depends on
+  the other, so either failing fails the run and sends the failure email; run one
+  alone with `--only run_alert` / `--only hdx_export`. `hdx_export` follows the
+  same params: `dry_run=True` uploads nothing, `test_email=True` writes to
+  `processed/hdx_test/`, which the scraper never reads.
 - `source: GIT` clones this repo at `${var.git_branch}` **at run time**, so shipping
   a code change = pushing the branch (no redeploy needed). A `bundle deploy` is only
   needed when the *job config* (schedule, params, libraries, cluster) changes.

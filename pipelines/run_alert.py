@@ -9,7 +9,7 @@ import sys
 import tempfile
 import webbrowser
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -48,6 +48,7 @@ from src.data import (
     load_adm0_boundaries,
     load_adm1_boundaries,
     load_background_countries,
+    most_recent_advisory_time,
 )
 from src.landfall import compute_landfalls, nearest_adm1_name, saffir_simpson
 from src.plots import (
@@ -291,17 +292,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
-
-
-def _most_recent_advisory_time() -> datetime:
-    """Most recent NHC advisory hour (03/09/15/21 UTC) on or before now."""
-    now = datetime.now(UTC)
-    for h in (21, 15, 9, 3):
-        if now.hour >= h:
-            return now.replace(hour=h, minute=0, second=0, microsecond=0, tzinfo=None)
-    return (now - timedelta(days=1)).replace(
-        hour=21, minute=0, second=0, microsecond=0, tzinfo=None
-    )
 
 
 TEST_EMAIL = _parse_bool_env("TEST_EMAIL", default=True)
@@ -2135,7 +2125,7 @@ if __name__ == "__main__":
     if args.issued_time:
         issued_time_dt = datetime.strptime(args.issued_time, "%Y-%m-%dT%H")
     else:
-        issued_time_dt = _most_recent_advisory_time()
+        issued_time_dt = most_recent_advisory_time()
         logger.info(
             f"No --issued-time provided; defaulted to most recent advisory "
             f"hour {issued_time_dt.isoformat()}"
