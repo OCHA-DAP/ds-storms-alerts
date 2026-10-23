@@ -18,6 +18,13 @@ a day at the NHC advisory hours (03:30 / 09:30 / 15:30 / 21:30 UTC). See
 commands, send-mode switches, and operational notes. (A GitHub Actions schedule
 previously ran it but is disabled — Databricks is the runner now.)
 
+The same job also runs the **HDX export** (`pipelines/export_hdx.py`, task `hdx_export`):
+one population-exposure CSV per storm of the current season plus a manifest, written to
+the dev blob under `ds-storms-alerts/processed/hdx/`. The HDX Data Systems pipeline
+[`OCHA-DAP/hdx-scraper-storms`](https://github.com/OCHA-DAP/hdx-scraper-storms)
+publishes them to HDX from GitHub Actions, which can no longer reach the database.
+Layout and the meaning of `is_final_alert` on HDX: [`src/hdx_export.py`](src/hdx_export.py).
+
 ## Repository layout
 
 | Path | What |
@@ -25,7 +32,9 @@ previously ran it but is disabled — Databricks is the runner now.)
 | `pipelines/run_alert.py` | The alert pipeline: fetch exposure → render maps/charts → email. |
 | `pipelines/generate_showcase.py` | Regenerates the historical example alerts under `docs/alerts/`. |
 | `pipelines/setup_country_lists.py` | Provisions the per-country Listmonk subscriber lists. |
+| `pipelines/export_hdx.py` | Per-storm exposure CSVs + manifest on blob for hdx-scraper-storms. |
 | `src/data.py` | Data access (DB + blob) via `ocha-stratus`. |
+| `src/hdx_export.py` | Builds the HDX per-storm CSVs (the scraper's layout) and the manifest. |
 | `src/plots.py` | Strip charts and storm maps (matplotlib / geopandas). |
 | `src/preview.py` | Renders a body through the real Listmonk template, no send. |
 | `databricks/` | Databricks Asset Bundle + the thin job wrapper, and its README. |

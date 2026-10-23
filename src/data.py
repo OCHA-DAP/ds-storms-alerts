@@ -5,7 +5,7 @@ import math
 import os
 import pickle
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 
@@ -102,6 +102,17 @@ _WIND_SPEEDS_KT = (34, 50, 64)
 # of the two when both exist. This covers both the WSP synoptic-grid lag
 # (e.g. 15:00 advisory → 12:00 WSP) and a one-cycle lag in GDACS/ADAM publication.
 _ISSUED_OFFSET_HOURS = 3
+
+
+def most_recent_advisory_time() -> datetime:
+    """Most recent NHC advisory hour (03/09/15/21 UTC) on or before now."""
+    now = datetime.now(UTC)
+    for h in (21, 15, 9, 3):
+        if now.hour >= h:
+            return now.replace(hour=h, minute=0, second=0, microsecond=0, tzinfo=None)
+    return (now - timedelta(days=1)).replace(
+        hour=21, minute=0, second=0, microsecond=0, tzinfo=None
+    )
 
 
 @_disk_cached

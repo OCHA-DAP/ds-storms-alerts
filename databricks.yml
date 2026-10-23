@@ -20,6 +20,12 @@
 # wrapper databricks/run_alert_job.py, which shells out to pipelines/run_alert.py.
 # Pipeline code (pipelines/, src/) stays pure Python and is unchanged.
 #
+# A second task, hdx_export (databricks/run_hdx_export_job.py ->
+# pipelines/export_hdx.py), runs alongside the alert and parks the season's
+# per-storm exposure CSVs on blob for OCHA-DAP/hdx-scraper-storms. Run it alone:
+#
+#   databricks bundle run storm_alert -p DEFAULT --only hdx_export
+#
 # Bundle docs: https://docs.databricks.com/dev-tools/bundles/
 
 bundle:
@@ -111,6 +117,8 @@ targets:
           tasks:
             - task_key: run_alert
               job_cluster_key: alert_cluster
+            - task_key: hdx_export
+              job_cluster_key: alert_cluster
   dev:
     # On-demand feature-branch testing only — deploy with --var git_branch=<branch>.
     # Development mode auto-pauses the schedule and prefixes the job name
@@ -127,12 +135,14 @@ targets:
           tasks:
             - task_key: run_alert
               existing_cluster_id: ${var.existing_cluster_id}
+            - task_key: hdx_export
+              existing_cluster_id: ${var.existing_cluster_id}
 
 resources:
   jobs:
     storm_alert:
       name: Storm Alert
-      description: "Email subscribers when NHC forecast or observed cyclone exposure crosses a country threshold"
+      description: "Email subscribers when NHC forecast or observed cyclone exposure crosses a country threshold; park the season's per-storm exposure CSVs on blob for HDX"
       git_source:
         git_url: https://github.com/OCHA-DAP/ds-storms-alerts.git
         git_provider: gitHub
@@ -212,3 +222,23 @@ resources:
             - pypi: { package: "openpyxl>=3.1.5" }
             - pypi: { package: "scipy>=1.17.1" }
             - pypi: { package: "databricks-sdk" }
+
+        # Per-storm exposure CSVs + manifest for OCHA-DAP/hdx-scraper-storms,
+        # which publishes them to HDX from GitHub (HDX's bot token stays
+        # there). Runs side by side with run_alert on the same cluster, with
+        # no depends_on: a downstream ALL_DONE task that succeeds would let a
+        # failed alert run end without the failure email. test_email=True
+        # (the dev target) writes to a test prefix the scraper never reads.
+        # See src/hdx_export.py.
+        - task_key: hdx_export
+          spark_python_task:
+            python_file: databricks/run_hdx_export_job.py
+            source: GIT
+            parameters:
+              - "{{job.parameters.issued_time}}"
+              - "{{job.parameters.test_email}}"
+              - "{{job.parameters.dry_run}}"
+              - "{{job.parameters.stage}}"
+          libraries:
+            - pypi: { package: "ocha-stratus>=0.1.7" }
+            - pypi: { package: "geopandas" }
