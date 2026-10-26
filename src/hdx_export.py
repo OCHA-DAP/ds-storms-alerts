@@ -7,7 +7,8 @@ GitHub Actions can't reach it. So the database half now runs here, on
 Databricks next to the alert, and the scraper publishes from blob (HDX's bot
 token never leaves GitHub — same split as hdx-floodscan):
 
-    {root}/{YYYY-MM-DDTHH}/{atcf_id}.csv    one per storm that has had exposure
+    {root}/{YYYY-MM-DDTHH}/{atcf_id}.csv    one per storm with track exposure
+                                            (now or at an earlier advisory)
     {root}/{YYYY-MM-DDTHH}/manifest.json
     {root}/latest/manifest.json             written LAST
 
@@ -52,7 +53,7 @@ dated folder but leaves latest/ alone.
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import ocha_stratus as stratus
 import pandas as pd
@@ -154,9 +155,14 @@ def fetch_near_miss_iso3s(
     latest advisory `issued_time`: those of its most recent advisory with
     positive admin-0 forecast exposure. [] if it never had any.
 
-    Also [] while the current advisory (`as_of`) is the only one since then:
-    its exposure may just not have landed yet, and reporting zeros for a
-    storm about to make landfall would be worse than sitting out one cycle.
+    Also [] while the storm is current (`issued_time` no more than one cycle,
+    6 h, before `as_of`, so a late storms-pipeline run is covered too) and
+    fewer than two main advisories (03/09/15/21Z) have come since: the newest
+    one's exposure may just not have landed yet, and reporting zeros for a
+    storm about to make landfall would be worse than sitting out a cycle.
+    Only main advisories count because nhc_tracks_geo also holds 00/06/12/18Z
+    advisories, for which exposure is hardly ever computed. Once the storm
+    is no longer current its last-threatened countries are reported anyway.
     """
     sql = text("""
         SELECT issued_time, iso3
@@ -179,6 +185,8 @@ def fetch_near_miss_iso3s(
         WHERE atcf_id = :atcf_id
           AND issued_time > :last_exposed
           AND issued_time <= :issued_time
+          AND EXTRACT(HOUR FROM issued_time) IN (3, 9, 15, 21)
+          AND EXTRACT(MINUTE FROM issued_time) = 0
     """)
     params = {"atcf_id": atcf_id, "issued_time": issued_time}
     with engine.connect() as conn:
@@ -186,14 +194,14 @@ def fetch_near_miss_iso3s(
         if not rows:
             return []
         last_exposed = rows[0][0]
-        if issued_time >= as_of:
+        if issued_time >= as_of - timedelta(hours=6):
             n_since = conn.execute(
                 since_sql, {**params, "last_exposed": last_exposed}
             ).scalar()
             if n_since < 2:
                 logger.info(
                     "HDX export: %s has no exposure at %s, last at %s; "
-                    "waiting one advisory before reporting it at zero",
+                    "waiting for the next advisory before reporting it",
                     atcf_id, issued_time, last_exposed,
                 )
                 return []
@@ -466,9 +474,7 @@ def export_season(
                 engine, aid, storm["issued_time"], storm_active, country_names
             )
             if df.empty:
-                missed = fetch_near_miss_iso3s(
-                    engine, aid, storm["issued_time"], as_of
-                )
+                missed = fetch_near_miss_iso3s(engine, aid, storm["issued_time"], as_of)
                 if missed:
                     logger.info(
                         "HDX export: %s has no exposure left; reporting %s at "
@@ -498,8 +504,10 @@ def export_season(
             "blob": f"{folder}/{aid.lower()}.csv",
             "n_rows": len(df),
             "iso3s": sorted(adm0["iso3"]),
-            # Every country final = the storm no longer threatens anyone.
-            "all_final": bool(adm0["is_final_alert"].all()),
+            # Every country final and nothing still under threat = the storm
+            # no longer threatens anyone. (A WSP-only threat has no row of
+            # its own, so check the active pairs too.)
+            "all_final": bool(adm0["is_final_alert"].all()) and not storm_active,
         }
         logger.info(
             "HDX export: %s (%s) at %s — %d rows, %s, all_final=%s",
