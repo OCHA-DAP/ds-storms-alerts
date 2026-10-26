@@ -7,7 +7,7 @@ GitHub Actions can't reach it. So the database half now runs here, on
 Databricks next to the alert, and the scraper publishes from blob (HDX's bot
 token never leaves GitHub — same split as hdx-floodscan):
 
-    {root}/{YYYY-MM-DDTHH}/{atcf_id}.csv    one per storm with exposure
+    {root}/{YYYY-MM-DDTHH}/{atcf_id}.csv    one per storm that has had exposure
     {root}/{YYYY-MM-DDTHH}/manifest.json
     {root}/latest/manifest.json             written LAST
 
@@ -23,6 +23,14 @@ one row per admin unit (admin 0 and FieldMaps admin 1), with pop_exposed /
 sources / caveat columns per wind threshold, pop_exposed being the MAX across
 CHD (forecast + observed so far), ADAM and GDACS. Figures are taken at the
 storm's own latest advisory, so a storm that has ended keeps its last numbers.
+
+A near miss (forecast over land at some advisory, never observed there) has
+no exposure at all once its forecast moves off, and would drop out of the
+manifest: its HDX dataset would then freeze at the last forecast, still due
+"every day" and never final. So a storm stays in once it has had exposure,
+reporting the countries of its most recent advisory with forecast exposure
+at the current figures — zero from CHD — final once nothing threatens them
+(see fetch_near_miss_iso3s).
 
 is_final_alert differs from the alert workbook's on purpose. There it means
 "this email is the final update for the pair" and fires once, in the run
@@ -139,6 +147,59 @@ def fetch_active_pairs(
     } | {(r.atcf_id, r.iso3) for r in wsp_df.itertuples() if r.pop_exposed > 0}
 
 
+def fetch_near_miss_iso3s(
+    engine: Engine, atcf_id: str, issued_time: datetime, as_of: datetime
+) -> list[str]:
+    """Countries to keep reporting for a storm with no exposure left at its
+    latest advisory `issued_time`: those of its most recent advisory with
+    positive admin-0 forecast exposure. [] if it never had any.
+
+    Also [] while the current advisory (`as_of`) is the only one since then:
+    its exposure may just not have landed yet, and reporting zeros for a
+    storm about to make landfall would be worse than sitting out one cycle.
+    """
+    sql = text("""
+        SELECT issued_time, iso3
+        FROM storms.nhc_tracks_fcastonly_exposure
+        WHERE atcf_id = :atcf_id
+          AND admin_level = 0
+          AND pop_exposed > 0
+          AND issued_time = (
+              SELECT MAX(issued_time)
+              FROM storms.nhc_tracks_fcastonly_exposure
+              WHERE atcf_id = :atcf_id
+                AND admin_level = 0
+                AND pop_exposed > 0
+                AND issued_time <= :issued_time
+          )
+    """)
+    since_sql = text("""
+        SELECT COUNT(DISTINCT issued_time)
+        FROM storms.nhc_tracks_geo
+        WHERE atcf_id = :atcf_id
+          AND issued_time > :last_exposed
+          AND issued_time <= :issued_time
+    """)
+    params = {"atcf_id": atcf_id, "issued_time": issued_time}
+    with engine.connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+        if not rows:
+            return []
+        last_exposed = rows[0][0]
+        if issued_time >= as_of:
+            n_since = conn.execute(
+                since_sql, {**params, "last_exposed": last_exposed}
+            ).scalar()
+            if n_since < 2:
+                logger.info(
+                    "HDX export: %s has no exposure at %s, last at %s; "
+                    "waiting one advisory before reporting it at zero",
+                    atcf_id, issued_time, last_exposed,
+                )
+                return []
+    return sorted({r[1] for r in rows})
+
+
 def _build_adm1_rows(
     atcf_id: str,
     storm_iso3s: set[str],
@@ -236,14 +297,18 @@ def build_storm_rows(
     issued_time: datetime,
     active_iso3s: set[str],
     country_names: "CountryNames",
+    keep_iso3s: list[str] | None = None,
 ) -> pd.DataFrame:
     """Admin-0 + admin-1 rows for one storm at its latest advisory
     `issued_time`, in HDX_CSV_COLS order. Empty if the storm has no positive
-    exposure anywhere (the scraper publishes nothing for it then).
+    exposure anywhere and no `keep_iso3s` (the scraper publishes nothing for
+    it then).
 
-    Countries: positive forecast exposure at `issued_time` or positive
-    observed exposure up to it. `active_iso3s` are the storm's countries still
-    under threat at the current advisory; every other country is final.
+    Countries: positive forecast exposure at `issued_time`, positive observed
+    exposure up to it, and `keep_iso3s` (a near miss's last-threatened
+    countries, reported at whatever the sources still show — zero from CHD).
+    `active_iso3s` are the storm's countries still under threat at the
+    current advisory; every other country is final.
     """
     ids = [atcf_id]
     fcast_df = fetch_fcast_exposure(engine, issued_time)
@@ -251,7 +316,9 @@ def build_storm_rows(
     obsv_df = fetch_current_obsv_exposure(engine, ids, issued_time)
 
     storm_iso3s = sorted(
-        set(fcast_df["iso3"]) | set(obsv_df.loc[obsv_df["pop_exposed"] > 0, "iso3"])
+        set(fcast_df["iso3"])
+        | set(obsv_df.loc[obsv_df["pop_exposed"] > 0, "iso3"])
+        | set(keep_iso3s or ())
     )
     if not storm_iso3s:
         return pd.DataFrame(columns=HDX_CSV_COLS)
@@ -393,20 +460,34 @@ def export_season(
     failed: list[str] = []
     for storm in storms:
         aid = storm["atcf_id"]
+        storm_active = {iso3 for a, iso3 in active if a == aid}
         try:
             df = build_storm_rows(
-                engine,
-                aid,
-                storm["issued_time"],
-                {iso3 for a, iso3 in active if a == aid},
-                country_names,
+                engine, aid, storm["issued_time"], storm_active, country_names
             )
+            if df.empty:
+                missed = fetch_near_miss_iso3s(
+                    engine, aid, storm["issued_time"], as_of
+                )
+                if missed:
+                    logger.info(
+                        "HDX export: %s has no exposure left; reporting %s at "
+                        "the current figures", aid, ",".join(missed),
+                    )
+                    df = build_storm_rows(
+                        engine,
+                        aid,
+                        storm["issued_time"],
+                        storm_active,
+                        country_names,
+                        keep_iso3s=missed,
+                    )
         except Exception:
             logger.exception("HDX export: %s failed, left out of the manifest", aid)
             failed.append(aid)
             continue
         if df.empty:
-            logger.info("HDX export: %s has no positive exposure, skipped", aid)
+            logger.info("HDX export: %s has no exposure to report, skipped", aid)
             continue
         adm0 = df[df["admin_level"] == 0]
         entry = {
