@@ -27,6 +27,7 @@ import matplotlib.ticker as mticker
 import matplotlib.transforms as mtransforms
 import shapely.geometry as sgeom
 import shapely.ops as sops
+from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
 
 from src.landfall import densify_observed, densify_track
@@ -56,7 +57,10 @@ PANEL = "#ffffff"      # --hdx-neutral-0
 OCEAN = "#e3ecf0"       # pale blue-grey, so sea reads as sea
 LAND = "#f7f6f2"        # warm off-white, distinct from OCEAN and from the pale
                         # end of the WSP probability ramp
-LAND_EDGE = "#c5cdd2"   # coastlines and adm boundaries
+LAND_EDGE = "#c5cdd2"   # adm boundaries
+COAST = "#a3aeb4"       # coastlines and national borders: a step darker than
+                        # LAND_EDGE so an island near the track (Hawaii in a
+                        # Central Pacific view) still shows at basin scale
 
 # Chart text. Roboto per the style guide; the stack degrades to the nearest
 # grotesque rather than matplotlib's DejaVu default when Roboto isn't installed
@@ -114,6 +118,12 @@ _WSP_ALPHA = 0.72
 # track on dark navy is invisible, and the track is the one thing on the map
 # that must always read.
 _TRACK_CASING = path_effects.withStroke(linewidth=3.4, foreground=PANEL)
+# Track lines. The forecast dash is short (in linewidths: 2.4 on, 1.4 off) so
+# it reads as dashed at a glance on the map AND in the legend's short sample —
+# matplotlib's default "--" is a long dash that a legend handle shows as one
+# solid bar.
+_OBS_TRACK = dict(color="#222222", linewidth=2)
+_FCAST_TRACK = dict(color="#444444", linewidth=2, linestyle=(0, (2.4, 1.4)))
 
 _UTC = ZoneInfo("UTC")
 _NY = ZoneInfo("America/New_York")
@@ -1047,20 +1057,110 @@ def _draw_background(ax, countries: gpd.GeoDataFrame) -> None:
     ax.set_facecolor(OCEAN)
     if countries.empty:
         return
-    countries.plot(ax=ax, facecolor=LAND, edgecolor=LAND_EDGE,
+    countries.plot(ax=ax, facecolor=LAND, edgecolor=COAST,
                    linewidth=0.5, zorder=1)
 
 
-def _draw_adm1(ax, adm1_gdf: gpd.GeoDataFrame) -> None:
+def _polygon_parts(geom) -> list:
+    """Every Polygon in a geometry, through any nesting of Multi/Collections."""
+    if geom is None or geom.is_empty:
+        return []
+    if geom.geom_type == "Polygon":
+        return [geom]
+    return [p for part in getattr(geom, "geoms", []) for p in _polygon_parts(part)]
+
+
+def _for_map_scale(
+    geom, tol: float, min_area: float = 0.0, keep_one: bool = False,
+):
+    """A polygon layer cleaned for drawing at basin scale: exterior rings only,
+    parts under min_area (square degrees) dropped, simplified to tol degrees.
+    keep_one keeps the largest part when every part is under min_area, so a
+    unit that is all islets still draws.
+
+    The admin-1 layer is full resolution. Drawn raw, lake holes and the slivers
+    a dissolve leaves along river borders show up as stray dashes across the
+    interior, and every coastal islet becomes a speck of outline. For drawing
+    only — exposure lookups and the small-territory test keep the raw layer.
+    """
+    parts = _polygon_parts(geom)
+    kept = [p for p in parts if p.area >= min_area]
+    if not kept and keep_one and parts:
+        kept = [max(parts, key=lambda p: p.area)]
+    polys = [
+        simple for p in kept
+        if not (simple := sgeom.Polygon(p.exterior).simplify(
+            tol, preserve_topology=True)).is_empty
+    ]
+    if not polys:
+        return None
+    return polys[0] if len(polys) == 1 else sgeom.MultiPolygon(polys)
+
+
+def _map_scale(xlim: tuple[float, float]) -> tuple[float, float]:
+    """(simplify tolerance, smallest outline part) for a view: about a pixel,
+    and a part a few pixels across, on the rendered map."""
+    span = xlim[1] - xlim[0]
+    return span / 900, (span / 250) ** 2
+
+
+def _scaled(
+    gdf: gpd.GeoDataFrame, tol: float, min_area: float = 0.0,
+    keep_one: bool = False,
+) -> gpd.GeoDataFrame:
+    out = gdf.copy()
+    out.geometry = out.geometry.apply(
+        lambda g: _for_map_scale(g, tol, min_area, keep_one))
+    return out[out.geometry.notna()]
+
+
+def _country_outlines(
+    adm1_gdf: gpd.GeoDataFrame, xlim: tuple[float, float],
+) -> gpd.GeoDataFrame:
+    """Affected countries' borders and coasts, dissolved from admin-1. A
+    country that is all islets at this scale keeps its largest island: an
+    empty frame here would crash the plot (geopandas computes the aspect from
+    NaN bounds), e.g. a Bermuda-only storm."""
+    tol, min_area = _map_scale(xlim)
+    return _scaled(adm1_gdf.dissolve(by="iso_3", as_index=False), tol, min_area,
+                   keep_one=True)
+
+
+def _draw_coast_over(
+    ax, countries: gpd.GeoDataFrame, wsp: gpd.GeoDataFrame,
+) -> None:
+    """The coastlines again, inside the dark probability bands (≥40%): under
+    them (alpha 0.72 navy) the base-map coast disappears — Jamaica vanishes
+    under Melissa's >90% core. Translucent white, and only there: on pale
+    bands and open ground the base-map coast already reads."""
+    if countries is None or countries.empty or wsp.empty:
+        return
+    dark = wsp[wsp["percentage"] >= 40]
+    if dark.empty:
+        return
+    area = dark.geometry.union_all()
+    coast = countries.geometry.boundary.intersection(area)
+    coast = coast[~(coast.is_empty | coast.isna())]
+    if coast.empty:
+        return
+    coast.plot(ax=ax, color=PANEL, linewidth=0.5, alpha=0.55, zorder=2.5)
+
+
+def _draw_adm1(
+    ax, adm1_gdf: gpd.GeoDataFrame, xlim: tuple[float, float],
+) -> None:
     """Draw adm1 polygons for affected countries with internal division lines."""
     if adm1_gdf.empty:
         return
-    adm1_gdf.plot(ax=ax, facecolor=LAND, edgecolor=LAND_EDGE,
-                  linewidth=0.35, zorder=1)
+    tol, _ = _map_scale(xlim)
+    units = _scaled(adm1_gdf, tol)
+    if units.empty:  # geopandas raises on an empty frame
+        return
+    units.plot(ax=ax, facecolor=LAND, edgecolor=LAND_EDGE, linewidth=0.35,
+               zorder=1)
     # Emphasise the national (adm0) border with a slightly thicker line.
-    outer = adm1_gdf.dissolve(by="iso_3", as_index=False)
-    outer.plot(ax=ax, facecolor="none", edgecolor="#9aa0a8",
-               linewidth=0.8, zorder=1)
+    _country_outlines(adm1_gdf, xlim).plot(
+        ax=ax, facecolor="none", edgecolor="#9aa0a8", linewidth=0.8, zorder=1)
 
 
 def _draw_obsv_buffers(ax, buffers: gpd.GeoDataFrame) -> list[mpatches.Patch]:
@@ -1128,12 +1228,29 @@ def _draw_wsp_polygons(
         proxies.append(mpatches.Patch(
             facecolor=color, alpha=_WSP_ALPHA,
             edgecolor=edgecolor, linewidth=linewidth,
-            label=f"≥{int(pct)}%",
+            label=_wsp_band_label(int(pct)),
         ))
     return proxies
 
 
+def _wsp_band_label(pct: int) -> str:
+    """NHC's own band names. `percentage` is the band's lower bound (ocha-lens
+    maps the shapefile's "<5%", "5-10%" … ">90%" to 0, 5 … 90), so the 0 band
+    is "<5%", not "≥0%"."""
+    bounds = sorted(_NHC_WSP_COLOR)
+    if pct not in bounds:
+        return f"≥{pct}%"
+    if pct == bounds[0]:
+        return f"<{bounds[1]}%"
+    if pct == bounds[-1]:
+        return f">{pct}%"
+    return f"{pct}\N{EN DASH}{bounds[bounds.index(pct) + 1]}%"
+
+
 def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
+    """Observed and forecast track lines with their fix markers. The forecast
+    time labels are placed later, by _label_forecast_times, once the layout
+    is final and they can be measured."""
     for atcf_id, storm in tracks.groupby("atcf_id"):
         obs = storm[storm["kind"] == "observed"].sort_values("valid_time")
         fcs = storm[storm["kind"] == "forecast"].sort_values("valid_time")
@@ -1142,23 +1259,13 @@ def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
             # Same PCHIP densification as the forecast line, so the observed
             # segment curves rather than cutting corners at six-hourly fixes.
             _ot, _olon, _olat, _ow = densify_observed(storm)
-            if len(_olon) > 1:
-                ax.plot(
-                    _olon, _olat,
-                    color="#222222", linewidth=2, zorder=3,
-                    label=f"{atcf_id} observed",
-                    path_effects=[_TRACK_CASING],
-                )
-            else:
-                ax.plot(
-                    obs.geometry.x, obs.geometry.y,
-                    color="#222222", linewidth=2, zorder=3,
-                    label=f"{atcf_id} observed",
-                    path_effects=[_TRACK_CASING],
-                )
+            if len(_olon) <= 1:
+                _olon, _olat = obs.geometry.x, obs.geometry.y
+            ax.plot(_olon, _olat, **_OBS_TRACK, zorder=3,
+                    label=f"{atcf_id} observed", path_effects=[_TRACK_CASING])
             ax.scatter(
                 obs.geometry.x, obs.geometry.y,
-                color="#222222", s=15, zorder=4,
+                color=_OBS_TRACK["color"], s=15, zorder=4,
                 edgecolors="white", linewidths=0.6,
             )
 
@@ -1169,51 +1276,144 @@ def _draw_tracks(ax, tracks: gpd.GeoDataFrame) -> None:
             # doglegs between six-hourly points. The densified path starts at
             # the last observed position, which also covers the bridge.
             _dt, _dlon, _dlat, _dw = densify_track(storm)
-            if len(_dlon):
-                ax.plot(
-                    _dlon, _dlat,
-                    color="#444444", linewidth=2, linestyle="--", zorder=3,
-                    label=f"{atcf_id} forecast",
-                    path_effects=[_TRACK_CASING],
-                )
-            else:
-                ax.plot(
-                    fcs.geometry.x, fcs.geometry.y,
-                    color="#444444", linewidth=2, linestyle="--", zorder=3,
-                    label=f"{atcf_id} forecast",
-                    path_effects=[_TRACK_CASING],
-                )
+            if not len(_dlon):
+                _dlon, _dlat = fcs.geometry.x, fcs.geometry.y
+            ax.plot(_dlon, _dlat, **_FCAST_TRACK, zorder=3,
+                    label=f"{atcf_id} forecast", path_effects=[_TRACK_CASING])
             ax.scatter(
                 fcs.geometry.x, fcs.geometry.y,
-                color="#444444", s=18, marker="D", zorder=4,
+                color=_FCAST_TRACK["color"], s=18, marker="D", zorder=4,
                 edgecolors="white", linewidths=0.6,
             )
 
-            # Label every forecast point, alternating offset to reduce overlap
-            offsets = [(8, 10), (8, -14), (-10, 10), (-10, -14)]
-            for i, (_, row) in enumerate(fcs.iterrows()):
-                dx, dy = offsets[i % len(offsets)]
+
+# Candidate label spots around a forecast point, in preference order: offset
+# direction (unit x, unit y) and the text alignment that puts the label's near
+# edge at the offset — tried at each distance in _LABEL_GAPS_PT, near first.
+# The far ring is what lets a shallow track get labels above and below it: a
+# label right next to the line always clips the line a few points along.
+_LABEL_DIRS = [
+    ((1, 0), "left", "center"), ((-1, 0), "right", "center"),
+    ((0, 1), "center", "bottom"), ((0, -1), "center", "top"),
+    ((0.75, 0.75), "left", "bottom"), ((-0.75, 0.75), "right", "bottom"),
+    ((0.75, -0.75), "left", "top"), ((-0.75, -0.75), "right", "top"),
+]
+_LABEL_GAPS_PT = (6.0, 13.0)
+_LABEL_FONTSIZE = 8.0
+
+
+def _label_forecast_times(
+    ax, fig, tracks: gpd.GeoDataFrame,
+    avoid: list[tuple[float, float]] | None = None,
+) -> None:
+    """Time labels on the forecast points, placed so none overlap.
+
+    Runs after the layout is final, so every label can be measured where it
+    will actually be drawn. Each label tries every direction in _LABEL_DIRS
+    at each distance in _LABEL_GAPS_PT and takes the first spot that stays
+    inside the map and clears the track lines, the other fix markers and the
+    labels already placed. Failing that it takes the spot crossing the fewest
+    line samples (its white box sits over the line), provided it still
+    clears markers and labels. A label with no such spot is left off — a slow
+    or looping storm stacks several fixes on one spot, and one readable label
+    beats three on top of each other. The first and last forecast points
+    always get theirs (least-overlap spot). `avoid` holds other point symbols
+    to keep clear of, in data coordinates (the small-territory rings).
+    """
+    if tracks.empty or not (tracks["kind"] == "forecast").any():
+        return
+    ax.apply_aspect()
+    renderer = fig.canvas.get_renderer()
+    px_per_pt = fig.dpi / 72.0
+    ax_box = ax.get_window_extent(renderer=renderer)
+    to_px = ax.transData.transform
+
+    def _boxes(lon, lat, r_pt):
+        if len(lon) == 0:
+            return []
+        xy = to_px(np.column_stack([np.asarray(lon, float), np.asarray(lat, float)]))
+        r = r_pt * px_per_pt
+        return [mtransforms.Bbox.from_extents(x - r, y - r, x + r, y + r)
+                for x, y in xy]
+
+    # Obstacles: track lines sampled as a chain of small boxes (the densified
+    # paths are 30-minute steps, a few px apart), and every fix marker.
+    line_boxes: list = []
+    marker_boxes: list = []
+    for _, storm in tracks.groupby("atcf_id"):
+        if (storm["kind"] == "observed").any():
+            _, olon, olat, _ = densify_observed(storm)
+            line_boxes += _boxes(olon, olat, 1.6)
+        if (storm["kind"] == "forecast").any():
+            _, flon, flat, _ = densify_track(storm)
+            line_boxes += _boxes(flon, flat, 1.6)
+        marker_boxes += _boxes(storm.geometry.x, storm.geometry.y, 3.5)
+    if avoid:
+        lon, lat = zip(*avoid, strict=True)
+        marker_boxes += _boxes(lon, lat, 6.5)
+    spots = [(ux * g, uy * g, ha, va)
+             for g in _LABEL_GAPS_PT for (ux, uy), ha, va in _LABEL_DIRS]
+
+    placed: list = []
+    for _, storm in tracks.groupby("atcf_id"):
+        fcs = storm[storm["kind"] == "forecast"].sort_values("valid_time")
+        order = list(range(len(fcs)))
+        if len(order) > 1:
+            order = [0, len(order) - 1, *order[1:-1]]
+        for n, i in enumerate(order):
+            row = fcs.iloc[i]
+            x, y = row.geometry.x, row.geometry.y
+            # A label may sit snug against its own marker, just not others.
+            px, py = to_px((x, y))
+            others = [m for m in marker_boxes
+                      if abs((m.x0 + m.x1) / 2 - px) > 0.5
+                      or abs((m.y0 + m.y1) / 2 - py) > 0.5]
+            # Score per spot: hits on labels/markers dominate, line crossings
+            # count less, leaving the map counts most. 0 = clear spot.
+            best = None  # (score, text, bbox, offset)
+            for dx, dy, ha, va in spots:
+                t = ax.text(
+                    x, y, _format_ny(row["valid_time"]),
+                    transform=mtransforms.offset_copy(
+                        ax.transData, fig=fig, units="points", x=dx, y=dy),
+                    ha=ha, va=va, fontsize=_LABEL_FONTSIZE, color=INK,
+                    zorder=5, clip_on=True,
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor=PANEL,
+                              edgecolor="none", alpha=0.85),
+                )
+                bb = t.get_window_extent(renderer=renderer)
+                # The text extent excludes the label's white box; add its pad.
+                pad = 0.25 * _LABEL_FONTSIZE * px_per_pt + 1
+                bb = mtransforms.Bbox.from_extents(
+                    bb.x0 - pad, bb.y0 - pad, bb.x1 + pad, bb.y1 + pad)
+                inside = (bb.x0 >= ax_box.x0 and bb.x1 <= ax_box.x1
+                          and bb.y0 >= ax_box.y0 and bb.y1 <= ax_box.y1)
+                score = (
+                    (0 if inside else 10_000)
+                    + 100 * sum(bb.overlaps(o) for o in others + placed)
+                    + sum(bb.overlaps(o) for o in line_boxes)
+                )
+                if best is None or score < best[0]:
+                    if best is not None:
+                        best[1].remove()
+                    best = (score, t, bb, (dx, dy))
+                else:
+                    t.remove()
+                if score == 0:
+                    break
+            forced = n < 2
+            if best[0] >= 100 and not forced:
+                best[1].remove()
+                continue
+            placed.append(best[2])
+            dx, dy = best[3]
+            if math.hypot(dx, dy) > _LABEL_GAPS_PT[0] + 0.5:
+                # Far-ring label: a faint leader says which marker it names.
                 ax.annotate(
-                    _format_ny(row["valid_time"]),
-                    xy=(row.geometry.x, row.geometry.y),
-                    xytext=(dx, dy),
-                    textcoords="offset points",
-                    fontsize=6.5,
-                    color="#333333",
-                    zorder=5,
-                    arrowprops=dict(
-                        arrowstyle="-",
-                        color="#b0b0b0",
-                        linewidth=0.4,
-                        shrinkA=0,
-                        shrinkB=1,
-                    ),
-                    bbox=dict(
-                        boxstyle="round,pad=0.3",
-                        facecolor="white",
-                        edgecolor="none",
-                        alpha=0.8,
-                    ),
+                    "", xy=(x, y), xytext=(dx, dy), textcoords="offset points",
+                    arrowprops=dict(arrowstyle="-", color=GREY_EDGE, lw=0.6,
+                                    shrinkA=0, shrinkB=3.5),
+                    zorder=4.5,
                 )
 
 
@@ -1419,8 +1619,32 @@ def _forecast_view_bbox(
     maxy = max(p.total_bounds[3] for p in pieces)
     pad_x = (maxx - minx) * 0.10 or 2
     pad_y = (maxy - miny) * 0.10 or 2
-    return _expand_to_land(
+    return _square_view(*_expand_to_land(
         (minx - pad_x, maxx + pad_x), (miny - pad_y, maxy + pad_y), land_gdf,
+    ))
+
+
+def _square_view(
+    xlim: tuple[float, float],
+    ylim: tuple[float, float],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Widen the short side of a view so it spans as many degrees as the long
+    side: with equal aspect, every map then renders as the same square,
+    whatever the storm's footprint (a Beryl-style Atlantic crossing used to
+    come out as a thin strip). Latitude is slid back onto the globe rather
+    than clipped, so the view stays square near the poles. Widening can push
+    a view past ±180° without the track crossing it (a north-south track near
+    the antimeridian); the map functions then replicate the background so the
+    overhang still has coastlines."""
+    span = max(xlim[1] - xlim[0], ylim[1] - ylim[0])
+    cx = (xlim[0] + xlim[1]) / 2
+    cy = (ylim[0] + ylim[1]) / 2
+    half = span / 2
+    if span <= 170.0:
+        cy = min(max(cy, -85.0 + half), 85.0 - half)
+    return (
+        (cx - half, cx + half),
+        (max(cy - half, -85.0), min(cy + half, 85.0)),
     )
 
 
@@ -1432,10 +1656,16 @@ def _finalize_map(ax, title: str, legend_handles: list) -> None:
     ax.set_ylabel("")
     for side in ("top", "right", "left", "bottom"):
         ax.spines[side].set_visible(False)
-    ax.set_title(
-        title, fontsize=12, fontweight="bold", loc="left",
+    t = ax.set_title(
+        title, fontsize=13, fontweight="bold", loc="left",
         color="#222222", pad=12,
     )
+    # A long storm label ("Potential Tropical Cyclone Eight 2026: ...") would
+    # run past the map and widen the image; break after the storm name.
+    fig = ax.get_figure()
+    width = t.get_window_extent(renderer=fig.canvas.get_renderer()).width
+    if ": " in title and width > 0.95 * fig.bbox.width:
+        t.set_text(title.replace(": ", ":\n", 1))
     if legend_handles:
         ax.legend(
             handles=legend_handles,
@@ -1443,73 +1673,123 @@ def _finalize_map(ax, title: str, legend_handles: list) -> None:
         )
 
 
-def _add_time_note(ax, tracks: gpd.GeoDataFrame) -> None:
-    """Small footnote clarifying all point times are ET (forecast points only).
-
-    Bottom-right, clear of the legends stacked off the right edge and of
-    anything drawn bottom-left.
-    """
-    if tracks.empty or not (tracks["kind"] == "forecast").any():
-        return
-    ax.text(
-        0.99, 0.01, "Times shown in ET (America/New_York)",
-        transform=ax.transAxes, fontsize=7, color=INK_3,
-        ha="right", va="bottom", zorder=6,
-        path_effects=[path_effects.withStroke(linewidth=2.0, foreground=PANEL)],
-    )
+def _map_notes(tracks: gpd.GeoDataFrame, *extra: str) -> str:
+    """The caption printed under a map's legends. Kept off the map itself,
+    where a footnote ends up sitting on a swath or a coastline."""
+    notes = list(extra)
+    if not tracks.empty and (tracks["kind"] == "forecast").any():
+        notes.append("Forecast times are US Eastern Time.")
+    # One note per line: run together they reach the map's full width, and
+    # any longer would widen the image past square.
+    return "\n".join(notes)
 
 
 def _track_legend_handles(tracks: gpd.GeoDataFrame) -> list:
-    """Legend proxies for the observed/forecast track lines (no 'track' suffix)."""
+    """Legend proxies for the track lines, drawn as on the map: same line,
+    dash and fix marker (the white casing is moot on the white legend)."""
     handles: list = []
     if not tracks.empty and (tracks["kind"] == "observed").any():
-        handles.append(Line2D([0], [0], color="#222222", lw=2, label="Observed"))
+        handles.append(Line2D(
+            [0], [0], **_OBS_TRACK, marker="o", ms=4, mfc=_OBS_TRACK["color"],
+            mec="white", mew=0.6, label="Observed"))
     if not tracks.empty and (tracks["kind"] == "forecast").any():
-        handles.append(
-            Line2D([0], [0], color="#444444", lw=2, ls=(0, (4, 2)), label="Forecast")
-        )
+        handles.append(Line2D(
+            [0], [0], **_FCAST_TRACK, marker="D", ms=4,
+            mfc=_FCAST_TRACK["color"], mec="white", mew=0.6,
+            label="Forecast"))
     return handles
 
 
-def _add_stacked_legends(ax, fig, groups: list[tuple[str, list]]) -> None:
-    """Add several titled legends as one tight vertical stack off the right edge.
+# Map figures are square (see _square_view); legends sit in a row underneath
+# rather than off the right edge, so on a phone the map keeps the full screen
+# width instead of sharing it with a legend column.
+_MAP_FIG_IN = 6.0
+# Maps are built AT the dpi they are saved at: label placement, the legend row
+# and the caption are measured in pixels while building, and a legend's height
+# relative to the map shifts between 100 and 150 dpi (enough to put the
+# caption on top of the last legend entry).
+_MAP_DPI = 150
+# Desktop display width of a map, in CSS px. Map text is sized for a phone
+# (where the image shrinks to ~360 px wide), so at the full 900 px email column
+# it would be oversized and a square map plus legend would run ~1,100 px tall.
+# Phones are narrower than this and still scale the image to the screen.
+_MAP_DISPLAY_PX = 640
 
-    groups is an ordered list of (title, handles). Each legend's height is
-    measured after creation so the next sits directly beneath it (a contiguous
-    stack), regardless of entry counts. The off-axes legends are captured by
-    savefig(bbox_inches="tight").
+
+def _new_map_figure(xlim: tuple[float, float], ylim: tuple[float, float]):
+    # Set here too, not only by the strip charts: a monitoring email draws
+    # maps and no charts, and would otherwise fall back to DejaVu Sans.
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = _FONT_STACK
+    fig, ax = plt.subplots(figsize=(_MAP_FIG_IN, _MAP_FIG_IN), dpi=_MAP_DPI)
+    ax.set_aspect("equal")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    return fig, ax
+
+
+def _add_legend_row(
+    ax, fig, groups: list[tuple[str, list]], note: str = "",
+) -> None:
+    """Add several titled legends side by side under the map, wrapping to a
+    new row when the next one would run past the map's right edge, then the
+    `note` caption under the last row.
+
+    groups is an ordered list of (title, handles). Each legend is measured
+    after creation so the next starts where it ends, regardless of entry
+    counts; a group with many entries (the WSP bands) goes two columns so the
+    row stays short. Titles are padded to the same number of lines so the
+    entries line up across the row. The off-axes legends and caption are
+    captured by savefig(bbox_inches="tight").
     """
-    # Equal-aspect axes are LETTERBOXED at draw time: a very wide map (Beryl's
-    # Atlantic crossing) ends up a fraction of the subplot cell's height. The
-    # legend offsets are fractions of the axes height, so they must be
-    # computed against the aspect-applied box — measured before apply_aspect
-    # they come out too small and the stacked legends overlap.
+    # Offsets are fractions of the axes box, so measure the aspect-applied box
+    # (the title's room from tight_layout letterboxes the square view a little).
     ax.apply_aspect()
     renderer = fig.canvas.get_renderer()
-    ax_h = ax.get_window_extent(renderer=renderer).height
-    y = 1.0
+    ax_box = ax.get_window_extent(renderer=renderer)
+    groups = [(t, h) for t, h in groups if h]
+    n_lines = max((t.count("\n") + 1 for t, _ in groups), default=1)
+    gap_x, gap_y = 0.045, 0.025
+    x, y, row_h = 0.0, -0.025, 0.0
     for title, handles in groups:
-        if not handles:
-            continue
-        leg = ax.legend(
-            handles=handles, title=title,
-            loc="upper left", bbox_to_anchor=(1.03, y),
-            fontsize=8, title_fontsize=8.5, framealpha=0.92,
-            facecolor="white", edgecolor="#e2e2e2", fancybox=True,
-            borderaxespad=0, borderpad=0.6, labelspacing=0.35,
-            handlelength=1.5, handletextpad=0.6,
+        title += "\n\u00a0" * (n_lines - title.count("\n") - 1)
+        # Line samples need room to show the dash; patches stay compact.
+        lines_only = all(
+            isinstance(h, Line2D) and h.get_linestyle() not in ("None", "")
+            for h in handles
+        )
+        # A standalone Legend: ax.legend() would also make it THE axes legend,
+        # and the last group got drawn twice (blurry, heavier text).
+        leg = Legend(
+            ax, handles, [h.get_label() for h in handles], title=title,
+            loc="upper left", bbox_to_anchor=(x, y),
+            bbox_transform=ax.transAxes,
+            ncol=2 if len(handles) > 6 else 1,
+            fontsize=9.5, title_fontsize=9.5, frameon=False,
+            borderaxespad=0, borderpad=0, labelspacing=0.35,
+            handlelength=2.8 if lines_only else 1.4, handleheight=0.9,
+            handletextpad=0.6, columnspacing=1.0,
         )
         leg._legend_box.align = "left"
         _t = leg.get_title()
         _t.set_ha("left")
-        _t.set_color("#333333")
-        _t.set_fontweight("semibold")
+        _t.set_color(INK)
+        _t.set_fontweight("bold")
         ax.add_artist(leg)
-        # add_artist clips to the axes patch; these sit off the right edge, so
-        # disable clipping or they vanish (and drop out of the tight bbox).
+        # add_artist clips to the axes patch; these sit below it, so disable
+        # clipping or they vanish (and drop out of the tight bbox).
         leg.set_clip_on(False)
-        leg_h = leg.get_window_extent(renderer=renderer).height
-        y -= leg_h / ax_h + 0.012  # tight gap → reads as a single stack
+        ext = leg.get_window_extent(renderer=renderer)
+        w, h = ext.width / ax_box.width, ext.height / ax_box.height
+        if x > 0 and x + w > 1.0:
+            x, y, row_h = 0.0, y - row_h - gap_y, 0.0
+            leg.set_bbox_to_anchor((x, y), transform=ax.transAxes)
+        x += w + gap_x
+        row_h = max(row_h, h)
+    if note:
+        ax.text(0.0, y - row_h - gap_y, note, transform=ax.transAxes,
+                ha="left", va="top", fontsize=8.5, color=INK_2,
+                clip_on=False)
 
 
 # Exposure choropleth bins (population exposed, 34 kt). Fixed across storms so
@@ -1573,10 +1853,9 @@ def track_plot_exposure(
     _obsv_buf = buffers[buffers["kind"] == "observed"] if not buffers.empty else buffers
     xlim, ylim = _forecast_view_bbox(
         tracks, _fcast_buf, obsv_buffers=_obsv_buf, land_gdf=background)
-    fig, ax = plt.subplots(figsize=(9, 6))
-    ax.set_aspect("equal")
-    ax.set_xlim(*xlim)
-    ax.set_ylim(*ylim)
+    if not dateline and (xlim[0] < -180.0 or xlim[1] > 180.0):
+        background = _replicate_world(background)
+    fig, ax = _new_map_figure(xlim, ylim)
     _draw_background(ax, background)
 
     # Swath fills go down FIRST; the exposure choropleth (also zorder 2, drawn
@@ -1593,11 +1872,16 @@ def track_plot_exposure(
             left_on="adm1_id", right_on="fm_pcode", how="inner",
         )
         if not merged.empty:
-            merged.plot(
-                ax=ax,
-                color=[_exp_bin_color(p) for p in merged["pop_exposed"]],
-                edgecolor=PANEL, linewidth=0.4, alpha=0.9, zorder=2,
-            )
+            # Islets dropped (their white edges read as specks), but every
+            # unit keeps at least its largest part: a small island's fill is
+            # all there is of it at this scale.
+            _drawn = _scaled(merged, *_map_scale(xlim), keep_one=True)
+            if not _drawn.empty:
+                _drawn.plot(
+                    ax=ax,
+                    color=[_exp_bin_color(p) for p in _drawn["pop_exposed"]],
+                    edgecolor=PANEL, linewidth=0.4, alpha=0.9, zorder=2,
+                )
             shaded_iso3s = set(merged["iso3"])
     # National fallback for countries the admin-1 layer doesn't cover — but
     # ONLY small territories. Painting all of Mexico one shade because its
@@ -1625,10 +1909,11 @@ def track_plot_exposure(
             )
             fallback_geoms = dict(zip(fb["iso_3"], fb.geometry, strict=True))
     # Country outlines over the shading so units still group into countries.
-    if not adm1_gdf.empty:
-        outer = adm1_gdf.dissolve(by="iso_3", as_index=False)
-        outer.plot(ax=ax, facecolor="none", edgecolor=INK_2, linewidth=0.7,
-                   zorder=3)
+    outlines = (_country_outlines(adm1_gdf, xlim) if not adm1_gdf.empty
+                else adm1_gdf)
+    if not outlines.empty:  # geopandas raises on an empty frame
+        outlines.plot(ax=ax, facecolor="none", edgecolor=INK_3, linewidth=0.6,
+                      zorder=3)
 
     # Forecast swath EDGES over the choropleth: the fills sit under the
     # exposure shading (bold greens win on land), so without edges the swath
@@ -1647,8 +1932,14 @@ def track_plot_exposure(
     # thousandth of the view is invisible at email render size, and for a
     # Lesser-Antilles storm that is every affected country. Mark those with a
     # bin-coloured ring at the centroid so the exposure reads at a glance.
+    # A long thin island (Jamaica in a basin-wide view) is under the area cut
+    # but plainly visible, so the territory's largest island must also be
+    # SHORT on the map — under 3% of the view across — to get a ring. (The
+    # largest island, not the whole territory: the Caymans' three islands
+    # span 1.6° between them.)
     view_area = (xlim[1] - xlim[0]) * (ylim[1] - ylim[0])
-    marked_any = False
+    view_span = xlim[1] - xlim[0]
+    rings: list[tuple[float, float]] = []
     country_geom: dict[str, object] = dict(fallback_geoms)
     if shaded_iso3s and not adm1_gdf.empty:
         for iso3_v, grp in adm1_gdf[adm1_gdf["iso_3"].isin(shaded_iso3s)].groupby("iso_3"):
@@ -1660,14 +1951,18 @@ def track_plot_exposure(
     for iso3_v, geom in country_geom.items():
         if geom is None or geom.is_empty:
             continue
-        if geom_area[iso3_v] / view_area < 0.0008:
+        largest = max(getattr(geom, "geoms", [geom]), key=lambda g: g.area)
+        gx0, gy0, gx1, gy1 = largest.bounds
+        if (geom_area[iso3_v] / view_area < 0.0008
+                and max(gx1 - gx0, gy1 - gy0) < 0.03 * view_span):
             c = geom.centroid
+            # Under the track (zorder 3): a ring must never hide the line.
             ax.plot(
                 [c.x], [c.y], marker="o", ms=11,
                 mfc=_exp_bin_color(adm0_exp.get(iso3_v, 0)),
-                mec=INK_2, mew=1.2, alpha=0.95, zorder=4, clip_on=True,
+                mec=INK_2, mew=1.2, alpha=0.95, zorder=2.9, clip_on=True,
             )
-            marked_any = True
+            rings.append((c.x, c.y))
 
     _draw_tracks(ax, tracks)
     ax.set_xlim(*xlim)
@@ -1676,39 +1971,35 @@ def track_plot_exposure(
     _finalize_map(
         ax,
         title=(
-            f"{storm_name}: forecast track and population exposed"
-            if storm_name else "Forecast track and population exposed"
+            f"{storm_name}: population exposed to ≥34 kt winds"
+            if storm_name else "Population exposed to ≥34 kt winds"
         ),
         legend_handles=[],
     )
     fig.tight_layout()
+    _label_forecast_times(ax, fig, tracks, avoid=rings)
     exp_handles = [
         mpatches.Patch(facecolor=c, edgecolor=LINE, label=lbl)
         for (_, c), lbl in zip(_EXP_BINS, _EXP_BIN_LABELS, strict=True)
     ]
-    if marked_any:
+    if rings:
         exp_handles.append(Line2D(
             [0], [0], marker="o", ls="", ms=9, mfc=PANEL, mec=INK_2, mew=1.2,
-            label="small territory",
+            label="Small territory",
         ))
-    _add_stacked_legends(ax, fig, [
-        ("Population\nexposed", exp_handles),
-        ("Forecasted\nwind swaths", fcast_proxies),
+    _add_legend_row(ax, fig, [
+        ("Population exposed\nto ≥34 kt winds", exp_handles),
+        ("Forecast\nwind swaths", fcast_proxies),
         ("Observed\nwind swaths", obsv_proxies),
-        ("Tracks", _track_legend_handles(tracks)),
-    ])
-    _add_time_note(ax, tracks)
-    ax.text(
-        0.99, 0.045, "Shading: admin-1 where available",
-        transform=ax.transAxes, fontsize=6.5, color=INK_3,
-        ha="right", va="bottom", zorder=6,
-        path_effects=[path_effects.withStroke(linewidth=2.0, foreground=PANEL)],
-    )
+        ("Storm track", _track_legend_handles(tracks)),
+    ], note=_map_notes(
+        tracks, "Exposure is shaded by admin-1 area where available."))
     return _fig_to_img_tag(
         fig,
-        alt=(f"{storm_name}: forecast track and population exposed map"
-             if storm_name else "Forecast track and population exposed map"),
-        dpi=150,
+        alt=(f"{storm_name}: map of forecast track and population exposed "
+             "to ≥34 kt winds" if storm_name
+             else "Map of forecast track and population exposed to ≥34 kt winds"),
+        dpi=_MAP_DPI, max_width=_MAP_DISPLAY_PX,
     )
 
 
@@ -1738,42 +2029,41 @@ def track_plot_buffers(
     _obsv_buf = buffers[buffers["kind"] == "observed"] if not buffers.empty else buffers
     xlim, ylim = _forecast_view_bbox(
         tracks, _fcast_buf, obsv_buffers=_obsv_buf, land_gdf=background)
-    fig, ax = plt.subplots(figsize=(9, 6))
-    ax.set_aspect("equal")
-    ax.set_xlim(*xlim)
-    ax.set_ylim(*ylim)
+    if not dateline and (xlim[0] < -180.0 or xlim[1] > 180.0):
+        background = _replicate_world(background)
+    fig, ax = _new_map_figure(xlim, ylim)
     _draw_background(ax, background)
     if adm1_gdf is not None and not adm1_gdf.empty:
-        _draw_adm1(ax, adm1_gdf)
+        _draw_adm1(ax, adm1_gdf, xlim)
     obsv_proxies = _draw_obsv_buffers(ax, buffers)
     fcast_proxies = _draw_fcast_buffers(ax, buffers)
     _draw_tracks(ax, tracks)
     # geopandas .plot() can widen the view; restore the intended frame.
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
-    # No on-plot legend — titled legends stacked off the right edge.
+    # No on-plot legend — titled legends in a row under the map.
     _finalize_map(
         ax,
         title=(
-            f"{storm_name}: track and swaths forecast" if storm_name
-            else "Storm tracks — observed + forecast wind swaths"
+            f"{storm_name}: forecast track and wind swaths" if storm_name
+            else "Forecast track and wind swaths"
         ),
         legend_handles=[],
     )
     # tight_layout first so the axes is at its final size before the off-axes
-    # legends are measured and stacked against it.
+    # legends are measured and laid out against it.
     fig.tight_layout()
-    _add_stacked_legends(ax, fig, [
+    _label_forecast_times(ax, fig, tracks)
+    _add_legend_row(ax, fig, [
+        ("Forecast\nwind swaths", fcast_proxies),
         ("Observed\nwind swaths", obsv_proxies),
-        ("Forecasted\nwind swaths", fcast_proxies),
-        ("Tracks", _track_legend_handles(tracks)),
-    ])
-    _add_time_note(ax, tracks)
+        ("Storm track", _track_legend_handles(tracks)),
+    ], note=_map_notes(tracks))
     return _fig_to_img_tag(
         fig,
         alt=(f"{storm_name}: forecast track and wind swaths map" if storm_name
              else "Storm tracks and forecast wind swaths map"),
-        dpi=150,
+        dpi=_MAP_DPI, max_width=_MAP_DISPLAY_PX,
     )
 
 
@@ -1805,15 +2095,15 @@ def track_plot_wsp(
         adm1_gdf = _shift_to_branch(adm1_gdf, center)
         background = _replicate_world(background)
     xlim, ylim = _forecast_view_bbox(tracks, wsp, land_gdf=background)
-    fig, ax = plt.subplots(figsize=(9, 6))
-    ax.set_aspect("equal")
-    ax.set_xlim(*xlim)
-    ax.set_ylim(*ylim)
+    if not dateline and (xlim[0] < -180.0 or xlim[1] > 180.0):
+        background = _replicate_world(background)
+    fig, ax = _new_map_figure(xlim, ylim)
     _draw_background(ax, background)
     if adm1_gdf is not None and not adm1_gdf.empty:
-        _draw_adm1(ax, adm1_gdf)
+        _draw_adm1(ax, adm1_gdf, xlim)
     obsv_proxies = _draw_obsv_buffers(ax, buffers)
     wsp_proxies = _draw_wsp_polygons(ax, wsp, wind_threshold_kt)
+    _draw_coast_over(ax, background, wsp)
     _draw_tracks(ax, tracks)
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
@@ -1822,23 +2112,25 @@ def track_plot_wsp(
         f"{storm_name}: {wind_threshold_kt}-knot wind speed probabilities"
         if storm_name else f"{wind_threshold_kt}-knot wind speed probabilities"
     )
-    # No on-plot legend — three titled legends are stacked off the right edge.
+    # No on-plot legend — titled legends in a row under the map.
     _finalize_map(ax, title=title, legend_handles=[])
 
     # tight_layout first so the axes is at its final size before the off-axes
-    # legends are measured and stacked against it.
+    # legends are measured and laid out against it.
     fig.tight_layout()
-    _add_stacked_legends(ax, fig, [
+    _label_forecast_times(ax, fig, tracks)
+    _add_legend_row(ax, fig, [
         (f"Probability of\n≥{wind_threshold_kt} kt winds", wsp_proxies),
         ("Observed\nwind swaths", obsv_proxies),
-        ("Tracks", _track_legend_handles(tracks)),
-    ])
-    _add_time_note(ax, tracks)
-    return _fig_to_img_tag(fig, alt=title, dpi=150)
+        ("Storm track", _track_legend_handles(tracks)),
+    ], note=_map_notes(tracks))
+    return _fig_to_img_tag(fig, alt=title, dpi=_MAP_DPI,
+                           max_width=_MAP_DISPLAY_PX)
 
 
 def _fig_to_img_tag(
     fig: plt.Figure, alt: str = "", dpi: int = 100, display_scale: float = 1.0,
+    max_width: int = _EMAIL_CONTENT_WIDTH_PX,
 ) -> str:
     """`display_scale` > 1 is the retina trick: render at a multiple of the
     display resolution and declare the logical size in the width/height
@@ -1850,19 +2142,20 @@ def _fig_to_img_tag(
     plt.close(fig)
     buf.seek(0)
     png = buf.read()
-    # Emit explicit width/height + alt. Outlook desktop (Word engine) ignores
+    # Emit an explicit width + alt. Outlook desktop (Word engine) ignores
     # max-width CSS and otherwise renders at the raw pixel size, so without a
-    # width attribute the legends-widened maps overflow; with one it scales
-    # correctly. Gmail/Apple Mail/mobile keep scaling responsively via
-    # max-width:100%;height:auto. alt gives a graceful state while loading or if
-    # an image ever fails to load.
-    nat_w, nat_h = Image.open(io.BytesIO(png)).size
-    w = min(round(nat_w / display_scale), _EMAIL_CONTENT_WIDTH_PX)
-    h = max(1, round(w * nat_h / nat_w))
+    # width attribute the wide maps overflow; with one it scales correctly and
+    # derives the height from the image. Gmail/Apple Mail/mobile keep scaling
+    # responsively via max-width:100%;height:auto. NO height attribute: mobile
+    # clients that shrink the width to the screen but honour a fixed height
+    # stretched the images vertically. alt gives a graceful state while
+    # loading or if an image ever fails to load.
+    nat_w, _ = Image.open(io.BytesIO(png)).size
+    w = min(round(nat_w / display_scale), max_width)
     img_b64 = base64.b64encode(png).decode("utf-8")
     alt_attr = _html.escape(alt, quote=True)
     style = f"width:{w}px;max-width:100%;height:auto;display:block;margin-bottom:8px"
     return (
         f'<img src="data:image/png;base64,{img_b64}" '
-        f'width="{w}" height="{h}" alt="{alt_attr}" style="{style}">'
+        f'width="{w}" alt="{alt_attr}" style="{style}">'
     )
