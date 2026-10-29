@@ -7,8 +7,13 @@ Also creates two aggregate lists:
 Idempotent — safe to re-run. Creates lists only for entries that don't already exist.
 All lists are tagged 'ds-storms-alerts' so the pipeline can fetch them in one query.
 
+With --basin sp, creates the South Pacific lists instead: one per covered
+country plus "Storm Alerts - South Pacific" (aggregate:sp), all also tagged
+basin:sp. Country lists are keyed by iso3 alone, so a country belongs to one
+basin's alerts.
+
 Usage:
-    uv run python pipelines/setup_country_lists.py [--dry-run]
+    uv run python pipelines/setup_country_lists.py [--dry-run] [--basin sp]
 """
 
 import argparse
@@ -18,6 +23,7 @@ import ocha_stratus as stratus
 from ocha_relay.listmonk import ListmonkClient
 
 from src.constants import COUNTRY_LIST_NAME_PREFIX, COUNTRY_LIST_TAG
+from src import data_sp
 from src.data import fetch_all_monitored_countries, load_adm1_boundaries
 
 
@@ -45,9 +51,18 @@ _AGGREGATE_LISTS = [
 ]
 
 
-def main(dry_run: bool = False) -> None:
+_SP_AGGREGATE = {
+    "name": f"{COUNTRY_LIST_NAME_PREFIX} - South Pacific",
+    "tag": "aggregate:sp",
+    "description": "Receives every South Pacific (RSMC Nadi) storm alert.",
+}
+
+
+def main(dry_run: bool = False, basin: str = "nhc") -> None:
     engine = stratus.get_engine(stage="dev")
     client = _admin_client()
+    aggregates = [_SP_AGGREGATE] if basin == "sp" else _AGGREGATE_LISTS
+    extra_tags = ["basin:sp"] if basin == "sp" else []
 
     # --- Aggregate lists ---
     existing_all = client.fetch_all_lists(tag=COUNTRY_LIST_TAG)
@@ -59,7 +74,7 @@ def main(dry_run: bool = False) -> None:
     }
 
     print("Aggregate lists:")
-    for agg in _AGGREGATE_LISTS:
+    for agg in aggregates:
         if agg["tag"] in existing_agg_tags:
             print(f"  SKIP  {agg['tag']} (already exists)")
         elif dry_run:
@@ -67,12 +82,15 @@ def main(dry_run: bool = False) -> None:
         else:
             list_id = client.create_list(
                 name=agg["name"],
-                tags=[COUNTRY_LIST_TAG, agg["tag"]],
+                tags=[COUNTRY_LIST_TAG, agg["tag"], *extra_tags],
             )
             print(f"  CREATE list {list_id}: {agg['name']!r} [{agg['tag']}]")
 
     # --- Per-country lists ---
-    iso3s = fetch_all_monitored_countries(engine)
+    iso3s = (
+        data_sp.fetch_all_monitored_countries(engine) if basin == "sp"
+        else fetch_all_monitored_countries(engine)
+    )
     print(f"\nPer-country lists ({len(iso3s)} countries):")
 
     existing_iso3s: dict[str, int] = {}
@@ -109,7 +127,7 @@ def main(dry_run: bool = False) -> None:
         else:
             list_id = client.create_list(
                 name=list_name,
-                tags=[COUNTRY_LIST_TAG, f"iso3:{iso3}"],
+                tags=[COUNTRY_LIST_TAG, f"iso3:{iso3}", *extra_tags],
             )
             print(f"  CREATE {iso3:3s} → list {list_id}: {list_name!r}")
         created += 1
@@ -125,5 +143,6 @@ if __name__ == "__main__":
         action="store_true",
         help="Print what would be created without making any API calls.",
     )
+    parser.add_argument("--basin", choices=["nhc", "sp"], default="nhc")
     args = parser.parse_args()
-    main(dry_run=args.dry_run)
+    main(dry_run=args.dry_run, basin=args.basin)
