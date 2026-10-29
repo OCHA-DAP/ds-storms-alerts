@@ -583,6 +583,7 @@ dependencies = [
     { name = "ocha-relay" },
     { name = "ocha-stratus" },
     { name = "openpyxl" },
+    { name = "requests" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
@@ -598,6 +599,7 @@ requires-dist = [
     { name = "ocha-relay", git = "https://github.com/OCHA-DAP/ocha-relay.git?rev=v0.3.0" },
     { name = "ocha-stratus", specifier = ">=0.1.7" },
     { name = "openpyxl", specifier = ">=3.1.5" },
+    { name = "requests", specifier = ">=2.31" },
     { name = "scipy", specifier = ">=1.17.1" },
 ]
 

@@ -6,233 +6,152 @@
 <title>Storm Alerts — Subscribe</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: system-ui, -apple-system, sans-serif;
-    font-size: 15px;
-    color: #222;
-    background: #f5f6f7;
-    padding: 0 16px 60px;
-  }
-  .wrap {
-    max-width: 760px;
-    margin: 24px auto;
-    background: #fff;
-    border-radius: 8px;
-    padding: 32px 36px;
-    box-shadow: 0 1px 4px rgba(0,0,0,.10);
-  }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 15px;
+         color: #1f2324; background: #f5f6f7; padding-bottom: 60px; line-height: 1.5; }
+  nav { background: #007eb5; padding: 11px 20px; display: flex; align-items: center;
+         gap: 24px; font-size: 0.95em; }
+  nav .brand { color: #fff; font-weight: 700; margin-right: auto; }
+  nav a { color: #fff; text-decoration: none; opacity: 0.85; }
+  nav a.active { opacity: 1; font-weight: 700; border-bottom: 2px solid #fff; padding-bottom: 1px; }
+  .wrap { max-width: 800px; margin: 24px auto; padding: 0 16px; display: grid; gap: 16px; }
+  .card { background: #fff; border-radius: 8px; padding: 26px 28px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
   h1 { font-size: 1.5em; color: #007eb5; margin-bottom: 6px; }
-  .lead { color: #555; margin-bottom: 28px; line-height: 1.5; }
-  .field { margin-bottom: 14px; }
-  .field label { display: block; font-size: 0.82em; color: #666; margin-bottom: 3px; }
-  .field input {
-    width: 100%; padding: 8px 10px;
-    border: 1px solid #ccc; border-radius: 4px;
-    font-size: 0.95em;
-  }
-  .field input:focus { outline: none; border-color: #007eb5; }
-  fieldset {
-    border: 1px solid #dde; border-radius: 6px;
-    padding: 14px 18px; margin-bottom: 18px;
-  }
-  fieldset.agg { background: #f0f7fb; border-color: #b3d4e8; }
-  legend {
-    font-weight: 600; font-size: 0.9em; color: #333;
-    padding: 0 6px;
-    display: flex; align-items: center; gap: 10px;
-  }
-  .cb-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 4px 12px;
-    margin-top: 10px;
-  }
-  label.cb {
-    display: flex; align-items: baseline; gap: 6px;
-    font-size: 0.88em; cursor: pointer; padding: 2px 0;
-  }
-  label.cb input { width: auto; flex-shrink: 0; }
-  .agg-row { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
-  .agg-row:last-child { margin-bottom: 0; }
-  .agg-row label.cb { font-size: 0.95em; font-weight: 500; white-space: nowrap; }
-  .agg-desc { font-size: 0.82em; color: #555; }
-  .tog {
-    font-size: 0.75em; font-weight: 400; color: #007eb5;
-    background: none; border: 1px solid #b3d4e8;
-    border-radius: 3px; padding: 1px 7px; cursor: pointer;
-  }
+  .lead { color: #4d585a; max-width: 62ch; }
+  .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 18px; }
+  @media (max-width: 560px) { .fields { grid-template-columns: 1fr; } .card { padding: 20px 16px; } }
+  .field label { display: block; font-size: 0.82em; color: #5e6a6b; margin-bottom: 3px; }
+  .field input { width: 100%; padding: 8px 10px; border: 1px solid #c9d1d2; border-radius: 4px; font-size: 0.95em; }
+  .field input:focus, .tog:focus-visible, button[type=submit]:focus-visible { outline: 2px solid #007eb5; outline-offset: 1px; }
+  .basin { background: #fff; border-radius: 8px; padding: 20px 24px; box-shadow: 0 1px 4px rgba(0,0,0,.08);
+            display: grid; gap: 12px; }
+  .basin header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .basin h2 { font-size: 1.12em; }
+  .basin.dev { background: #fafbfb; box-shadow: none; border: 1px solid #e2e8e8; }
+  .basin.dev h2 { color: #5e6a6b; }
+  .pill { font-size: 0.72em; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+           padding: 3px 8px; border-radius: 3px; }
+  .pill.live { background: #e3f2e9; color: #276b43; }
+  .pill.dev { background: #eef1f2; color: #5e6a6b; }
+  .source { font-size: 0.86em; color: #5e6a6b; margin-top: -6px; }
+  .devnote { font-size: 0.9em; color: #4d585a; }
+  .bundle { background: #f0f7fb; border: 1px solid #b3d4e8; border-radius: 6px; padding: 10px 14px;
+             display: grid; gap: 2px; }
+  .bundle label.cb { font-weight: 600; font-size: 0.95em; }
+  .bundle p { font-size: 0.82em; color: #5e6a6b; padding-left: 24px; }
+  fieldset { border: 1px solid #e2e8e8; border-radius: 6px; padding: 10px 14px 12px; }
+  legend { font-weight: 600; font-size: 0.9em; padding: 0 6px; display: flex; align-items: center; gap: 10px; }
+  .cb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; margin-top: 6px; }
+  label.cb { display: flex; align-items: baseline; gap: 8px; font-size: 0.9em; cursor: pointer; padding: 3px 0; }
+  label.cb input { flex-shrink: 0; }
+  .tog { font-size: 0.78em; font-weight: 400; color: #007eb5; background: none; border: 1px solid #b3d4e8;
+          border-radius: 3px; padding: 1px 7px; cursor: pointer; }
   .tog:hover { background: #e8f4fb; }
-  .submit-row { margin-top: 24px; }
-  button[type=submit] {
-    background: #007eb5; color: #fff;
-    border: none; border-radius: 5px;
-    padding: 10px 28px; font-size: 1em; cursor: pointer;
-  }
+  .submit { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  button[type=submit] { background: #007eb5; color: #fff; border: none; border-radius: 5px; padding: 10px 28px;
+                         font-size: 1em; cursor: pointer; }
   button[type=submit]:hover { background: #005f8a; }
-  .note { margin-top: 20px; font-size: 0.78em; color: #888; }
+  .note { font-size: 0.8em; color: #7e8e8f; }
+  .note a, .staging a { color: #007eb5; }
+  .staging { background: #fbf4ea; border-left: 4px solid #d48f2a; padding: 10px 14px; font-size: 0.9em; border-radius: 0 6px 6px 0; }
 </style>
 </head>
 <body>
-<nav style="background:#007eb5;padding:11px 20px;display:flex;align-items:center;gap:24px;font-family:system-ui,sans-serif;font-size:0.95em"><span style="color:#fff;font-weight:700;margin-right:auto">Storm Alerts</span><a href="index.html" style="color:#fff;text-decoration:none;font-weight:700;border-bottom:2px solid #fff;padding-bottom:1px">Subscribe</a><a href="guide.html" style="color:#fff;text-decoration:none;font-weight:400;opacity:0.85">About the alerts</a></nav>
-<div class="wrap">
-  <h1>Storm Alerts</h1>
-  <p class="lead">
-    Subscribe to receive email alerts when tropical storms are forecast to affect
-    specific countries. Select the regions or countries you want to hear about.
-  </p>
+<nav><span class="brand">Storm Alerts</span>
+  <a href="index.html" class="active">Subscribe</a><a href="guide.html">About the alerts</a></nav>
+<form class="wrap" method="post" action="https://listmonk-demo-afhcg8e2hde0fxca.eastus2-01.azurewebsites.net/subscription/form">
+  
+  <div class="card">
+    <h1>Storm Alerts</h1>
+    <p class="lead">Email alerts when a tropical cyclone forecast puts people in a
+      country you follow inside its strong-wind zones. Countries are grouped by the
+      ocean basin and forecast centre the alerts are based on.</p>
+    <input type="hidden" name="nonce">
+    <div class="fields">
+      <div class="field"><label for="f-email">Email address *</label>
+        <input id="f-email" type="email" name="email" required placeholder="you@example.com"></div>
+      <div class="field"><label for="f-name">Name</label>
+        <input id="f-name" type="text" name="name" placeholder="Optional"></div>
+    </div>
+  </div>
 
-  <form method="post" action="https://listmonk-demo-afhcg8e2hde0fxca.eastus2-01.azurewebsites.net/subscription/form">
-    <input type="hidden" name="nonce" />
-
-    <div class="field">
-      <label for="f-email">Email address *</label>
-      <input id="f-email" type="email" name="email" required placeholder="you@example.com">
-    </div>
-    <div class="field">
-      <label for="f-name">Name</label>
-      <input id="f-name" type="text" name="name" placeholder="Optional">
-    </div>
-
-  <fieldset class="agg">
-    <legend>Bundled subscriptions</legend>
-    <div class="agg-row"><label class="cb"><input type="checkbox" name="l" value="2c8d8d56-2fc4-48b3-88ba-d8faa747af31" checked> LAC</label><span class="agg-desc">Receive alerts that include at least one Caribbean, Central American, or South/North American country (excl. USA &amp; Canada).</span></div>
-  </fieldset>
-
-  <fieldset>
-    <legend>
-      Caribbean
-      <button type="button" class="tog" data-region="caribbean" data-state="0">Select all</button>
-    </legend>
-    <div class="cb-grid" id="region-caribbean">
-      <label class="cb"><input type="checkbox" name="l" value="4756992b-c296-4e42-a4e6-5f4c373dfa7f"> Aruba (Neth.)</label>
-      <label class="cb"><input type="checkbox" name="l" value="a1466e28-39ab-414e-bf45-1952ca0f8598"> Anguilla (UK)</label>
-      <label class="cb"><input type="checkbox" name="l" value="79927bfe-af0e-4b47-9394-24f4d19d1197"> Antigua and Barbuda</label>
-      <label class="cb"><input type="checkbox" name="l" value="e741b10d-5996-4a5f-8bda-00c40f5a4633"> Bonaire (Neth.)</label>
-      <label class="cb"><input type="checkbox" name="l" value="1ddaf571-1e9c-41e7-98cc-ff1b4a68d26b"> Bahamas</label>
-      <label class="cb"><input type="checkbox" name="l" value="a2aee896-10dd-4c8c-940d-881b63fae6ae"> Saint Barthélemy (Fr.)</label>
-      <label class="cb"><input type="checkbox" name="l" value="3aa5be9a-65e0-48d9-8022-16ac7fa8c5c7"> Bermuda (UK)</label>
-      <label class="cb"><input type="checkbox" name="l" value="41dbe295-fd28-4757-a3e7-0c6c499a38e2"> Barbados</label>
-      <label class="cb"><input type="checkbox" name="l" value="dbdf8aaf-93fa-4a46-a3c6-09e034aea4b0"> Cuba</label>
-      <label class="cb"><input type="checkbox" name="l" value="17b2d3bc-9b19-4579-af51-63cb803fefa5"> Curaçao (Neth.)</label>
-      <label class="cb"><input type="checkbox" name="l" value="f208738d-8831-4be1-bc61-dcd3488c522c"> Cayman Islands (UK)</label>
-      <label class="cb"><input type="checkbox" name="l" value="29cebbd5-2d36-4b96-bd84-2e51c95973b0"> Dominica</label>
-      <label class="cb"><input type="checkbox" name="l" value="45f1fa8d-efa4-4308-8f91-e47d23ed9ba2"> Dominican Republic</label>
-      <label class="cb"><input type="checkbox" name="l" value="0da07086-8f01-4f87-843a-8f3a19b298a4"> Guadeloupe (Fr.)</label>
-      <label class="cb"><input type="checkbox" name="l" value="430c465f-c0c1-4b39-ad41-6dac210912b2"> Grenada</label>
-      <label class="cb"><input type="checkbox" name="l" value="c6ce6504-28ce-407c-b3db-fa5ec641c34a"> Haiti</label>
-      <label class="cb"><input type="checkbox" name="l" value="9fdeff51-be6d-490f-9b93-576141e9eddc"> Jamaica</label>
-      <label class="cb"><input type="checkbox" name="l" value="c14c56ce-ab66-45e9-b42d-401d0702eb79"> Saint Kitts and Nevis</label>
-      <label class="cb"><input type="checkbox" name="l" value="302bdedf-dc6f-400c-8f39-f695c64cb146"> Saint Lucia</label>
-      <label class="cb"><input type="checkbox" name="l" value="04f493a4-441c-4dab-b1f2-6cf8b372cb34"> Saint Martin (Fr.)</label>
-      <label class="cb"><input type="checkbox" name="l" value="a94fafdd-b6aa-4b9b-9da0-4575d4fc9702"> Montserrat (UK)</label>
-      <label class="cb"><input type="checkbox" name="l" value="b7b9e911-ae6f-4c01-b688-88cf956bfb9f"> Martinique (Fr.)</label>
-      <label class="cb"><input type="checkbox" name="l" value="4bfb573f-c788-49a7-b7e6-9e195ba1eede"> Puerto Rico (USA)</label>
-      <label class="cb"><input type="checkbox" name="l" value="0e981d58-53b2-4e66-9d6e-825a47f9400a"> Saint Pierre and Miquelon (Fr.)</label>
-      <label class="cb"><input type="checkbox" name="l" value="c3fa0e22-50d4-4b64-a4f9-31cad307ae2d"> Sint Maarten (Neth.)</label>
-      <label class="cb"><input type="checkbox" name="l" value="0f9aa52f-8d2b-4ba9-a3e2-701f11e6c7f5"> Turks and Caicos Islands (UK)</label>
-      <label class="cb"><input type="checkbox" name="l" value="358a762c-5731-41ee-92a7-eb0f5cf18d71"> Trinidad and Tobago</label>
-      <label class="cb"><input type="checkbox" name="l" value="e60017bb-f45e-475d-9da8-36d5a1f44ca3"> Saint Vincent and the Grenadines</label>
-      <label class="cb"><input type="checkbox" name="l" value="c89da3b8-95c0-4da6-be2d-cd31d7cc0aa5"> British Virgin Islands (UK)</label>
-      <label class="cb"><input type="checkbox" name="l" value="c3b84fe8-8376-4a08-a0a2-e116bac9a642"> United States Virgin Islands (USA)</label>
-    </div>
-  </fieldset>
-  <fieldset>
-    <legend>
-      Central America
-      <button type="button" class="tog" data-region="central-america" data-state="0">Select all</button>
-    </legend>
-    <div class="cb-grid" id="region-central-america">
-      <label class="cb"><input type="checkbox" name="l" value="4a86a755-38e2-4500-9312-c17c4bea0d7b"> Belize</label>
-      <label class="cb"><input type="checkbox" name="l" value="44f5387b-ef93-4156-8833-645cb483f5bb"> Costa Rica</label>
-      <label class="cb"><input type="checkbox" name="l" value="a08afb85-486f-4e44-8674-3fd2516fe55a"> Guatemala</label>
-      <label class="cb"><input type="checkbox" name="l" value="9394a45f-4f7b-45c6-9a29-02bdfef56c75"> Honduras</label>
-      <label class="cb"><input type="checkbox" name="l" value="1d736e89-5010-409d-9d1f-a393724e31c2"> Mexico</label>
-      <label class="cb"><input type="checkbox" name="l" value="05d6c336-4749-4f28-be99-4587df38861e"> Nicaragua</label>
-      <label class="cb"><input type="checkbox" name="l" value="5b18aa2f-adae-49ad-a740-b868a9c6311f"> Panama</label>
-      <label class="cb"><input type="checkbox" name="l" value="649cc493-f087-461e-9286-a82e882c64e9"> El Salvador</label>
-    </div>
-  </fieldset>
-  <fieldset>
-    <legend>
-      South America
-      <button type="button" class="tog" data-region="south-america" data-state="0">Select all</button>
-    </legend>
-    <div class="cb-grid" id="region-south-america">
-      <label class="cb"><input type="checkbox" name="l" value="c8a4ca7f-7b3c-4852-8b31-bf4f88691244"> Colombia</label>
-      <label class="cb"><input type="checkbox" name="l" value="417e1915-3356-4223-a9f3-a9967774be77"> French Guiana (Fr.)</label>
-      <label class="cb"><input type="checkbox" name="l" value="c0ab043c-0b75-48c5-a7b8-385ceaac21bb"> Guyana</label>
-      <label class="cb"><input type="checkbox" name="l" value="71af177c-5326-4b2d-b026-796021f41ba4"> Suriname</label>
-      <label class="cb"><input type="checkbox" name="l" value="0a233d2e-a579-4122-835c-9f6c24c14411"> Venezuela (Bolivarian Republic of)</label>
-    </div>
-  </fieldset>
-  <fieldset>
-    <legend>
-      North America
-      <button type="button" class="tog" data-region="north-america" data-state="0">Select all</button>
-    </legend>
-    <div class="cb-grid" id="region-north-america">
-      <label class="cb"><input type="checkbox" name="l" value="4a702bd5-e20c-467c-9b2d-084d250a54ad"> Canada</label>
-      <label class="cb"><input type="checkbox" name="l" value="711e2f9f-a754-4f1a-8483-c919d19b7800"> United States of America</label>
-    </div>
-  </fieldset>
-  <fieldset>
-    <legend>
-      Africa & Atlantic Islands
-      <button type="button" class="tog" data-region="africa-and-atlantic-islands" data-state="0">Select all</button>
-    </legend>
-    <div class="cb-grid" id="region-africa-and-atlantic-islands">
-      <label class="cb"><input type="checkbox" name="l" value="693cb894-4a42-4626-ae48-8cac06c7e770"> Cabo Verde</label>
-      <label class="cb"><input type="checkbox" name="l" value="9bb79571-2cbc-47fa-88a8-f62dd465bc12"> Algeria</label>
-      <label class="cb"><input type="checkbox" name="l" value="8e785a3c-4715-4dcb-8ab9-6bd293aabd8f"> Western Sahara</label>
-      <label class="cb"><input type="checkbox" name="l" value="81e0903b-e03d-4857-9691-789d445c0fe5"> Gambia</label>
-      <label class="cb"><input type="checkbox" name="l" value="72a275ec-1022-45ae-8499-5cb2569862a2"> Morocco</label>
-      <label class="cb"><input type="checkbox" name="l" value="48598ba6-513c-41fd-a6ad-5eab32767d04"> Mauritania</label>
-      <label class="cb"><input type="checkbox" name="l" value="5618369b-90c7-4be0-9149-f8a00cbc147f"> Senegal</label>
-    </div>
-  </fieldset>
-  <fieldset>
-    <legend>
-      Europe
-      <button type="button" class="tog" data-region="europe" data-state="0">Select all</button>
-    </legend>
-    <div class="cb-grid" id="region-europe">
-      <label class="cb"><input type="checkbox" name="l" value="2ec968d7-e761-41ee-8d44-e2b936954294"> Belgium</label>
-      <label class="cb"><input type="checkbox" name="l" value="b63b32ab-1d44-4b13-bc03-3eda0597ca0d"> Germany</label>
-      <label class="cb"><input type="checkbox" name="l" value="9ef41474-3974-4b08-83da-084170a49c51"> Denmark</label>
-      <label class="cb"><input type="checkbox" name="l" value="e9fe5c50-37f1-4bf9-9d1a-3d53b6a60d24"> Spain</label>
-      <label class="cb"><input type="checkbox" name="l" value="f76a25aa-0808-4a63-be78-f8d450530135"> France</label>
-      <label class="cb"><input type="checkbox" name="l" value="a7d031c4-a6f5-47b9-9970-dabcac2e880f"> Faroe Islands (Den.)</label>
-      <label class="cb"><input type="checkbox" name="l" value="5ed268e4-0188-4a49-9ef8-cb553b7dad68"> United Kingdom of Great Britain and Northern Ireland</label>
-      <label class="cb"><input type="checkbox" name="l" value="b4341e06-d01d-45fd-903a-9dbadfce2933"> Guernsey (UK)</label>
-      <label class="cb"><input type="checkbox" name="l" value="9011d4e1-8970-464d-a245-8069bf92705f"> Gibraltar (UK)</label>
-      <label class="cb"><input type="checkbox" name="l" value="f8ef4081-d164-4bbc-ae4f-f5df29dc6b46"> Greenland (Den.)</label>
-      <label class="cb"><input type="checkbox" name="l" value="6c00062c-198c-447a-8645-eba7f9b3ea6f"> Isle of Man (UK)</label>
-      <label class="cb"><input type="checkbox" name="l" value="b5b6eeaa-538a-4975-a962-a42af68ff45a"> Ireland</label>
-      <label class="cb"><input type="checkbox" name="l" value="91608155-03b5-47d7-99b5-38aef03d19a0"> Iceland</label>
-      <label class="cb"><input type="checkbox" name="l" value="549abcda-e63e-4eba-9159-09ec3b3307ea"> Jersey (UK)</label>
-      <label class="cb"><input type="checkbox" name="l" value="30498f37-21a9-4405-ae08-f791a3ed985b"> Luxembourg</label>
-      <label class="cb"><input type="checkbox" name="l" value="c76ad459-dd6d-4af6-9406-9009df1f550a"> Netherlands (Kingdom of the)</label>
-      <label class="cb"><input type="checkbox" name="l" value="38ecccf4-9303-4c4a-9069-3d92440834b4"> Norway</label>
-      <label class="cb"><input type="checkbox" name="l" value="76bad7ae-241e-4628-a2ce-60fe3e5c0f8d"> Portugal</label>
-    </div>
-  </fieldset>
-    <div class="submit-row">
-      <button type="submit">Subscribe</button>
-    </div>
-    <p class="note">
-      You can unsubscribe at any time using the link in any alert email.
-      Alerts are sent by the
-      <a href="https://centre.humdata.org" style="color:#007eb5">OCHA Centre for Humanitarian Data</a>.
-    </p>
-  </form>
-</div>
+  <section class="basin" id="basin-nhc">
+    <header><h2>North Atlantic and eastern Pacific</h2><span class="pill live">Live</span></header>
+    <p class="source">Forecasts from the US National Hurricane Center (NHC)</p>
+    <div class="bundle"><label class="cb"><input type="checkbox" name="l" value="2c8d8d56-2fc4-48b3-88ba-d8faa747af31" checked><span>All of Latin America and the Caribbean</span></label><p>Every alert that includes at least one Caribbean, Central American or South American country, or Mexico.</p></div>
+    <fieldset>
+      <legend>Caribbean
+        <button type="button" class="tog" data-region="nhc-caribbean" data-state="0">Select all</button>
+      </legend>
+      <div class="cb-grid" id="region-nhc-caribbean"><label class="cb"><input type="checkbox" name="l" value="a1466e28-39ab-414e-bf45-1952ca0f8598"><span>Anguilla (UK)</span></label><label class="cb"><input type="checkbox" name="l" value="79927bfe-af0e-4b47-9394-24f4d19d1197"><span>Antigua and Barbuda</span></label><label class="cb"><input type="checkbox" name="l" value="4756992b-c296-4e42-a4e6-5f4c373dfa7f"><span>Aruba (Neth.)</span></label><label class="cb"><input type="checkbox" name="l" value="1ddaf571-1e9c-41e7-98cc-ff1b4a68d26b"><span>Bahamas</span></label><label class="cb"><input type="checkbox" name="l" value="41dbe295-fd28-4757-a3e7-0c6c499a38e2"><span>Barbados</span></label><label class="cb"><input type="checkbox" name="l" value="3aa5be9a-65e0-48d9-8022-16ac7fa8c5c7"><span>Bermuda (UK)</span></label><label class="cb"><input type="checkbox" name="l" value="e741b10d-5996-4a5f-8bda-00c40f5a4633"><span>Bonaire (Neth.)</span></label><label class="cb"><input type="checkbox" name="l" value="c89da3b8-95c0-4da6-be2d-cd31d7cc0aa5"><span>British Virgin Islands (UK)</span></label><label class="cb"><input type="checkbox" name="l" value="f208738d-8831-4be1-bc61-dcd3488c522c"><span>Cayman Islands (UK)</span></label><label class="cb"><input type="checkbox" name="l" value="dbdf8aaf-93fa-4a46-a3c6-09e034aea4b0"><span>Cuba</span></label><label class="cb"><input type="checkbox" name="l" value="17b2d3bc-9b19-4579-af51-63cb803fefa5"><span>Curaçao (Neth.)</span></label><label class="cb"><input type="checkbox" name="l" value="29cebbd5-2d36-4b96-bd84-2e51c95973b0"><span>Dominica</span></label><label class="cb"><input type="checkbox" name="l" value="45f1fa8d-efa4-4308-8f91-e47d23ed9ba2"><span>Dominican Republic</span></label><label class="cb"><input type="checkbox" name="l" value="430c465f-c0c1-4b39-ad41-6dac210912b2"><span>Grenada</span></label><label class="cb"><input type="checkbox" name="l" value="0da07086-8f01-4f87-843a-8f3a19b298a4"><span>Guadeloupe (Fr.)</span></label><label class="cb"><input type="checkbox" name="l" value="c6ce6504-28ce-407c-b3db-fa5ec641c34a"><span>Haiti</span></label><label class="cb"><input type="checkbox" name="l" value="9fdeff51-be6d-490f-9b93-576141e9eddc"><span>Jamaica</span></label><label class="cb"><input type="checkbox" name="l" value="b7b9e911-ae6f-4c01-b688-88cf956bfb9f"><span>Martinique (Fr.)</span></label><label class="cb"><input type="checkbox" name="l" value="a94fafdd-b6aa-4b9b-9da0-4575d4fc9702"><span>Montserrat (UK)</span></label><label class="cb"><input type="checkbox" name="l" value="4bfb573f-c788-49a7-b7e6-9e195ba1eede"><span>Puerto Rico (USA)</span></label><label class="cb"><input type="checkbox" name="l" value="a2aee896-10dd-4c8c-940d-881b63fae6ae"><span>Saint Barthélemy (Fr.)</span></label><label class="cb"><input type="checkbox" name="l" value="c14c56ce-ab66-45e9-b42d-401d0702eb79"><span>Saint Kitts and Nevis</span></label><label class="cb"><input type="checkbox" name="l" value="302bdedf-dc6f-400c-8f39-f695c64cb146"><span>Saint Lucia</span></label><label class="cb"><input type="checkbox" name="l" value="04f493a4-441c-4dab-b1f2-6cf8b372cb34"><span>Saint Martin (Fr.)</span></label><label class="cb"><input type="checkbox" name="l" value="0e981d58-53b2-4e66-9d6e-825a47f9400a"><span>Saint Pierre and Miquelon (Fr.)</span></label><label class="cb"><input type="checkbox" name="l" value="e60017bb-f45e-475d-9da8-36d5a1f44ca3"><span>Saint Vincent and the Grenadines</span></label><label class="cb"><input type="checkbox" name="l" value="c3fa0e22-50d4-4b64-a4f9-31cad307ae2d"><span>Sint Maarten (Neth.)</span></label><label class="cb"><input type="checkbox" name="l" value="358a762c-5731-41ee-92a7-eb0f5cf18d71"><span>Trinidad and Tobago</span></label><label class="cb"><input type="checkbox" name="l" value="0f9aa52f-8d2b-4ba9-a3e2-701f11e6c7f5"><span>Turks and Caicos Islands (UK)</span></label><label class="cb"><input type="checkbox" name="l" value="c3b84fe8-8376-4a08-a0a2-e116bac9a642"><span>United States Virgin Islands (USA)</span></label></div>
+    </fieldset>
+    <fieldset>
+      <legend>Central America
+        <button type="button" class="tog" data-region="nhc-central-america" data-state="0">Select all</button>
+      </legend>
+      <div class="cb-grid" id="region-nhc-central-america"><label class="cb"><input type="checkbox" name="l" value="4a86a755-38e2-4500-9312-c17c4bea0d7b"><span>Belize</span></label><label class="cb"><input type="checkbox" name="l" value="44f5387b-ef93-4156-8833-645cb483f5bb"><span>Costa Rica</span></label><label class="cb"><input type="checkbox" name="l" value="649cc493-f087-461e-9286-a82e882c64e9"><span>El Salvador</span></label><label class="cb"><input type="checkbox" name="l" value="a08afb85-486f-4e44-8674-3fd2516fe55a"><span>Guatemala</span></label><label class="cb"><input type="checkbox" name="l" value="9394a45f-4f7b-45c6-9a29-02bdfef56c75"><span>Honduras</span></label><label class="cb"><input type="checkbox" name="l" value="1d736e89-5010-409d-9d1f-a393724e31c2"><span>Mexico</span></label><label class="cb"><input type="checkbox" name="l" value="05d6c336-4749-4f28-be99-4587df38861e"><span>Nicaragua</span></label><label class="cb"><input type="checkbox" name="l" value="5b18aa2f-adae-49ad-a740-b868a9c6311f"><span>Panama</span></label></div>
+    </fieldset>
+    <fieldset>
+      <legend>South America
+        <button type="button" class="tog" data-region="nhc-south-america" data-state="0">Select all</button>
+      </legend>
+      <div class="cb-grid" id="region-nhc-south-america"><label class="cb"><input type="checkbox" name="l" value="c8a4ca7f-7b3c-4852-8b31-bf4f88691244"><span>Colombia</span></label><label class="cb"><input type="checkbox" name="l" value="417e1915-3356-4223-a9f3-a9967774be77"><span>French Guiana (Fr.)</span></label><label class="cb"><input type="checkbox" name="l" value="c0ab043c-0b75-48c5-a7b8-385ceaac21bb"><span>Guyana</span></label><label class="cb"><input type="checkbox" name="l" value="71af177c-5326-4b2d-b026-796021f41ba4"><span>Suriname</span></label><label class="cb"><input type="checkbox" name="l" value="0a233d2e-a579-4122-835c-9f6c24c14411"><span>Venezuela (Bolivarian Republic of)</span></label></div>
+    </fieldset>
+    <fieldset>
+      <legend>North America
+        <button type="button" class="tog" data-region="nhc-north-america" data-state="0">Select all</button>
+      </legend>
+      <div class="cb-grid" id="region-nhc-north-america"><label class="cb"><input type="checkbox" name="l" value="4a702bd5-e20c-467c-9b2d-084d250a54ad"><span>Canada</span></label><label class="cb"><input type="checkbox" name="l" value="711e2f9f-a754-4f1a-8483-c919d19b7800"><span>United States of America</span></label></div>
+    </fieldset>
+    <fieldset>
+      <legend>Africa and Atlantic islands
+        <button type="button" class="tog" data-region="nhc-africa-and-atlantic-islands" data-state="0">Select all</button>
+      </legend>
+      <div class="cb-grid" id="region-nhc-africa-and-atlantic-islands"><label class="cb"><input type="checkbox" name="l" value="9bb79571-2cbc-47fa-88a8-f62dd465bc12"><span>Algeria</span></label><label class="cb"><input type="checkbox" name="l" value="693cb894-4a42-4626-ae48-8cac06c7e770"><span>Cabo Verde</span></label><label class="cb"><input type="checkbox" name="l" value="81e0903b-e03d-4857-9691-789d445c0fe5"><span>Gambia</span></label><label class="cb"><input type="checkbox" name="l" value="48598ba6-513c-41fd-a6ad-5eab32767d04"><span>Mauritania</span></label><label class="cb"><input type="checkbox" name="l" value="72a275ec-1022-45ae-8499-5cb2569862a2"><span>Morocco</span></label><label class="cb"><input type="checkbox" name="l" value="5618369b-90c7-4be0-9149-f8a00cbc147f"><span>Senegal</span></label><label class="cb"><input type="checkbox" name="l" value="8e785a3c-4715-4dcb-8ab9-6bd293aabd8f"><span>Western Sahara</span></label></div>
+    </fieldset>
+    <fieldset>
+      <legend>Europe
+        <button type="button" class="tog" data-region="nhc-europe" data-state="0">Select all</button>
+      </legend>
+      <div class="cb-grid" id="region-nhc-europe"><label class="cb"><input type="checkbox" name="l" value="2ec968d7-e761-41ee-8d44-e2b936954294"><span>Belgium</span></label><label class="cb"><input type="checkbox" name="l" value="9ef41474-3974-4b08-83da-084170a49c51"><span>Denmark</span></label><label class="cb"><input type="checkbox" name="l" value="a7d031c4-a6f5-47b9-9970-dabcac2e880f"><span>Faroe Islands (Den.)</span></label><label class="cb"><input type="checkbox" name="l" value="f76a25aa-0808-4a63-be78-f8d450530135"><span>France</span></label><label class="cb"><input type="checkbox" name="l" value="b63b32ab-1d44-4b13-bc03-3eda0597ca0d"><span>Germany</span></label><label class="cb"><input type="checkbox" name="l" value="9011d4e1-8970-464d-a245-8069bf92705f"><span>Gibraltar (UK)</span></label><label class="cb"><input type="checkbox" name="l" value="f8ef4081-d164-4bbc-ae4f-f5df29dc6b46"><span>Greenland (Den.)</span></label><label class="cb"><input type="checkbox" name="l" value="b4341e06-d01d-45fd-903a-9dbadfce2933"><span>Guernsey (UK)</span></label><label class="cb"><input type="checkbox" name="l" value="91608155-03b5-47d7-99b5-38aef03d19a0"><span>Iceland</span></label><label class="cb"><input type="checkbox" name="l" value="b5b6eeaa-538a-4975-a962-a42af68ff45a"><span>Ireland</span></label><label class="cb"><input type="checkbox" name="l" value="6c00062c-198c-447a-8645-eba7f9b3ea6f"><span>Isle of Man (UK)</span></label><label class="cb"><input type="checkbox" name="l" value="549abcda-e63e-4eba-9159-09ec3b3307ea"><span>Jersey (UK)</span></label><label class="cb"><input type="checkbox" name="l" value="30498f37-21a9-4405-ae08-f791a3ed985b"><span>Luxembourg</span></label><label class="cb"><input type="checkbox" name="l" value="c76ad459-dd6d-4af6-9406-9009df1f550a"><span>Netherlands (Kingdom of the)</span></label><label class="cb"><input type="checkbox" name="l" value="38ecccf4-9303-4c4a-9069-3d92440834b4"><span>Norway</span></label><label class="cb"><input type="checkbox" name="l" value="76bad7ae-241e-4628-a2ce-60fe3e5c0f8d"><span>Portugal</span></label><label class="cb"><input type="checkbox" name="l" value="e9fe5c50-37f1-4bf9-9d1a-3d53b6a60d24"><span>Spain</span></label><label class="cb"><input type="checkbox" name="l" value="5ed268e4-0188-4a49-9ef8-cb553b7dad68"><span>United Kingdom of Great Britain and Northern Ireland</span></label></div>
+    </fieldset>
+  </section>
+  <section class="basin dev" id="basin-sp">
+    <header><h2>South Pacific</h2><span class="pill dev">In development</span></header>
+    <p class="source">Forecasts from RSMC Nadi (Fiji Meteorological Service). Winds are 10-minute means.</p>
+    <p class="devnote">Alerts are being tested; sign-up will open here soon.</p>
+  </section>
+  <section class="basin dev" id="basin-si">
+    <header><h2>South-West Indian Ocean</h2><span class="pill dev">In development</span></header>
+    <p class="source">RSMC La Réunion</p>
+    <p class="devnote">The next basin to be added.</p>
+  </section>
+  <section class="basin dev" id="basin-au">
+    <header><h2>Australian region</h2><span class="pill dev">In development</span></header>
+    <p class="source">Australian Bureau of Meteorology</p>
+    <p class="devnote">Not operational yet.</p>
+  </section>
+  <section class="basin dev" id="basin-wp">
+    <header><h2>Western North Pacific</h2><span class="pill dev">In development</span></header>
+    <p class="source">RSMC Tokyo (Japan Meteorological Agency)</p>
+    <p class="devnote">Not operational yet.</p>
+  </section>
+  <section class="basin dev" id="basin-ni">
+    <header><h2>North Indian Ocean</h2><span class="pill dev">In development</span></header>
+    <p class="source">RSMC New Delhi (India Meteorological Department)</p>
+    <p class="devnote">Not operational yet.</p>
+  </section>
+  <div class="card submit">
+    <button type="submit">Subscribe</button>
+    <p class="note">You can unsubscribe at any time with the link in any alert.
+      Alerts are sent by the <a href="https://centre.humdata.org">OCHA Centre for
+      Humanitarian Data</a>.</p>
+  </div>
+</form>
 <script>
   document.querySelectorAll('.tog').forEach(btn => {
     btn.addEventListener('click', () => {
       const on = btn.dataset.state === '0';
-      document.querySelectorAll('#region-' + btn.dataset.region + ' input').forEach(cb => {
-        cb.checked = on;
-      });
+      document.querySelectorAll('#region-' + btn.dataset.region + ' input').forEach(cb => { cb.checked = on; });
       btn.dataset.state = on ? '1' : '0';
       btn.textContent = on ? 'Clear' : 'Select all';
     });

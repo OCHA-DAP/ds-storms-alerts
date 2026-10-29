@@ -127,13 +127,23 @@ _FCAST_TRACK = dict(color="#444444", linewidth=2, linestyle=(0, (2.4, 1.4)))
 
 _UTC = ZoneInfo("UTC")
 _NY = ZoneInfo("America/New_York")
+# Time zone of the time labels on forecast tracks, and the caption saying so.
+# NHC alerts use US Eastern; the South Pacific alert switches to Fiji time
+# (set_map_timezone, called once per run).
+_MAP_TZ = _NY
+_MAP_TZ_NOTE = "Forecast times are US Eastern Time."
+
+
+def set_map_timezone(tz: ZoneInfo, note: str) -> None:
+    global _MAP_TZ, _MAP_TZ_NOTE
+    _MAP_TZ, _MAP_TZ_NOTE = tz, note
 
 
 def _format_ny(t: datetime) -> str:
-    """Format a UTC timestamp as a compact NY-time string."""
+    """Format a UTC timestamp as a compact local-time string (the map time zone)."""
     if t.tzinfo is None:
         t = t.replace(tzinfo=_UTC)
-    local = t.astimezone(_NY)
+    local = t.astimezone(_MAP_TZ)
     hour = local.strftime("%I").lstrip("0") or "12"
     return f"{local.strftime('%a')} {hour}{local.strftime('%p')}"
 
@@ -1505,6 +1515,9 @@ def _shift_to_branch(
             minx, _, maxx, _ = g.bounds
             if maxx - minx > 180.0:
                 return None
+            # The halves of a polygon split at ±180° now meet along 180°;
+            # merge them, or the split line is drawn as an edge.
+            g = sops.unary_union(g)
         k = round((center - g.centroid.x) / 360.0)
         return saffinity.translate(g, xoff=360.0 * k) if k else g
 
@@ -1678,7 +1691,7 @@ def _map_notes(tracks: gpd.GeoDataFrame, *extra: str) -> str:
     where a footnote ends up sitting on a swath or a coastline."""
     notes = list(extra)
     if not tracks.empty and (tracks["kind"] == "forecast").any():
-        notes.append("Forecast times are US Eastern Time.")
+        notes.append(_MAP_TZ_NOTE)
     # One note per line: run together they reach the map's full width, and
     # any longer would widen the image past square.
     return "\n".join(notes)
@@ -2127,6 +2140,73 @@ def track_plot_wsp(
     return _fig_to_img_tag(fig, alt=title, dpi=_MAP_DPI,
                            max_width=_MAP_DISPLAY_PX)
 
+
+
+_SCENARIO_EDGE = "#134ead"  # --hdx-primary-6
+
+
+def track_plot_scenarios(
+    tracks: gpd.GeoDataFrame,
+    buffers: gpd.GeoDataFrame,
+    envelope: gpd.GeoDataFrame,
+    background: gpd.GeoDataFrame,
+    wind_threshold_kt: int = 34,
+    adm1_gdf: gpd.GeoDataFrame | None = None,
+    storm_name: str = "",
+) -> str:
+    """Map: forecast and observed swaths plus the outline of everywhere the
+    uncertainty scenarios bring ``wind_threshold_kt`` winds (South Pacific).
+
+    The scenarios move the whole forecast track by the forecaster's position
+    uncertainty in each of 36 directions; the outline is the union of their
+    forecast-only swaths. It plays the part the wind-speed-probability map
+    plays for NHC, for a centre that publishes no probabilities.
+    """
+    if tracks.empty or envelope is None or envelope.empty:
+        return ""
+    dateline = _dateline_mode(tracks) or _has_wide_geometry(buffers, envelope)
+    if dateline:
+        center = _track_lon_center(tracks)
+        tracks = _shift_to_branch(tracks, center)
+        buffers = _shift_to_branch(buffers, center)
+        envelope = _shift_to_branch(envelope, center)
+        adm1_gdf = _shift_to_branch(adm1_gdf, center)
+        background = _replicate_world(background)
+    _obsv_buf = buffers[buffers["kind"] == "observed"] if not buffers.empty else buffers
+    xlim, ylim = _forecast_view_bbox(
+        tracks, envelope, obsv_buffers=_obsv_buf, land_gdf=background)
+    if not dateline and (xlim[0] < -180.0 or xlim[1] > 180.0):
+        background = _replicate_world(background)
+    fig, ax = _new_map_figure(xlim, ylim)
+    _draw_background(ax, background)
+    if adm1_gdf is not None and not adm1_gdf.empty:
+        _draw_adm1(ax, adm1_gdf, xlim)
+    obsv_proxies = _draw_obsv_buffers(ax, buffers)
+    fcast_proxies = _draw_fcast_buffers(ax, buffers)
+    envelope.plot(ax=ax, facecolor="none", edgecolor=_SCENARIO_EDGE,
+                  linewidth=1.3, linestyle=(0, (4, 2)), zorder=3)
+    _draw_tracks(ax, tracks)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    title = (
+        f"{storm_name}: where the track uncertainty could bring "
+        f"{wind_threshold_kt}-knot winds" if storm_name
+        else f"Where the track uncertainty could bring {wind_threshold_kt}-knot winds"
+    )
+    _finalize_map(ax, title=title, legend_handles=[])
+    fig.tight_layout()
+    _label_forecast_times(ax, fig, tracks)
+    scen_proxy = [Line2D([0], [0], color=_SCENARIO_EDGE, linewidth=1.3,
+                         linestyle=(0, (4, 2)),
+                         label=f"≥{wind_threshold_kt} kt with\nany shifted track")]
+    _add_legend_row(ax, fig, [
+        ("Forecast\nwind swaths", fcast_proxies),
+        ("Track\nuncertainty", scen_proxy),
+        ("Observed\nwind swaths", obsv_proxies),
+        ("Storm track", _track_legend_handles(tracks)),
+    ], note=_map_notes(tracks))
+    return _fig_to_img_tag(fig, alt=title, dpi=_MAP_DPI,
+                           max_width=_MAP_DISPLAY_PX)
 
 def _fig_to_img_tag(
     fig: plt.Figure, alt: str = "", dpi: int = 100, display_scale: float = 1.0,
