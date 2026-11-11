@@ -6,15 +6,17 @@ src/hdx_export.py for the layout and the meaning of is_final_alert.
 
     python pipelines/export_hdx.py --stage prod --dry-run
     python pipelines/export_hdx.py --stage prod --issued-time 2026-10-09T15 --test
+    python pipelines/export_hdx.py --stage prod --basin sp --dry-run
 """
 
 import argparse
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 import ocha_stratus as stratus
 
+from src.basins import BASINS
 from src.data import most_recent_advisory_time
 from src.hdx_export import BLOB_ROOT, BLOB_ROOT_TEST, export_season
 
@@ -33,7 +35,18 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Current advisory (format YYYY-MM-DDTHH): storms are read up to it "
             "and is_final_alert is judged against it. Defaults to the most "
-            "recent NHC advisory hour (03/09/15/21 UTC) on or before now."
+            "recent NHC advisory hour (03/09/15/21 UTC) on or before now; for "
+            "the South Pacific, to the current hour."
+        ),
+    )
+    parser.add_argument(
+        "--basin",
+        default="nhc",
+        choices=sorted(BASINS),
+        help=(
+            "nhc (default): the NHC season's storms. sp: the South Pacific "
+            "(RSMC Nadi) season's storms, written under their own root "
+            "(see src/hdx_export.py)."
         ),
     )
     parser.add_argument(
@@ -50,7 +63,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             f"Write under {BLOB_ROOT_TEST}/ instead of {BLOB_ROOT}/ "
-            "(never published)."
+            "(never published); likewise for the South Pacific root."
         ),
     )
     parser.add_argument(
@@ -65,14 +78,26 @@ if __name__ == "__main__":
     args = parse_args()
     if args.issued_time:
         as_of = datetime.strptime(args.issued_time, "%Y-%m-%dT%H")
-    else:
+    elif args.basin == "nhc":
         as_of = most_recent_advisory_time()
+    else:
+        # FMS forecasts keep no fixed hours, and a storm goes final by having
+        # no forecast for a while: judge against the clock, not the last
+        # forecast (naive UTC, like the database's times).
+        as_of = datetime.now(UTC).replace(
+            tzinfo=None, minute=0, second=0, microsecond=0
+        )
     logger.info(
-        f"Starting HDX export: as_of={as_of.isoformat()} stage={args.stage} "
-        f"test={args.test} dry_run={args.dry_run}"
+        f"Starting HDX export: basin={args.basin} as_of={as_of.isoformat()} "
+        f"stage={args.stage} test={args.test} dry_run={args.dry_run}"
     )
     engine = stratus.get_engine(stage=args.stage)
     manifest = export_season(
-        engine, as_of, db_stage=args.stage, test=args.test, dry_run=args.dry_run
+        engine,
+        as_of,
+        db_stage=args.stage,
+        test=args.test,
+        dry_run=args.dry_run,
+        basin=BASINS[args.basin],
     )
     logger.info("Manifest:\n%s", json.dumps(manifest, indent=1))
