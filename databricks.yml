@@ -26,6 +26,9 @@
 #
 #   databricks bundle run storm_alert -p DEFAULT --only hdx_export
 #
+# A third, hdx_export_sp, does the same for the South Pacific season's storms
+# (same wrapper, basin "sp"), on the test prefix until that alert launches.
+#
 # Bundle docs: https://docs.databricks.com/dev-tools/bundles/
 
 bundle:
@@ -119,6 +122,8 @@ targets:
               job_cluster_key: alert_cluster
             - task_key: hdx_export
               job_cluster_key: alert_cluster
+            - task_key: hdx_export_sp
+              job_cluster_key: alert_cluster
         storm_alert_sp:
           job_clusters:
             - job_cluster_key: alert_sp_cluster
@@ -148,6 +153,8 @@ targets:
             - task_key: run_alert
               existing_cluster_id: ${var.existing_cluster_id}
             - task_key: hdx_export
+              existing_cluster_id: ${var.existing_cluster_id}
+            - task_key: hdx_export_sp
               existing_cluster_id: ${var.existing_cluster_id}
         storm_alert_sp:
           tasks:
@@ -255,6 +262,29 @@ resources:
               - "{{job.parameters.test_email}}"
               - "{{job.parameters.dry_run}}"
               - "{{job.parameters.stage}}"
+          libraries:
+            - pypi: { package: "ocha-stratus>=0.1.7" }
+            - pypi: { package: "geopandas" }
+
+        # The same export for the South Pacific (RSMC Nadi) season's storms,
+        # under their own blob root. It runs here, on this job's six-hourly
+        # schedule, and not in Storm Alert (South Pacific): that job only
+        # runs when FMS sends a forecast, so a storm FMS has stopped
+        # forecasting would never be marked final. The scraper publishes on
+        # its own six-hourly cron anyway, so nothing reaches HDX later.
+        # Test prefix (never published) until the South Pacific alert opens
+        # to subscribers: swap "True" for "{{job.parameters.test_email}}" at
+        # launch, together with storm_alert_sp's test_email below.
+        - task_key: hdx_export_sp
+          spark_python_task:
+            python_file: databricks/run_hdx_export_job.py
+            source: GIT
+            parameters:
+              - "{{job.parameters.issued_time}}"
+              - "True"
+              - "{{job.parameters.dry_run}}"
+              - "{{job.parameters.stage}}"
+              - "sp"
           libraries:
             - pypi: { package: "ocha-stratus>=0.1.7" }
             - pypi: { package: "geopandas" }
