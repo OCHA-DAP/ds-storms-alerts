@@ -9,7 +9,7 @@ import sys
 import tempfile
 import webbrowser
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import ocha_stratus as stratus
@@ -349,6 +349,25 @@ def resolve_country_list_ids(
         result.append(aggregate_lac_id)
     result.extend(monitoring_ids)
     return result
+
+
+def _target_list_ids(
+    client, *, test: bool, is_monitoring: bool, iso3s: list[str],
+    basin: BasinProfile = basins.NHC,
+) -> list[int]:
+    """Listmonk lists one email goes to.
+
+    A test send (``--send-test`` or TEST_EMAIL) goes to the test list and
+    nothing else, monitoring emails included: checking for the test flag
+    after the monitoring case mailed the DSci monitoring list from test
+    runs whenever no country was exposed.
+    """
+    if test:
+        return list(TEST_LIST_IDS)
+    if is_monitoring:
+        return _fetch_monitoring_list_ids(client)
+    logger.info(f"Resolving per-country lists for: {iso3s}")
+    return resolve_country_list_ids(client, iso3s, basin=basin)
 
 
 def _fetch_monitoring_list_ids(client) -> list[int]:
@@ -2089,6 +2108,15 @@ def _sp_send_signature(issuances: dict) -> str:
     return "sp" + hashlib.sha1(key.encode()).hexdigest()[:12]
 
 
+# South Pacific send-once state lives in campaign names: each run reads the
+# campaigns of the last _SP_CAMPAIGN_LOOKBACK_H hours. A run with no
+# --issued-time sends nothing once the latest forecast is older than
+# _SP_DEFAULT_MAX_AGE, which must stay below the lookback.
+_SP_CAMPAIGN_LOOKBACK_H = 36
+_SP_DEFAULT_MAX_AGE = timedelta(hours=24)
+assert _SP_DEFAULT_MAX_AGE < timedelta(hours=_SP_CAMPAIGN_LOOKBACK_H)
+
+
 def _sp_campaign_suffix(issuances: dict) -> str:
     """'<signature> <storm>@<YYYYMMDDHHMM>,...': appended to South Pacific
     campaign names, so the next run can tell which forecasts were last sent
@@ -2429,6 +2457,20 @@ if __name__ == "__main__":
             f"No --issued-time provided; defaulted to most recent advisory "
             f"hour {issued_time_dt.isoformat()}"
         )
+        if basin.key == "sp":
+            # The latest FMS forecast stays the default however old it gets,
+            # while the send-once check only sees campaigns from the last
+            # _SP_CAMPAIGN_LOOKBACK_H hours: a run long after the last
+            # forecast would email it again. Past _SP_DEFAULT_MAX_AGE (shorter
+            # than the lookback, so the email of any forecast young enough to
+            # pass is still visible to the check) there is nothing to send.
+            from datetime import UTC
+            age = datetime.now(UTC).replace(tzinfo=None) - issued_time_dt
+            if age > _SP_DEFAULT_MAX_AGE:
+                logger.info(
+                    f"Latest FMS forecast is {age} old (more than "
+                    f"{_SP_DEFAULT_MAX_AGE}): nothing to send.")
+                sys.exit(0)
     issued_time = issued_time_dt.strftime("%Y-%m-%dT%H")
 
     preview = args.preview
@@ -2451,7 +2493,7 @@ if __name__ == "__main__":
         # forecasts decide which countries get a final notice, including the
         # countries of a storm FMS has stopped forecasting (within 36 h).
         try:
-            sp_campaigns = _recent_campaigns(max_age_hours=36)
+            sp_campaigns = _recent_campaigns(max_age_hours=_SP_CAMPAIGN_LOOKBACK_H)
             prev_issuances = _sp_last_sent(prefix, sp_campaigns)
             logger.info(
                 f"Previous South Pacific email was built from: {prev_issuances or 'none'}")
@@ -2576,21 +2618,12 @@ if __name__ == "__main__":
             )
             sys.exit(0)
 
-        if args.send_test:
-            # --send-test means the test list and nothing else. Falling through
-            # to the monitoring branch here would mail the whole DSci monitoring
-            # list from what the operator asked for as a test of one advisory.
-            list_ids = TEST_LIST_IDS
-        elif is_monitoring:
-            list_ids = _fetch_monitoring_list_ids(client)
-            if not list_ids:
-                logger.info("No aggregate:monitoring list — skipping send.")
-                sys.exit(0)
-        elif TEST_EMAIL:
-            list_ids = TEST_LIST_IDS
-        else:
-            logger.info(f"Resolving per-country lists for: {active_iso3s}")
-            list_ids = resolve_country_list_ids(client, active_iso3s, basin=basin)
+        list_ids = _target_list_ids(
+            client, test=bool(args.send_test or TEST_EMAIL),
+            is_monitoring=is_monitoring, iso3s=active_iso3s, basin=basin)
+        if not list_ids:
+            logger.info("No list to send to — skipping send.")
+            sys.exit(0)
         logger.info(f"Targeting list IDs: {list_ids}")
 
         logger.info("Uploading images to listmonk media library...")
