@@ -139,6 +139,17 @@ def set_map_timezone(tz: ZoneInfo, note: str) -> None:
     _MAP_TZ, _MAP_TZ_NOTE = tz, note
 
 
+# Country names drawn on the maps: a GeoDataFrame of [name, geometry], or None
+# for no labels (NHC: its countries are big enough to recognise). Set once per
+# run with set_map_country_labels.
+_COUNTRY_LABELS: gpd.GeoDataFrame | None = None
+
+
+def set_map_country_labels(countries: gpd.GeoDataFrame | None) -> None:
+    global _COUNTRY_LABELS
+    _COUNTRY_LABELS = countries
+
+
 def set_map_view(min_land_deg2: float, frame_exposed: bool) -> None:
     """Basin settings for map views, called once per run like
     set_map_timezone: the land (square degrees) a view must show before it
@@ -1321,6 +1332,93 @@ _LABEL_GAPS_PT = (6.0, 13.0)
 _LABEL_FONTSIZE = 8.0
 
 
+_COUNTRY_LABEL_FONTSIZE = 8.5
+_COUNTRY_LABEL_GAP_PT = 3.0
+
+
+def _label_countries(ax, fig, xlim, ylim) -> None:
+    """Name each labelled country (_COUNTRY_LABELS) that shows in the view, next
+    to its largest island in view. Pacific islands are specks at this scale, so
+    without a name a reader cannot tell Samoa from Tonga.
+
+    Runs after the forecast-time labels, so it can keep clear of them: each
+    name tries below, above, right and left of its island (then the corners)
+    and takes the first spot inside the map that overlaps no other label; with
+    none, the spot overlapping fewest. Geometries are also tried shifted by
+    +-360 degrees, since dateline maps use a continuous longitude frame.
+    """
+    if _COUNTRY_LABELS is None or _COUNTRY_LABELS.empty:
+        return
+    view = sgeom.box(xlim[0], ylim[0], xlim[1], ylim[1])
+    anchors = []  # (area, name, bounds of the largest island in view)
+    for name, geom in zip(_COUNTRY_LABELS["name"], _COUNTRY_LABELS.geometry, strict=True):
+        if geom is None or geom.is_empty:
+            continue
+        best = None
+        for shift in (0.0, -360.0, 360.0):
+            g = saffinity.translate(geom, xoff=shift) if shift else geom
+            vis = g.intersection(view)
+            if vis.is_empty:
+                continue
+            parts = getattr(vis, "geoms", [vis])
+            part = max(parts, key=lambda p: p.area)
+            if best is None or part.area > best[0]:
+                best = (part.area, part.bounds)
+        if best is not None:
+            anchors.append((best[0], name, best[1]))
+    if not anchors:
+        return
+    ax.apply_aspect()
+    renderer = fig.canvas.get_renderer()
+    ax_box = ax.get_window_extent(renderer=renderer)
+    taken = [t.get_window_extent(renderer=renderer) for t in ax.texts]
+    gap = _COUNTRY_LABEL_GAP_PT
+    # (anchor corner of the island bbox, offset in pt, ha, va)
+    spots = [
+        ("bottom", (0, -gap), "center", "top"),
+        ("top", (0, gap), "center", "bottom"),
+        ("right", (gap, 0), "left", "center"),
+        ("left", (-gap, 0), "right", "center"),
+        ("bottomright", (gap, -gap), "left", "top"),
+        ("bottomleft", (-gap, -gap), "right", "top"),
+        ("topright", (gap, gap), "left", "bottom"),
+        ("topleft", (-gap, gap), "right", "bottom"),
+    ]
+    # Biggest islands first: they get the best spots.
+    for _, name, (x0, y0, x1, y1) in sorted(anchors, reverse=True):
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        at = {"bottom": (cx, y0), "top": (cx, y1), "right": (x1, cy),
+              "left": (x0, cy), "bottomright": (x1, y0), "bottomleft": (x0, y0),
+              "topright": (x1, y1), "topleft": (x0, y1)}
+        best = None  # (score, text, bbox)
+        for corner, (dx, dy), ha, va in spots:
+            x, y = at[corner]
+            t = ax.text(
+                x, y, name,
+                transform=mtransforms.offset_copy(
+                    ax.transData, fig=fig, units="points", x=dx, y=dy),
+                ha=ha, va=va, fontsize=_COUNTRY_LABEL_FONTSIZE, color=INK_2,
+                zorder=4.8, clip_on=True,
+                path_effects=[path_effects.withStroke(linewidth=2.6, foreground=PANEL)],
+            )
+            bb = t.get_window_extent(renderer=renderer)
+            inside = (bb.x0 >= ax_box.x0 and bb.x1 <= ax_box.x1
+                      and bb.y0 >= ax_box.y0 and bb.y1 <= ax_box.y1)
+            score = (0 if inside else 10_000) + sum(bb.overlaps(o) for o in taken)
+            if best is None or score < best[0]:
+                if best is not None:
+                    best[1].remove()
+                best = (score, t, bb)
+            else:
+                t.remove()
+            if score == 0:
+                break
+        if best[0] >= 10_000:
+            best[1].remove()  # no spot inside the map
+            continue
+        taken.append(best[2])
+
+
 def _label_forecast_times(
     ax, fig, tracks: gpd.GeoDataFrame,
     avoid: list[tuple[float, float]] | None = None,
@@ -2034,6 +2132,7 @@ def track_plot_exposure(
     )
     fig.tight_layout()
     _label_forecast_times(ax, fig, tracks, avoid=rings)
+    _label_countries(ax, fig, xlim, ylim)
     exp_handles = [
         mpatches.Patch(facecolor=c, edgecolor=LINE, label=lbl)
         for (_, c), lbl in zip(_EXP_BINS, _EXP_BIN_LABELS, strict=True)
@@ -2110,6 +2209,7 @@ def track_plot_buffers(
     # legends are measured and laid out against it.
     fig.tight_layout()
     _label_forecast_times(ax, fig, tracks)
+    _label_countries(ax, fig, xlim, ylim)
     _add_legend_row(ax, fig, [
         ("Forecast\nwind swaths", fcast_proxies),
         ("Observed\nwind swaths", obsv_proxies),
@@ -2175,6 +2275,7 @@ def track_plot_wsp(
     # legends are measured and laid out against it.
     fig.tight_layout()
     _label_forecast_times(ax, fig, tracks)
+    _label_countries(ax, fig, xlim, ylim)
     _add_legend_row(ax, fig, [
         (f"Probability of\n≥{wind_threshold_kt} kt winds", wsp_proxies),
         ("Observed\nwind swaths", obsv_proxies),
@@ -2239,6 +2340,7 @@ def track_plot_scenarios(
     _finalize_map(ax, title=title, legend_handles=[])
     fig.tight_layout()
     _label_forecast_times(ax, fig, tracks)
+    _label_countries(ax, fig, xlim, ylim)
     scen_proxy = [Line2D([0], [0], color=_SCENARIO_EDGE, linewidth=1.3,
                          linestyle=(0, (4, 2)),
                          label=f"≥{wind_threshold_kt} kt with\nany shifted track")]

@@ -42,6 +42,16 @@ SP_ISO3S = [
     "PYF", "SLB", "TKL", "TON", "TUV", "VUT", "WLF", "WSM",
 ]
 
+# Short names drawn on the South Pacific maps.
+SP_COUNTRY_NAMES = {
+    "ASM": "American Samoa", "COK": "Cook Islands", "FJI": "Fiji",
+    "KIR": "Kiribati", "NCL": "New Caledonia", "NIU": "Niue", "NRU": "Nauru",
+    "PCN": "Pitcairn", "PYF": "French Polynesia", "SLB": "Solomon Islands",
+    "TKL": "Tokelau", "TON": "Tonga", "TUV": "Tuvalu", "VUT": "Vanuatu",
+    "WLF": "Wallis and Futuna", "WSM": "Samoa",
+}
+assert set(SP_COUNTRY_NAMES) == set(SP_ISO3S)
+
 _ADMIN_LEVEL = 0
 _ADMIN_LEVEL_1 = 1
 

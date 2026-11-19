@@ -35,6 +35,7 @@ from src.plots import (
     WspPdf,
     country_strip_chart,
     country_strip_stack,
+    set_map_country_labels,
     set_map_view,
     set_map_timezone,
     track_plot_buffers,
@@ -2469,6 +2470,17 @@ if __name__ == "__main__":
     if basin.key != "nhc":
         set_map_timezone(basin.tz, f"Forecast times are {basin.tz_label}.")
         set_map_view(basin.map_min_land_deg2, basin.map_frame_exposed)
+        if basin.key == "sp":
+            # Name the islands on the maps: they are specks at storm scale.
+            try:
+                import geopandas as _gpd
+                _isl = load_adm0_boundaries(list(D.SP_ISO3S)).to_crs("EPSG:4326")
+                set_map_country_labels(_gpd.GeoDataFrame(
+                    {"name": _isl["iso_3"].map(D.SP_COUNTRY_NAMES)},
+                    geometry=_isl.geometry.values, crs=_isl.crs,
+                ).dropna(subset=["name"]))
+            except Exception as exc:  # noqa: BLE001 — labels are a nicety
+                logger.warning(f"No country labels on the maps: {exc!r}")
     engine = stratus.get_engine(stage=args.stage)
     if args.issued_time:
         issued_time_dt = datetime.strptime(args.issued_time, "%Y-%m-%dT%H")
