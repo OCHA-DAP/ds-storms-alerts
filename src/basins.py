@@ -66,6 +66,9 @@ class BasinProfile:
     # far smaller (Samoa ~0.24, Tonga ~0.06), so at 2.5 the South Pacific maps
     # zoomed out to New Zealand and Hawaii.
     map_min_land_deg2: float = 2.5
+    # Exposure map: widen the view to take in the shaded countries (see
+    # plots._FRAME_EXPOSED). Off for NHC, whose maps stay as they are.
+    map_frame_exposed: bool = False
     season_of: Callable[[datetime], int] = field(default=lambda t: t.year)
     aggregate_tags: tuple = ("aggregate:all",)
 
@@ -114,7 +117,8 @@ SP = BasinProfile(
     has_gdacs_adam=False,
     has_scenarios=True,
     season_of=_data_sp.season_of,
-    map_min_land_deg2=0.5,
+    map_min_land_deg2=0.1,
+    map_frame_exposed=True,
     aggregate_tags=("aggregate:sp",),
 )
 

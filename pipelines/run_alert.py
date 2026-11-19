@@ -35,7 +35,7 @@ from src.plots import (
     WspPdf,
     country_strip_chart,
     country_strip_stack,
-    set_map_min_land,
+    set_map_view,
     set_map_timezone,
     track_plot_buffers,
     track_plot_exposure,
@@ -2468,7 +2468,7 @@ if __name__ == "__main__":
     D = basin.data
     if basin.key != "nhc":
         set_map_timezone(basin.tz, f"Forecast times are {basin.tz_label}.")
-        set_map_min_land(basin.map_min_land_deg2)
+        set_map_view(basin.map_min_land_deg2, basin.map_frame_exposed)
     engine = stratus.get_engine(stage=args.stage)
     if args.issued_time:
         issued_time_dt = datetime.strptime(args.issued_time, "%Y-%m-%dT%H")

@@ -139,11 +139,13 @@ def set_map_timezone(tz: ZoneInfo, note: str) -> None:
     _MAP_TZ, _MAP_TZ_NOTE = tz, note
 
 
-def set_map_min_land(deg2: float) -> None:
-    """Land (square degrees) a map view must show before it stops zooming out
-    (see _expand_to_land). Called once per run, like set_map_timezone."""
-    global _MIN_LAND_DEG2
-    _MIN_LAND_DEG2 = deg2
+def set_map_view(min_land_deg2: float, frame_exposed: bool) -> None:
+    """Basin settings for map views, called once per run like
+    set_map_timezone: the land (square degrees) a view must show before it
+    stops zooming out (see _expand_to_land), and whether the exposure map's
+    view also takes in the shaded countries (see track_plot_exposure)."""
+    global _MIN_LAND_DEG2, _FRAME_EXPOSED
+    _MIN_LAND_DEG2, _FRAME_EXPOSED = min_land_deg2, frame_exposed
 
 
 def _format_ny(t: datetime) -> str:
@@ -1567,8 +1569,14 @@ def _replicate_world(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
 # Zoom-out-to-land parameters. A storm in the open ocean otherwise renders as
 # a track on a featureless blue rectangle with no way to tell WHERE it is.
-_MIN_LAND_DEG2 = 2.5      # ~3x Puerto Rico: an identifiable landmass (set_map_min_land)
+_MIN_LAND_DEG2 = 2.5      # ~3x Puerto Rico: an identifiable landmass (set_map_view)
 _MAX_VIEW_SPAN_DEG = 70.0  # give up past basin scale — some storms ARE remote
+# Exposure map only (set_map_view): widen the view to the shaded countries, as
+# far as this many degrees past the forecast swaths. A tight view otherwise
+# cuts an exposed island in half where the swath ends; the cap keeps one far-
+# flung admin unit (Tuamotu-Gambier spans ~20 degrees) from zooming the map out.
+_FRAME_EXPOSED = False
+_FRAME_EXPOSED_MARGIN_DEG = 3.0
 _LAND_GROW_FACTOR = 1.35
 
 
@@ -1871,44 +1879,23 @@ def track_plot_exposure(
         background = _replicate_world(background)
     _fcast_buf = buffers[buffers["kind"] == "forecast"] if not buffers.empty else buffers
     _obsv_buf = buffers[buffers["kind"] == "observed"] if not buffers.empty else buffers
-    xlim, ylim = _forecast_view_bbox(
-        tracks, _fcast_buf, obsv_buffers=_obsv_buf, land_gdf=background)
-    if not dateline and (xlim[0] < -180.0 or xlim[1] > 180.0):
-        background = _replicate_world(background)
-    fig, ax = _new_map_figure(xlim, ylim)
-    _draw_background(ax, background)
 
-    # Swath fills go down FIRST; the exposure choropleth (also zorder 2, drawn
-    # later) covers them on shaded land. Net effect: swaths show over water and
-    # unshaded land, exposure wins where it exists.
-    obsv_proxies = _draw_obsv_buffers(ax, buffers)
-    fcast_proxies = _draw_fcast_buffers(ax, buffers)
-
-    # --- exposure shading (drawn over the fills; edges added after) --------
-    shaded_iso3s: set[str] = set()
+    # Units the exposure shading will cover: admin-1 rows with exposure, and
+    # the national fallback for small territories without them. Worked out
+    # before the view so the view can take them in (_FRAME_EXPOSED).
+    merged = gpd.GeoDataFrame()
     if adm1_exp is not None and len(adm1_exp) and not adm1_gdf.empty:
         merged = adm1_gdf.merge(
             adm1_exp[adm1_exp["pop_exposed"] > 0],
             left_on="adm1_id", right_on="fm_pcode", how="inner",
         )
-        if not merged.empty:
-            # Islets dropped (their white edges read as specks), but every
-            # unit keeps at least its largest part: a small island's fill is
-            # all there is of it at this scale.
-            _drawn = _scaled(merged, *_map_scale(xlim), keep_one=True)
-            if not _drawn.empty:
-                _drawn.plot(
-                    ax=ax,
-                    color=[_exp_bin_color(p) for p in _drawn["pop_exposed"]],
-                    edgecolor=PANEL, linewidth=0.4, alpha=0.9, zorder=2,
-                )
-            shaded_iso3s = set(merged["iso3"])
+    shaded_iso3s: set[str] = set(merged["iso3"]) if not merged.empty else set()
     # National fallback for countries the admin-1 layer doesn't cover — but
     # ONLY small territories. Painting all of Mexico one shade because its
     # admin-1 rows are missing asserts sub-national knowledge we don't have;
     # for an island the adm0 and the affected area are the same thing.
     _FALLBACK_MAX_DEG2 = 5.0
-    fallback_geoms: dict[str, object] = {}
+    fb = gpd.GeoDataFrame()
     if adm0_gdf is not None and not adm0_gdf.empty:
         fb = adm0_gdf[
             adm0_gdf["iso_3"].isin(
@@ -1921,13 +1908,62 @@ def track_plot_exposure(
             # geographic-CRS warning is noise.
             warnings.simplefilter("ignore", UserWarning)
             fb = fb[fb.geometry.area < _FALLBACK_MAX_DEG2]
-        if not fb.empty:
-            fb.plot(
+
+    view_features = _fcast_buf
+    if _FRAME_EXPOSED and not _fcast_buf.empty:
+        shaded = [
+            (g.geometry.to_crs(_fcast_buf.crs)
+             if g.crs and _fcast_buf.crs and g.crs != _fcast_buf.crs
+             else g.geometry).values
+            for g in (merged, fb) if not g.empty
+        ]
+        if shaded:
+            m = _FRAME_EXPOSED_MARGIN_DEG
+            b = _fcast_buf.total_bounds
+            reach = sgeom.box(b[0] - m, b[1] - m, b[2] + m, b[3] + m)
+            shaded = gpd.GeoSeries(
+                np.concatenate(shaded), crs=_fcast_buf.crs
+            ).intersection(reach)
+            shaded = shaded[~(shaded.is_empty | shaded.isna())]
+            if not shaded.empty:
+                view_features = gpd.GeoDataFrame(
+                    geometry=pd.concat([_fcast_buf.geometry, shaded],
+                                       ignore_index=True),
+                    crs=_fcast_buf.crs,
+                )
+    xlim, ylim = _forecast_view_bbox(
+        tracks, view_features, obsv_buffers=_obsv_buf, land_gdf=background)
+    if not dateline and (xlim[0] < -180.0 or xlim[1] > 180.0):
+        background = _replicate_world(background)
+    fig, ax = _new_map_figure(xlim, ylim)
+    _draw_background(ax, background)
+
+    # Swath fills go down FIRST; the exposure choropleth (also zorder 2, drawn
+    # later) covers them on shaded land. Net effect: swaths show over water and
+    # unshaded land, exposure wins where it exists.
+    obsv_proxies = _draw_obsv_buffers(ax, buffers)
+    fcast_proxies = _draw_fcast_buffers(ax, buffers)
+
+    # --- exposure shading (drawn over the fills; edges added after) --------
+    if not merged.empty:
+        # Islets dropped (their white edges read as specks), but every
+        # unit keeps at least its largest part: a small island's fill is
+        # all there is of it at this scale.
+        _drawn = _scaled(merged, *_map_scale(xlim), keep_one=True)
+        if not _drawn.empty:
+            _drawn.plot(
                 ax=ax,
-                color=[_exp_bin_color(adm0_exp[i]) for i in fb["iso_3"]],
+                color=[_exp_bin_color(p) for p in _drawn["pop_exposed"]],
                 edgecolor=PANEL, linewidth=0.4, alpha=0.9, zorder=2,
             )
-            fallback_geoms = dict(zip(fb["iso_3"], fb.geometry, strict=True))
+    fallback_geoms: dict[str, object] = {}
+    if not fb.empty:
+        fb.plot(
+            ax=ax,
+            color=[_exp_bin_color(adm0_exp[i]) for i in fb["iso_3"]],
+            edgecolor=PANEL, linewidth=0.4, alpha=0.9, zorder=2,
+        )
+        fallback_geoms = dict(zip(fb["iso_3"], fb.geometry, strict=True))
     # Country outlines over the shading so units still group into countries.
     outlines = (_country_outlines(adm1_gdf, xlim) if not adm1_gdf.empty
                 else adm1_gdf)
