@@ -441,18 +441,25 @@ def fetch_buffers(engine: Engine, atcf_ids: list[str], issued_time: datetime) ->
 
 @_cached
 def fetch_scenario_exposure(engine: Engine, atcf_ids: list[str], issued_time: datetime) -> pd.DataFrame:
-    """Per (storm, country, wind): the highest forecast-only exposure across the
-    uncertainty scenarios, and how many of them expose anyone at all.
+    """Per (storm, country, wind): the highest and lowest forecast-only exposure
+    across the uncertainty scenarios, and how many of them expose anyone at all.
 
-    Returns columns: atcf_id, iso3, wind_speed_kt, scen_max, scen_n_nonzero, n_scenarios.
+    A scenario has a row only where its swath reaches the country, so the
+    lowest is 0 unless every scenario exposes people there.
+
+    Returns columns: atcf_id, iso3, wind_speed_kt, scen_max, scen_min,
+    scen_n_nonzero, n_scenarios.
     """
-    cols = ["atcf_id", "iso3", "wind_speed_kt", "scen_max", "scen_n_nonzero", "n_scenarios"]
+    cols = ["atcf_id", "iso3", "wind_speed_kt", "scen_max", "scen_min",
+            "scen_n_nonzero", "n_scenarios"]
     if not atcf_ids:
         return pd.DataFrame(columns=cols)
     sql = text(f"""
         WITH {_CURRENT_CTE}
         SELECT e.disturbance_id AS atcf_id, e.iso3, e.wind_speed_kt,
                MAX(e.pop_exposed) AS scen_max,
+               CASE WHEN COUNT(DISTINCT e.shift_deg) FILTER (WHERE e.pop_exposed > 0) >= :n
+                    THEN MIN(e.pop_exposed) ELSE 0 END AS scen_min,
                COUNT(*) FILTER (WHERE e.pop_exposed > 0) AS scen_n_nonzero,
                :n AS n_scenarios
         FROM storms.fms_tracks_scenario_exposure e

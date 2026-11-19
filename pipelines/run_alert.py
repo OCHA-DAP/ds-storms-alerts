@@ -1998,16 +1998,15 @@ def _scenario_block_html(
                 obsv = _val(obsv_df, iso3, wsp)
                 now = _val(fcast_df, iso3, wsp) + obsv
                 high = obsv + int(r["scen_max"].iloc[0])
-                n_any = int(r["scen_n_nonzero"].iloc[0])
-                n_all = int(r["n_scenarios"].iloc[0])
+                low = obsv + int(r["scen_min"].iloc[0])
                 trs.append(
                     "<tr>"
                     + (f"<td style='{_td};font-weight:600'>{cname(iso3)}</td>" if first
                        else f"<td style='{_td}'></td>")
                     + f"<td style='{_td};color:#5e6a6b;white-space:nowrap'>{wsp} kt</td>"
+                    f"<td style='{_td};text-align:right'>{min(low, now):,}</td>"
                     f"<td style='{_td};text-align:right'>{now:,}</td>"
                     f"<td style='{_td};text-align:right'><b>{max(high, now):,}</b></td>"
-                    f"<td style='{_td};text-align:right;color:#5e6a6b'>{n_any} of {n_all}</td>"
                     "</tr>"
                 )
                 first = False
@@ -2017,18 +2016,20 @@ def _scenario_block_html(
             "<table style='width:100%;border-collapse:collapse;font-size:0.88em;"
             "margin:6px 0 4px;background:#fff'><thead><tr>"
             f"<th style='{_th}'>Country</th><th style='{_th}'>Wind</th>"
+            f"<th style='{_th};text-align:right'>Best case</th>"
             f"<th style='{_th};text-align:right'>This forecast</th>"
-            f"<th style='{_th};text-align:right'>Highest if the track shifts</th>"
-            f"<th style='{_th};text-align:right'>Shifted tracks reaching it</th>"
+            f"<th style='{_th};text-align:right'>Worst case</th>"
             f"</tr></thead><tbody>{''.join(trs)}</tbody></table>"
         )
     note = (
         "<p style='font-size:0.8em;color:#7e8e8f;line-height:1.6;margin:4px 0 14px'>"
         "FMS gives a position uncertainty for every forecast point, growing with "
         "lead time. Moving the whole forecast track by that distance in each of 36 "
-        "directions shows how far the people exposed could change. The dashed "
-        "outline is everywhere at least one of these shifted tracks brings 34 kt "
-        "winds; both columns include exposure already observed.</p>"
+        "directions shows how far the people exposed could change. Best and worst "
+        "case are the fewest and most people exposed under the forecast or any "
+        "shifted track. The dashed outline is everywhere at least one of these "
+        "shifted tracks brings 34 kt winds. All three columns include exposure "
+        "already observed.</p>"
     )
     return f"<h3 style='{_H3}'>Track uncertainty</h3>" + map_html + table + note
 
