@@ -1693,8 +1693,16 @@ def generate_alert_html(
         )
     )
     if basin.key == "sp":
-        intro_html = _sp_intro_html(
-            basin, issued_time_dt, storm_names, full, _p, _detail_sentence)
+        # No example-alerts link: the published examples are NHC storms.
+        _sp_detail = (
+            "" if full else (
+                " Full admin-1 figures are in the attached spreadsheet; "
+                "<a href='https://ocha-dap.github.io/ds-storms-alerts/guide.html' "
+                "style='color:#1862d8'>the methodology</a> is online."
+            )
+        )
+        intro_html = _SP_INTERNAL_NOTICE + _sp_intro_html(
+            basin, issued_time_dt, storm_names, full, _p, _sp_detail)
     elif full:
         # The online full-detail page is a reference document, not
         # correspondence — no salutation, just the advisory context.
@@ -1963,8 +1971,9 @@ def _scenario_block_html(
 ) -> str:
     """Track-uncertainty section for one South Pacific storm: the outline of
     everywhere a shifted track brings 34 kt winds, and per country the
-    exposure under this forecast, the worst case and the best case (the most
-    and fewest people exposed under the forecast or any shifted track)."""
+    exposure under the most likely case (the FMS forecast track), the worst
+    case and the best case (the most and fewest people exposed under the
+    forecast or any shifted track)."""
     env = scen_env[scen_env["atcf_id"] == aid] if scen_env is not None else None
     rows_df = scen_df[scen_df["atcf_id"] == aid] if scen_df is not None else None
     if (env is None or env.empty) and (rows_df is None or rows_df.empty):
@@ -2005,8 +2014,8 @@ def _scenario_block_html(
                     + (f"<td style='{_td};font-weight:600'>{cname(iso3)}</td>" if first
                        else f"<td style='{_td}'></td>")
                     + f"<td style='{_td};color:#5e6a6b;white-space:nowrap'>{wsp} kt</td>"
-                    f"<td style='{_td};text-align:right'>{now:,}</td>"
-                    f"<td style='{_td};text-align:right'><b>{max(high, now):,}</b></td>"
+                    f"<td style='{_td};text-align:right'><b>{now:,}</b></td>"
+                    f"<td style='{_td};text-align:right'>{max(high, now):,}</td>"
                     f"<td style='{_td};text-align:right'>{min(low, now):,}</td>"
                     "</tr>"
                 )
@@ -2017,7 +2026,7 @@ def _scenario_block_html(
             "<table style='width:100%;border-collapse:collapse;font-size:0.88em;"
             "margin:6px 0 4px;background:#fff'><thead><tr>"
             f"<th style='{_th}'>Country</th><th style='{_th}'>Wind</th>"
-            f"<th style='{_th};text-align:right'>This forecast</th>"
+            f"<th style='{_th};text-align:right'>Most likely case</th>"
             f"<th style='{_th};text-align:right'>Worst case</th>"
             f"<th style='{_th};text-align:right'>Best case</th>"
             f"</tr></thead><tbody>{''.join(trs)}</tbody></table>"
@@ -2026,13 +2035,27 @@ def _scenario_block_html(
         "<p style='font-size:0.8em;color:#7e8e8f;line-height:1.6;margin:4px 0 14px'>"
         "FMS gives a position uncertainty for every forecast point, growing with "
         "lead time. Moving the whole forecast track by that distance in each of 36 "
-        "directions shows how far the people exposed could change. Worst and best "
-        "case are the most and fewest people exposed under the forecast or any "
-        "shifted track. The dashed outline is everywhere at least one of these "
+        "directions shows how far the people exposed could change. Most likely "
+        "case is the exposure along the FMS forecast track. Worst and best case "
+        "are the most and fewest people exposed under that track or any shifted "
+        "track. The dashed outline is everywhere at least one of these "
         "shifted tracks brings 34 kt winds. All three columns include exposure "
         "already observed.</p>"
     )
     return f"<h3 style='{_H3}'>Track uncertainty</h3>" + map_html + table + note
+
+
+# Orange notice at the top of every South Pacific email, laid out like the
+# campaign template's red TEST banner: the product is for OCHA's own use.
+_SP_INTERNAL_NOTICE = (
+    "<div style='text-align:center;margin:0 0 16px'>"
+    "<div style='font-size:22px;font-weight:700;color:#d35400;line-height:1.2;"
+    "font-family:Helvetica,Arial,sans-serif'>OCHA-INTERNAL PRODUCT</div>"
+    "<div style='font-size:14px;font-weight:600;color:#d35400;margin-top:6px;"
+    "font-family:Helvetica,Arial,sans-serif'>"
+    "For OCHA internal use only. Please do not share outside OCHA.</div>"
+    "</div>"
+)
 
 
 def _sp_intro_html(basin, issued_time_dt, storm_names, full, _p, detail_sentence) -> str:
