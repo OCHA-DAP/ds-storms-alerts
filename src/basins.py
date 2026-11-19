@@ -61,6 +61,11 @@ class BasinProfile:
     has_gdacs_adam: bool
     has_scenarios: bool
     first_season: int = 2002
+    # Land a map must show before it stops zooming out (plots._expand_to_land).
+    # 2.5 deg2 (~3x Puerto Rico) suits the Atlantic; Pacific island groups are
+    # far smaller (Samoa ~0.24, Tonga ~0.06), so at 2.5 the South Pacific maps
+    # zoomed out to New Zealand and Hawaii.
+    map_min_land_deg2: float = 2.5
     season_of: Callable[[datetime], int] = field(default=lambda t: t.year)
     aggregate_tags: tuple = ("aggregate:all",)
 
@@ -109,6 +114,7 @@ SP = BasinProfile(
     has_gdacs_adam=False,
     has_scenarios=True,
     season_of=_data_sp.season_of,
+    map_min_land_deg2=0.5,
     aggregate_tags=("aggregate:sp",),
 )
 

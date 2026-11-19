@@ -139,6 +139,13 @@ def set_map_timezone(tz: ZoneInfo, note: str) -> None:
     _MAP_TZ, _MAP_TZ_NOTE = tz, note
 
 
+def set_map_min_land(deg2: float) -> None:
+    """Land (square degrees) a map view must show before it stops zooming out
+    (see _expand_to_land). Called once per run, like set_map_timezone."""
+    global _MIN_LAND_DEG2
+    _MIN_LAND_DEG2 = deg2
+
+
 def _format_ny(t: datetime) -> str:
     """Format a UTC timestamp as a compact local-time string (the map time zone)."""
     if t.tzinfo is None:
@@ -1560,7 +1567,7 @@ def _replicate_world(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
 # Zoom-out-to-land parameters. A storm in the open ocean otherwise renders as
 # a track on a featureless blue rectangle with no way to tell WHERE it is.
-_MIN_LAND_DEG2 = 2.5      # ~3x Puerto Rico: an identifiable landmass
+_MIN_LAND_DEG2 = 2.5      # ~3x Puerto Rico: an identifiable landmass (set_map_min_land)
 _MAX_VIEW_SPAN_DEG = 70.0  # give up past basin scale — some storms ARE remote
 _LAND_GROW_FACTOR = 1.35
 
