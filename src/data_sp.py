@@ -50,7 +50,8 @@ SP_COUNTRY_NAMES = {
     "TKL": "Tokelau", "TON": "Tonga", "TUV": "Tuvalu", "VUT": "Vanuatu",
     "WLF": "Wallis and Futuna", "WSM": "Samoa",
 }
-assert set(SP_COUNTRY_NAMES) == set(SP_ISO3S)
+# No import-time check that the two lists match (this module loads for every
+# basin, NHC included): a country missing here just goes unnamed on the map.
 
 _ADMIN_LEVEL = 0
 _ADMIN_LEVEL_1 = 1
@@ -442,28 +443,34 @@ def fetch_buffers(engine: Engine, atcf_ids: list[str], issued_time: datetime) ->
 @_cached
 def fetch_scenario_exposure(engine: Engine, atcf_ids: list[str], issued_time: datetime) -> pd.DataFrame:
     """Per (storm, country, wind): the highest and lowest forecast-only exposure
-    across the uncertainty scenarios, and how many of them expose anyone at all.
+    across the uncertainty scenarios.
 
     A scenario has a row only where its swath reaches the country, so the
-    lowest is 0 unless every scenario exposes people there.
+    lowest is 0 unless every scenario exposes people there. The number of
+    scenarios comes from the pipeline's envelope table (N_SCENARIOS only if
+    that row is missing), so a change of step there cannot silently zero the
+    lowest.
 
     Returns columns: atcf_id, iso3, wind_speed_kt, scen_max, scen_min,
-    scen_n_nonzero, n_scenarios.
+    n_scenarios.
     """
     cols = ["atcf_id", "iso3", "wind_speed_kt", "scen_max", "scen_min",
-            "scen_n_nonzero", "n_scenarios"]
+            "n_scenarios"]
     if not atcf_ids:
         return pd.DataFrame(columns=cols)
     sql = text(f"""
         WITH {_CURRENT_CTE}
         SELECT e.disturbance_id AS atcf_id, e.iso3, e.wind_speed_kt,
                MAX(e.pop_exposed) AS scen_max,
-               CASE WHEN COUNT(DISTINCT e.shift_deg) FILTER (WHERE e.pop_exposed > 0) >= :n
+               CASE WHEN COUNT(DISTINCT e.shift_deg) FILTER (WHERE e.pop_exposed > 0)
+                         >= COALESCE(MAX(v.n_scenarios), :n)
                     THEN MIN(e.pop_exposed) ELSE 0 END AS scen_min,
-               COUNT(*) FILTER (WHERE e.pop_exposed > 0) AS scen_n_nonzero,
-               :n AS n_scenarios
+               COALESCE(MAX(v.n_scenarios), :n) AS n_scenarios
         FROM storms.fms_tracks_scenario_exposure e
         JOIN cur ON cur.disturbance_id = e.disturbance_id AND cur.it = e.issued_time
+        LEFT JOIN storms.fms_tracks_scenario_envelope v
+          ON v.disturbance_id = e.disturbance_id AND v.issued_time = e.issued_time
+         AND v.wind_speed_kt = e.wind_speed_kt
         WHERE e.disturbance_id IN :ids AND e.admin_level = :al
         GROUP BY e.disturbance_id, e.iso3, e.wind_speed_kt
         HAVING MAX(e.pop_exposed) > 0

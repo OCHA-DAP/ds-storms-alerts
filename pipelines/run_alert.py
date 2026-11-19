@@ -1963,7 +1963,8 @@ def _scenario_block_html(
 ) -> str:
     """Track-uncertainty section for one South Pacific storm: the outline of
     everywhere a shifted track brings 34 kt winds, and per country the
-    exposure under the forecast against the highest any shifted track gives."""
+    exposure under this forecast, the worst case and the best case (the most
+    and fewest people exposed under the forecast or any shifted track)."""
     env = scen_env[scen_env["atcf_id"] == aid] if scen_env is not None else None
     rows_df = scen_df[scen_df["atcf_id"] == aid] if scen_df is not None else None
     if (env is None or env.empty) and (rows_df is None or rows_df.empty):

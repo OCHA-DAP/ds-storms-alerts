@@ -1337,6 +1337,14 @@ _COUNTRY_LABEL_GAP_PT = 3.0
 
 
 def _label_countries(ax, fig, xlim, ylim) -> None:
+    """_place_country_labels, never failing the map: the names are a nicety."""
+    try:
+        _place_country_labels(ax, fig, xlim, ylim)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning(f"Country names left off a map: {exc!r}")
+
+
+def _place_country_labels(ax, fig, xlim, ylim) -> None:
     """Name each labelled country (_COUNTRY_LABELS) that shows in the view, next
     to its largest island in view. Pacific islands are specks at this scale, so
     without a name a reader cannot tell Samoa from Tonga.
@@ -1371,7 +1379,17 @@ def _label_countries(ax, fig, xlim, ylim) -> None:
     ax.apply_aspect()
     renderer = fig.canvas.get_renderer()
     ax_box = ax.get_window_extent(renderer=renderer)
-    taken = [t.get_window_extent(renderer=renderer) for t in ax.texts]
+    # Boxed labels (the forecast times) are drawn over the names: avoid the box,
+    # not just the glyphs.
+    def _extent(t):
+        bb = t.get_window_extent(renderer=renderer)
+        patch = t.get_bbox_patch()
+        if patch is None:
+            return bb
+        pad_pt = getattr(patch.get_boxstyle(), "pad", 0.3) * t.get_fontsize()
+        return bb.padded(pad_pt * fig.dpi / 72.0)
+
+    taken = [_extent(t) for t in ax.texts]
     gap = _COUNTRY_LABEL_GAP_PT
     # (anchor corner of the island bbox, offset in pt, ha, va)
     spots = [
@@ -1939,6 +1957,58 @@ def _exp_bin_color(pop: float) -> str:
     return _EXP_BINS[-1][1]
 
 
+def _exposed_units(adm1_gdf, adm1_exp, adm0_gdf, adm0_exp) -> tuple:
+    """The admin-1 units and countries with people exposed, as stored (before
+    any dateline shift) — the candidates for shading."""
+    units = []
+    if (adm1_exp is not None and len(adm1_exp)
+            and adm1_gdf is not None and not adm1_gdf.empty):
+        pcodes = set(adm1_exp.loc[adm1_exp["pop_exposed"] > 0, "fm_pcode"])
+        units.append(adm1_gdf[adm1_gdf["adm1_id"].isin(pcodes)])
+    if adm0_exp and adm0_gdf is not None and not adm0_gdf.empty:
+        isos = {k for k, v in adm0_exp.items() if v > 0}
+        units.append(adm0_gdf[adm0_gdf["iso_3"].isin(isos)])
+    return tuple(units)
+
+
+def _with_exposed_units(fcast_buf, obsv_buf, merged, fb):
+    """The forecast swaths plus the shaded units within reach of them (their
+    bounds +- _FRAME_EXPOSED_MARGIN_DEG), so the view keeps exposed countries in
+    frame without zooming out to a country's far-flung islands.
+
+    Reach comes from the forecast swaths; when none is left (a decaying storm
+    whose forecast holds no 34 kt area, rows stored with NULL geometry), from
+    the observed swath. With neither, the view is left as it was.
+    """
+    def _real(g):
+        return g[~(g.isna() | g.is_empty)]
+
+    shaded = [
+        (g.geometry.to_crs(fcast_buf.crs)
+         if g.crs and fcast_buf.crs and g.crs != fcast_buf.crs
+         else g.geometry).values
+        for g in (merged, fb) if not g.empty
+    ]
+    if not shaded:
+        return fcast_buf
+    base = _real(fcast_buf.geometry) if not fcast_buf.empty else None
+    if base is None or base.empty:
+        base = _real(obsv_buf.geometry) if not obsv_buf.empty else None
+    if base is None or base.empty:
+        return fcast_buf
+    m = _FRAME_EXPOSED_MARGIN_DEG
+    b = base.total_bounds
+    reach = sgeom.box(b[0] - m, b[1] - m, b[2] + m, b[3] + m)
+    shaded = gpd.GeoSeries(np.concatenate(shaded), crs=fcast_buf.crs).intersection(reach)
+    shaded = _real(shaded)
+    if shaded.empty:
+        return fcast_buf
+    return gpd.GeoDataFrame(
+        geometry=pd.concat([fcast_buf.geometry, shaded], ignore_index=True),
+        crs=fcast_buf.crs,
+    )
+
+
 def track_plot_exposure(
     tracks: gpd.GeoDataFrame,
     buffers: gpd.GeoDataFrame,
@@ -1968,6 +2038,12 @@ def track_plot_exposure(
     if tracks.empty:
         return ""
     dateline = _dateline_mode(tracks) or _has_wide_geometry(buffers)
+    if not dateline and _FRAME_EXPOSED:
+        # An exposed unit across the antimeridian (Fiji's Northern and Eastern
+        # divisions) is stored in [-180, 180]: outside dateline mode only its
+        # western part could be framed or shaded.
+        dateline = _has_wide_geometry(
+            *_exposed_units(adm1_gdf, adm1_exp, adm0_gdf, adm0_exp))
     if dateline:
         center = _track_lon_center(tracks)
         tracks = _shift_to_branch(tracks, center)
@@ -2008,27 +2084,12 @@ def track_plot_exposure(
             fb = fb[fb.geometry.area < _FALLBACK_MAX_DEG2]
 
     view_features = _fcast_buf
-    if _FRAME_EXPOSED and not _fcast_buf.empty:
-        shaded = [
-            (g.geometry.to_crs(_fcast_buf.crs)
-             if g.crs and _fcast_buf.crs and g.crs != _fcast_buf.crs
-             else g.geometry).values
-            for g in (merged, fb) if not g.empty
-        ]
-        if shaded:
-            m = _FRAME_EXPOSED_MARGIN_DEG
-            b = _fcast_buf.total_bounds
-            reach = sgeom.box(b[0] - m, b[1] - m, b[2] + m, b[3] + m)
-            shaded = gpd.GeoSeries(
-                np.concatenate(shaded), crs=_fcast_buf.crs
-            ).intersection(reach)
-            shaded = shaded[~(shaded.is_empty | shaded.isna())]
-            if not shaded.empty:
-                view_features = gpd.GeoDataFrame(
-                    geometry=pd.concat([_fcast_buf.geometry, shaded],
-                                       ignore_index=True),
-                    crs=_fcast_buf.crs,
-                )
+    if _FRAME_EXPOSED:
+        try:
+            view_features = _with_exposed_units(_fcast_buf, _obsv_buf, merged, fb)
+        except Exception as exc:  # framing is a nicety; the plain view still works
+            logging.getLogger(__name__).warning(
+                f"Map framing of exposed countries skipped: {exc!r}")
     xlim, ylim = _forecast_view_bbox(
         tracks, view_features, obsv_buffers=_obsv_buf, land_gdf=background)
     if not dateline and (xlim[0] < -180.0 or xlim[1] > 180.0):
