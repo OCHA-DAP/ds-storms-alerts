@@ -2149,7 +2149,7 @@ def _recent_campaigns(max_age_hours: float = 36, max_pages: int = 5) -> list[dic
         resp = requests.get(
             f"{base}/campaigns", auth=auth, timeout=60,
             params={"order_by": "created_at", "order": "desc",
-                    "per_page": 100, "page": page},
+                    "per_page": 100, "page": page, "no_body": "true"},
         )
         resp.raise_for_status()
         results = resp.json().get("data", {}).get("results", []) or []
@@ -2163,15 +2163,34 @@ def _recent_campaigns(max_age_hours: float = 36, max_pages: int = 5) -> list[dic
     return out
 
 
-def _sp_last_sent(prefix: str, campaigns: list[dict]) -> dict:
-    """{storm: issued_time} of the newest South Pacific campaign with this
-    prefix ("[TEST] " or ""), alert or monitoring; {} when there is none."""
+# Listmonk statuses of a campaign that went out (or is going out). A draft
+# left by a failed send, or a cancelled campaign, reached nobody.
+_SENT_STATUSES = frozenset({"scheduled", "running", "paused", "finished"})
+
+
+def _sp_sent_names(prefix: str, campaigns: list[dict]) -> list[str]:
+    """Names of the South Pacific campaigns with this prefix ("[TEST] " or
+    "") that were sent, alert or monitoring, newest first."""
     stem = f"{prefix}{basins.SP.campaign_slug}_"
-    for c in campaigns:
-        name = c.get("name", "")
-        if name.startswith(stem):
-            return _parse_sp_campaign_pairs(name)
-    return {}
+    return [
+        c.get("name", "") for c in campaigns
+        if c.get("name", "").startswith(stem) and c.get("status") in _SENT_STATUSES
+    ]
+
+
+def _sp_last_sent(prefix: str, campaigns: list[dict]) -> dict:
+    """{storm: issued_time} of the newest sent South Pacific campaign with
+    this prefix, alert or monitoring; {} when there is none."""
+    names = _sp_sent_names(prefix, campaigns)
+    return _parse_sp_campaign_pairs(names[0]) if names else {}
+
+
+def _sp_already_sent(prefix: str, campaigns: list[dict], suffix: str) -> bool:
+    """Whether an email built from this set of forecasts went out, as an
+    alert or as a monitoring email (the set, not the full name, decides: a
+    final-notice alert and the monitoring email that would follow it on the
+    next run are built from the same forecasts)."""
+    return any(n.endswith(f" {suffix}") for n in _sp_sent_names(prefix, campaigns))
 
 def _workbook_bytes(adm0_df, adm1_df, cav_df, readme_blocks) -> bytes:
     """Write the styled four-tab xlsx (README first) and return its bytes."""
@@ -2457,7 +2476,7 @@ if __name__ == "__main__":
             f"No --issued-time provided; defaulted to most recent advisory "
             f"hour {issued_time_dt.isoformat()}"
         )
-        if basin.key == "sp":
+        if basin.key == "sp" and not (args.preview or args.send_test):
             # The latest FMS forecast stays the default however old it gets,
             # while the send-once check only sees campaigns from the last
             # _SP_CAMPAIGN_LOOKBACK_H hours: a run long after the last
@@ -2533,10 +2552,8 @@ if __name__ == "__main__":
         # run, so the same email could be built twice. Name the campaign by
         # the forecasts it is built from and send each set once; the next run
         # also reads its previous state from this name.
-        campaign_name = (
-            f"{campaign_name} "
-            f"{_sp_campaign_suffix(D.fetch_current_issuances(engine, issued_time_dt))}"
-        )
+        sp_suffix = _sp_campaign_suffix(D.fetch_current_issuances(engine, issued_time_dt))
+        campaign_name = f"{campaign_name} {sp_suffix}"
 
     if preview:
         html = None
@@ -2611,7 +2628,7 @@ if __name__ == "__main__":
         client = ListmonkClient.from_env()
 
         if (sp_campaigns is not None and not args.send_test
-                and any(c.get("name") == campaign_name for c in sp_campaigns)):
+                and _sp_already_sent(prefix, sp_campaigns, sp_suffix)):
             logger.info(
                 f"A campaign named {campaign_name!r} exists already: these "
                 f"forecasts were emailed. Nothing to send."
