@@ -51,6 +51,7 @@ TEST_EMAIL = _arg(2, "True")
 DRY_RUN = _arg(3, "True")
 STAGE = _arg(4, "dev")
 EMAIL_BACKEND = _arg(5, "listmonk")
+BASIN = _arg(6, "nhc") or "nhc"  # "nhc" | "sp" (South Pacific job)
 
 # Listmonk config — absent from the cluster env on both targets, pulled from the dsci scope
 # (base URL + API creds, so dev/prod can't drift and repointing needs no code edit).
@@ -91,13 +92,15 @@ cmd = [sys.executable, os.path.join(REPO_ROOT, "pipelines", "run_alert.py"),
        "--stage", STAGE]
 if ISSUED_TIME:
     cmd += ["--issued-time", ISSUED_TIME]
+if BASIN != "nhc":
+    cmd += ["--basin", BASIN]
 
 if __name__ == "__main__":
     print(
         f"[run_alert_job] repo_root={REPO_ROOT} STAGE={STAGE} "
         f"TEST_EMAIL={TEST_EMAIL} "
         f"DRY_RUN={DRY_RUN} EMAIL_BACKEND={EMAIL_BACKEND} "
-        f"issued_time={ISSUED_TIME or '(realtime)'}"
+        f"issued_time={ISSUED_TIME or '(realtime)'} basin={BASIN}"
     )
     rc = subprocess.run(cmd, cwd=REPO_ROOT, env=env, check=False).returncode
     # DBX treats a top-level sys.exit()/SystemExit (even code 0) as a task

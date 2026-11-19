@@ -119,6 +119,18 @@ targets:
               job_cluster_key: alert_cluster
             - task_key: hdx_export
               job_cluster_key: alert_cluster
+        storm_alert_sp:
+          job_clusters:
+            - job_cluster_key: alert_sp_cluster
+              new_cluster:
+                policy_id: "0017962FF5D1E3B9"
+                apply_policy_default_values: true
+                spark_version: "18.2.x-scala2.13"
+                node_type_id: "Standard_DS4_v2"
+                data_security_mode: SINGLE_USER
+          tasks:
+            - task_key: run_alert
+              job_cluster_key: alert_sp_cluster
   dev:
     # On-demand feature-branch testing only — deploy with --var git_branch=<branch>.
     # Development mode auto-pauses the schedule and prefixes the job name
@@ -136,6 +148,10 @@ targets:
             - task_key: run_alert
               existing_cluster_id: ${var.existing_cluster_id}
             - task_key: hdx_export
+              existing_cluster_id: ${var.existing_cluster_id}
+        storm_alert_sp:
+          tasks:
+            - task_key: run_alert
               existing_cluster_id: ${var.existing_cluster_id}
 
 resources:
@@ -242,3 +258,67 @@ resources:
           libraries:
             - pypi: { package: "ocha-stratus>=0.1.7" }
             - pypi: { package: "geopandas" }
+
+    # South Pacific (RSMC Nadi) alert. No schedule: FMS forecasts arrive
+    # irregularly, one storm at a time, so ds-storms-pipeline's South
+    # Pacific FMS job starts this one (fire-and-forget) after it has
+    # processed a batch. Same email layout as Storm Alert, through the
+    # basin profile in src/basins.py; a re-run on the same forecasts sends
+    # nothing (campaign named by them, see _sp_send_signature).
+    storm_alert_sp:
+      name: Storm Alert (South Pacific)
+      description: "Email subscribers when an RSMC Nadi (FMS) forecast puts people in a Pacific island country inside its wind swaths or its track uncertainty"
+      git_source:
+        git_url: https://github.com/OCHA-DAP/ds-storms-alerts.git
+        git_provider: gitHub
+        git_branch: ${var.git_branch}
+      max_concurrent_runs: 1
+      # A second trigger while one run is going waits instead of being dropped.
+      queue:
+        enabled: true
+      tags:
+        databricks: job
+        type: alert
+        hazard: tropical-cyclone
+        kb: storms-alerts
+      email_notifications:
+        on_failure:
+          - tristan.downing@un.org
+        no_alert_for_skipped_runs: true
+      parameters:
+        - name: issued_time      # "as of" YYYY-MM-DDTHH; "" -> latest processed FMS forecast
+          default: ""
+        # Test list only until the South Pacific alert opens to subscribers.
+        # Flip to ${var.test_email} at launch.
+        - name: test_email
+          default: "True"
+        - name: dry_run
+          default: ${var.dry_run}
+        - name: stage
+          default: ${var.stage}
+        - name: email_backend
+          default: ${var.email_backend}
+        - name: basin
+          default: "sp"
+      tasks:
+        - task_key: run_alert
+          spark_python_task:
+            python_file: databricks/run_alert_job.py
+            source: GIT
+            parameters:
+              - "{{job.parameters.issued_time}}"
+              - "{{job.parameters.test_email}}"
+              - "{{job.parameters.dry_run}}"
+              - "{{job.parameters.stage}}"
+              - "{{job.parameters.email_backend}}"
+              - "{{job.parameters.basin}}"
+          libraries:
+            - pypi: { package: "ocha-stratus>=0.1.7" }
+            - pypi:
+                package: "ocha-relay @ git+https://github.com/OCHA-DAP/ocha-relay.git@2d4870749faa4235e65164b731e0a574a2e209ab"
+            - pypi: { package: "matplotlib>=3.9" }
+            - pypi: { package: "geopandas" }
+            - pypi: { package: "openpyxl>=3.1.5" }
+            - pypi: { package: "scipy>=1.17.1" }
+            - pypi: { package: "requests>=2.31" }
+            - pypi: { package: "databricks-sdk" }

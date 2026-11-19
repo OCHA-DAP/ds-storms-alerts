@@ -127,13 +127,43 @@ _FCAST_TRACK = dict(color="#444444", linewidth=2, linestyle=(0, (2.4, 1.4)))
 
 _UTC = ZoneInfo("UTC")
 _NY = ZoneInfo("America/New_York")
+# Time zone of the time labels on forecast tracks, and the caption saying so.
+# NHC alerts use US Eastern; the South Pacific alert switches to Fiji time
+# (set_map_timezone, called once per run).
+_MAP_TZ = _NY
+_MAP_TZ_NOTE = "Forecast times are US Eastern Time."
+
+
+def set_map_timezone(tz: ZoneInfo, note: str) -> None:
+    global _MAP_TZ, _MAP_TZ_NOTE
+    _MAP_TZ, _MAP_TZ_NOTE = tz, note
+
+
+# Country names drawn on the maps: a GeoDataFrame of [name, geometry], or None
+# for no labels (NHC: its countries are big enough to recognise). Set once per
+# run with set_map_country_labels.
+_COUNTRY_LABELS: gpd.GeoDataFrame | None = None
+
+
+def set_map_country_labels(countries: gpd.GeoDataFrame | None) -> None:
+    global _COUNTRY_LABELS
+    _COUNTRY_LABELS = countries
+
+
+def set_map_view(min_land_deg2: float, frame_exposed: bool) -> None:
+    """Basin settings for map views, called once per run like
+    set_map_timezone: the land (square degrees) a view must show before it
+    stops zooming out (see _expand_to_land), and whether the exposure map's
+    view also takes in the shaded countries (see track_plot_exposure)."""
+    global _MIN_LAND_DEG2, _FRAME_EXPOSED
+    _MIN_LAND_DEG2, _FRAME_EXPOSED = min_land_deg2, frame_exposed
 
 
 def _format_ny(t: datetime) -> str:
-    """Format a UTC timestamp as a compact NY-time string."""
+    """Format a UTC timestamp as a compact local-time string (the map time zone)."""
     if t.tzinfo is None:
         t = t.replace(tzinfo=_UTC)
-    local = t.astimezone(_NY)
+    local = t.astimezone(_MAP_TZ)
     hour = local.strftime("%I").lstrip("0") or "12"
     return f"{local.strftime('%a')} {hour}{local.strftime('%p')}"
 
@@ -1302,6 +1332,111 @@ _LABEL_GAPS_PT = (6.0, 13.0)
 _LABEL_FONTSIZE = 8.0
 
 
+_COUNTRY_LABEL_FONTSIZE = 8.5
+_COUNTRY_LABEL_GAP_PT = 3.0
+
+
+def _label_countries(ax, fig, xlim, ylim) -> None:
+    """_place_country_labels, never failing the map: the names are a nicety."""
+    try:
+        _place_country_labels(ax, fig, xlim, ylim)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning(f"Country names left off a map: {exc!r}")
+
+
+def _place_country_labels(ax, fig, xlim, ylim) -> None:
+    """Name each labelled country (_COUNTRY_LABELS) that shows in the view, next
+    to its largest island in view. Pacific islands are specks at this scale, so
+    without a name a reader cannot tell Samoa from Tonga.
+
+    Runs after the forecast-time labels, so it can keep clear of them: each
+    name tries below, above, right and left of its island (then the corners)
+    and takes the first spot inside the map that overlaps no other label; with
+    none, the spot overlapping fewest. Geometries are also tried shifted by
+    +-360 degrees, since dateline maps use a continuous longitude frame.
+    """
+    if _COUNTRY_LABELS is None or _COUNTRY_LABELS.empty:
+        return
+    view = sgeom.box(xlim[0], ylim[0], xlim[1], ylim[1])
+    anchors = []  # (area, name, bounds of the largest island in view)
+    for name, geom in zip(_COUNTRY_LABELS["name"], _COUNTRY_LABELS.geometry, strict=True):
+        if geom is None or geom.is_empty:
+            continue
+        best = None
+        for shift in (0.0, -360.0, 360.0):
+            g = saffinity.translate(geom, xoff=shift) if shift else geom
+            vis = g.intersection(view)
+            if vis.is_empty:
+                continue
+            parts = getattr(vis, "geoms", [vis])
+            part = max(parts, key=lambda p: p.area)
+            if best is None or part.area > best[0]:
+                best = (part.area, part.bounds)
+        if best is not None:
+            anchors.append((best[0], name, best[1]))
+    if not anchors:
+        return
+    ax.apply_aspect()
+    renderer = fig.canvas.get_renderer()
+    ax_box = ax.get_window_extent(renderer=renderer)
+    # Boxed labels (the forecast times) are drawn over the names: avoid the box,
+    # not just the glyphs.
+    def _extent(t):
+        bb = t.get_window_extent(renderer=renderer)
+        patch = t.get_bbox_patch()
+        if patch is None:
+            return bb
+        pad_pt = getattr(patch.get_boxstyle(), "pad", 0.3) * t.get_fontsize()
+        return bb.padded(pad_pt * fig.dpi / 72.0)
+
+    taken = [_extent(t) for t in ax.texts]
+    gap = _COUNTRY_LABEL_GAP_PT
+    # (anchor corner of the island bbox, offset in pt, ha, va)
+    spots = [
+        ("bottom", (0, -gap), "center", "top"),
+        ("top", (0, gap), "center", "bottom"),
+        ("right", (gap, 0), "left", "center"),
+        ("left", (-gap, 0), "right", "center"),
+        ("bottomright", (gap, -gap), "left", "top"),
+        ("bottomleft", (-gap, -gap), "right", "top"),
+        ("topright", (gap, gap), "left", "bottom"),
+        ("topleft", (-gap, gap), "right", "bottom"),
+    ]
+    # Biggest islands first: they get the best spots.
+    for _, name, (x0, y0, x1, y1) in sorted(anchors, reverse=True):
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        at = {"bottom": (cx, y0), "top": (cx, y1), "right": (x1, cy),
+              "left": (x0, cy), "bottomright": (x1, y0), "bottomleft": (x0, y0),
+              "topright": (x1, y1), "topleft": (x0, y1)}
+        best = None  # (score, text, bbox)
+        for corner, (dx, dy), ha, va in spots:
+            x, y = at[corner]
+            t = ax.text(
+                x, y, name,
+                transform=mtransforms.offset_copy(
+                    ax.transData, fig=fig, units="points", x=dx, y=dy),
+                ha=ha, va=va, fontsize=_COUNTRY_LABEL_FONTSIZE, color=INK_2,
+                zorder=4.8, clip_on=True,
+                path_effects=[path_effects.withStroke(linewidth=2.6, foreground=PANEL)],
+            )
+            bb = t.get_window_extent(renderer=renderer)
+            inside = (bb.x0 >= ax_box.x0 and bb.x1 <= ax_box.x1
+                      and bb.y0 >= ax_box.y0 and bb.y1 <= ax_box.y1)
+            score = (0 if inside else 10_000) + sum(bb.overlaps(o) for o in taken)
+            if best is None or score < best[0]:
+                if best is not None:
+                    best[1].remove()
+                best = (score, t, bb)
+            else:
+                t.remove()
+            if score == 0:
+                break
+        if best[0] >= 10_000:
+            best[1].remove()  # no spot inside the map
+            continue
+        taken.append(best[2])
+
+
 def _label_forecast_times(
     ax, fig, tracks: gpd.GeoDataFrame,
     avoid: list[tuple[float, float]] | None = None,
@@ -1505,6 +1640,9 @@ def _shift_to_branch(
             minx, _, maxx, _ = g.bounds
             if maxx - minx > 180.0:
                 return None
+            # The halves of a polygon split at ±180° now meet along 180°;
+            # merge them, or the split line is drawn as an edge.
+            g = sops.unary_union(g)
         k = round((center - g.centroid.x) / 360.0)
         return saffinity.translate(g, xoff=360.0 * k) if k else g
 
@@ -1547,8 +1685,14 @@ def _replicate_world(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
 # Zoom-out-to-land parameters. A storm in the open ocean otherwise renders as
 # a track on a featureless blue rectangle with no way to tell WHERE it is.
-_MIN_LAND_DEG2 = 2.5      # ~3x Puerto Rico: an identifiable landmass
+_MIN_LAND_DEG2 = 2.5      # ~3x Puerto Rico: an identifiable landmass (set_map_view)
 _MAX_VIEW_SPAN_DEG = 70.0  # give up past basin scale — some storms ARE remote
+# Exposure map only (set_map_view): widen the view to the shaded countries, as
+# far as this many degrees past the forecast swaths. A tight view otherwise
+# cuts an exposed island in half where the swath ends; the cap keeps one far-
+# flung admin unit (Tuamotu-Gambier spans ~20 degrees) from zooming the map out.
+_FRAME_EXPOSED = False
+_FRAME_EXPOSED_MARGIN_DEG = 3.0
 _LAND_GROW_FACTOR = 1.35
 
 
@@ -1678,7 +1822,7 @@ def _map_notes(tracks: gpd.GeoDataFrame, *extra: str) -> str:
     where a footnote ends up sitting on a swath or a coastline."""
     notes = list(extra)
     if not tracks.empty and (tracks["kind"] == "forecast").any():
-        notes.append("Forecast times are US Eastern Time.")
+        notes.append(_MAP_TZ_NOTE)
     # One note per line: run together they reach the map's full width, and
     # any longer would widen the image past square.
     return "\n".join(notes)
@@ -1813,6 +1957,58 @@ def _exp_bin_color(pop: float) -> str:
     return _EXP_BINS[-1][1]
 
 
+def _exposed_units(adm1_gdf, adm1_exp, adm0_gdf, adm0_exp) -> tuple:
+    """The admin-1 units and countries with people exposed, as stored (before
+    any dateline shift) — the candidates for shading."""
+    units = []
+    if (adm1_exp is not None and len(adm1_exp)
+            and adm1_gdf is not None and not adm1_gdf.empty):
+        pcodes = set(adm1_exp.loc[adm1_exp["pop_exposed"] > 0, "fm_pcode"])
+        units.append(adm1_gdf[adm1_gdf["adm1_id"].isin(pcodes)])
+    if adm0_exp and adm0_gdf is not None and not adm0_gdf.empty:
+        isos = {k for k, v in adm0_exp.items() if v > 0}
+        units.append(adm0_gdf[adm0_gdf["iso_3"].isin(isos)])
+    return tuple(units)
+
+
+def _with_exposed_units(fcast_buf, obsv_buf, merged, fb):
+    """The forecast swaths plus the shaded units within reach of them (their
+    bounds +- _FRAME_EXPOSED_MARGIN_DEG), so the view keeps exposed countries in
+    frame without zooming out to a country's far-flung islands.
+
+    Reach comes from the forecast swaths; when none is left (a decaying storm
+    whose forecast holds no 34 kt area, rows stored with NULL geometry), from
+    the observed swath. With neither, the view is left as it was.
+    """
+    def _real(g):
+        return g[~(g.isna() | g.is_empty)]
+
+    shaded = [
+        (g.geometry.to_crs(fcast_buf.crs)
+         if g.crs and fcast_buf.crs and g.crs != fcast_buf.crs
+         else g.geometry).values
+        for g in (merged, fb) if not g.empty
+    ]
+    if not shaded:
+        return fcast_buf
+    base = _real(fcast_buf.geometry) if not fcast_buf.empty else None
+    if base is None or base.empty:
+        base = _real(obsv_buf.geometry) if not obsv_buf.empty else None
+    if base is None or base.empty:
+        return fcast_buf
+    m = _FRAME_EXPOSED_MARGIN_DEG
+    b = base.total_bounds
+    reach = sgeom.box(b[0] - m, b[1] - m, b[2] + m, b[3] + m)
+    shaded = gpd.GeoSeries(np.concatenate(shaded), crs=fcast_buf.crs).intersection(reach)
+    shaded = _real(shaded)
+    if shaded.empty:
+        return fcast_buf
+    return gpd.GeoDataFrame(
+        geometry=pd.concat([fcast_buf.geometry, shaded], ignore_index=True),
+        crs=fcast_buf.crs,
+    )
+
+
 def track_plot_exposure(
     tracks: gpd.GeoDataFrame,
     buffers: gpd.GeoDataFrame,
@@ -1842,6 +2038,12 @@ def track_plot_exposure(
     if tracks.empty:
         return ""
     dateline = _dateline_mode(tracks) or _has_wide_geometry(buffers)
+    if not dateline and _FRAME_EXPOSED:
+        # An exposed unit across the antimeridian (Fiji's Northern and Eastern
+        # divisions) is stored in [-180, 180]: outside dateline mode only its
+        # western part could be framed or shaded.
+        dateline = _has_wide_geometry(
+            *_exposed_units(adm1_gdf, adm1_exp, adm0_gdf, adm0_exp))
     if dateline:
         center = _track_lon_center(tracks)
         tracks = _shift_to_branch(tracks, center)
@@ -1851,44 +2053,23 @@ def track_plot_exposure(
         background = _replicate_world(background)
     _fcast_buf = buffers[buffers["kind"] == "forecast"] if not buffers.empty else buffers
     _obsv_buf = buffers[buffers["kind"] == "observed"] if not buffers.empty else buffers
-    xlim, ylim = _forecast_view_bbox(
-        tracks, _fcast_buf, obsv_buffers=_obsv_buf, land_gdf=background)
-    if not dateline and (xlim[0] < -180.0 or xlim[1] > 180.0):
-        background = _replicate_world(background)
-    fig, ax = _new_map_figure(xlim, ylim)
-    _draw_background(ax, background)
 
-    # Swath fills go down FIRST; the exposure choropleth (also zorder 2, drawn
-    # later) covers them on shaded land. Net effect: swaths show over water and
-    # unshaded land, exposure wins where it exists.
-    obsv_proxies = _draw_obsv_buffers(ax, buffers)
-    fcast_proxies = _draw_fcast_buffers(ax, buffers)
-
-    # --- exposure shading (drawn over the fills; edges added after) --------
-    shaded_iso3s: set[str] = set()
+    # Units the exposure shading will cover: admin-1 rows with exposure, and
+    # the national fallback for small territories without them. Worked out
+    # before the view so the view can take them in (_FRAME_EXPOSED).
+    merged = gpd.GeoDataFrame()
     if adm1_exp is not None and len(adm1_exp) and not adm1_gdf.empty:
         merged = adm1_gdf.merge(
             adm1_exp[adm1_exp["pop_exposed"] > 0],
             left_on="adm1_id", right_on="fm_pcode", how="inner",
         )
-        if not merged.empty:
-            # Islets dropped (their white edges read as specks), but every
-            # unit keeps at least its largest part: a small island's fill is
-            # all there is of it at this scale.
-            _drawn = _scaled(merged, *_map_scale(xlim), keep_one=True)
-            if not _drawn.empty:
-                _drawn.plot(
-                    ax=ax,
-                    color=[_exp_bin_color(p) for p in _drawn["pop_exposed"]],
-                    edgecolor=PANEL, linewidth=0.4, alpha=0.9, zorder=2,
-                )
-            shaded_iso3s = set(merged["iso3"])
+    shaded_iso3s: set[str] = set(merged["iso3"]) if not merged.empty else set()
     # National fallback for countries the admin-1 layer doesn't cover — but
     # ONLY small territories. Painting all of Mexico one shade because its
     # admin-1 rows are missing asserts sub-national knowledge we don't have;
     # for an island the adm0 and the affected area are the same thing.
     _FALLBACK_MAX_DEG2 = 5.0
-    fallback_geoms: dict[str, object] = {}
+    fb = gpd.GeoDataFrame()
     if adm0_gdf is not None and not adm0_gdf.empty:
         fb = adm0_gdf[
             adm0_gdf["iso_3"].isin(
@@ -1901,13 +2082,47 @@ def track_plot_exposure(
             # geographic-CRS warning is noise.
             warnings.simplefilter("ignore", UserWarning)
             fb = fb[fb.geometry.area < _FALLBACK_MAX_DEG2]
-        if not fb.empty:
-            fb.plot(
+
+    view_features = _fcast_buf
+    if _FRAME_EXPOSED:
+        try:
+            view_features = _with_exposed_units(_fcast_buf, _obsv_buf, merged, fb)
+        except Exception as exc:  # framing is a nicety; the plain view still works
+            logging.getLogger(__name__).warning(
+                f"Map framing of exposed countries skipped: {exc!r}")
+    xlim, ylim = _forecast_view_bbox(
+        tracks, view_features, obsv_buffers=_obsv_buf, land_gdf=background)
+    if not dateline and (xlim[0] < -180.0 or xlim[1] > 180.0):
+        background = _replicate_world(background)
+    fig, ax = _new_map_figure(xlim, ylim)
+    _draw_background(ax, background)
+
+    # Swath fills go down FIRST; the exposure choropleth (also zorder 2, drawn
+    # later) covers them on shaded land. Net effect: swaths show over water and
+    # unshaded land, exposure wins where it exists.
+    obsv_proxies = _draw_obsv_buffers(ax, buffers)
+    fcast_proxies = _draw_fcast_buffers(ax, buffers)
+
+    # --- exposure shading (drawn over the fills; edges added after) --------
+    if not merged.empty:
+        # Islets dropped (their white edges read as specks), but every
+        # unit keeps at least its largest part: a small island's fill is
+        # all there is of it at this scale.
+        _drawn = _scaled(merged, *_map_scale(xlim), keep_one=True)
+        if not _drawn.empty:
+            _drawn.plot(
                 ax=ax,
-                color=[_exp_bin_color(adm0_exp[i]) for i in fb["iso_3"]],
+                color=[_exp_bin_color(p) for p in _drawn["pop_exposed"]],
                 edgecolor=PANEL, linewidth=0.4, alpha=0.9, zorder=2,
             )
-            fallback_geoms = dict(zip(fb["iso_3"], fb.geometry, strict=True))
+    fallback_geoms: dict[str, object] = {}
+    if not fb.empty:
+        fb.plot(
+            ax=ax,
+            color=[_exp_bin_color(adm0_exp[i]) for i in fb["iso_3"]],
+            edgecolor=PANEL, linewidth=0.4, alpha=0.9, zorder=2,
+        )
+        fallback_geoms = dict(zip(fb["iso_3"], fb.geometry, strict=True))
     # Country outlines over the shading so units still group into countries.
     outlines = (_country_outlines(adm1_gdf, xlim) if not adm1_gdf.empty
                 else adm1_gdf)
@@ -1978,6 +2193,7 @@ def track_plot_exposure(
     )
     fig.tight_layout()
     _label_forecast_times(ax, fig, tracks, avoid=rings)
+    _label_countries(ax, fig, xlim, ylim)
     exp_handles = [
         mpatches.Patch(facecolor=c, edgecolor=LINE, label=lbl)
         for (_, c), lbl in zip(_EXP_BINS, _EXP_BIN_LABELS, strict=True)
@@ -2054,6 +2270,7 @@ def track_plot_buffers(
     # legends are measured and laid out against it.
     fig.tight_layout()
     _label_forecast_times(ax, fig, tracks)
+    _label_countries(ax, fig, xlim, ylim)
     _add_legend_row(ax, fig, [
         ("Forecast\nwind swaths", fcast_proxies),
         ("Observed\nwind swaths", obsv_proxies),
@@ -2119,6 +2336,7 @@ def track_plot_wsp(
     # legends are measured and laid out against it.
     fig.tight_layout()
     _label_forecast_times(ax, fig, tracks)
+    _label_countries(ax, fig, xlim, ylim)
     _add_legend_row(ax, fig, [
         (f"Probability of\n≥{wind_threshold_kt} kt winds", wsp_proxies),
         ("Observed\nwind swaths", obsv_proxies),
@@ -2127,6 +2345,74 @@ def track_plot_wsp(
     return _fig_to_img_tag(fig, alt=title, dpi=_MAP_DPI,
                            max_width=_MAP_DISPLAY_PX)
 
+
+
+_SCENARIO_EDGE = "#134ead"  # --hdx-primary-6
+
+
+def track_plot_scenarios(
+    tracks: gpd.GeoDataFrame,
+    buffers: gpd.GeoDataFrame,
+    envelope: gpd.GeoDataFrame,
+    background: gpd.GeoDataFrame,
+    wind_threshold_kt: int = 34,
+    adm1_gdf: gpd.GeoDataFrame | None = None,
+    storm_name: str = "",
+) -> str:
+    """Map: forecast and observed swaths plus the outline of everywhere the
+    uncertainty scenarios bring ``wind_threshold_kt`` winds (South Pacific).
+
+    The scenarios move the whole forecast track by the forecaster's position
+    uncertainty in each of 36 directions; the outline is the union of their
+    forecast-only swaths. It plays the part the wind-speed-probability map
+    plays for NHC, for a centre that publishes no probabilities.
+    """
+    if tracks.empty or envelope is None or envelope.empty:
+        return ""
+    dateline = _dateline_mode(tracks) or _has_wide_geometry(buffers, envelope)
+    if dateline:
+        center = _track_lon_center(tracks)
+        tracks = _shift_to_branch(tracks, center)
+        buffers = _shift_to_branch(buffers, center)
+        envelope = _shift_to_branch(envelope, center)
+        adm1_gdf = _shift_to_branch(adm1_gdf, center)
+        background = _replicate_world(background)
+    _obsv_buf = buffers[buffers["kind"] == "observed"] if not buffers.empty else buffers
+    xlim, ylim = _forecast_view_bbox(
+        tracks, envelope, obsv_buffers=_obsv_buf, land_gdf=background)
+    if not dateline and (xlim[0] < -180.0 or xlim[1] > 180.0):
+        background = _replicate_world(background)
+    fig, ax = _new_map_figure(xlim, ylim)
+    _draw_background(ax, background)
+    if adm1_gdf is not None and not adm1_gdf.empty:
+        _draw_adm1(ax, adm1_gdf, xlim)
+    obsv_proxies = _draw_obsv_buffers(ax, buffers)
+    fcast_proxies = _draw_fcast_buffers(ax, buffers)
+    envelope.plot(ax=ax, facecolor="none", edgecolor=_SCENARIO_EDGE,
+                  linewidth=1.3, linestyle=(0, (4, 2)), zorder=3)
+    _draw_tracks(ax, tracks)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    title = (
+        f"{storm_name}: where the track uncertainty could bring "
+        f"{wind_threshold_kt}-knot winds" if storm_name
+        else f"Where the track uncertainty could bring {wind_threshold_kt}-knot winds"
+    )
+    _finalize_map(ax, title=title, legend_handles=[])
+    fig.tight_layout()
+    _label_forecast_times(ax, fig, tracks)
+    _label_countries(ax, fig, xlim, ylim)
+    scen_proxy = [Line2D([0], [0], color=_SCENARIO_EDGE, linewidth=1.3,
+                         linestyle=(0, (4, 2)),
+                         label=f"≥{wind_threshold_kt} kt with\nany shifted track")]
+    _add_legend_row(ax, fig, [
+        ("Forecast\nwind swaths", fcast_proxies),
+        ("Track\nuncertainty", scen_proxy),
+        ("Observed\nwind swaths", obsv_proxies),
+        ("Storm track", _track_legend_handles(tracks)),
+    ], note=_map_notes(tracks))
+    return _fig_to_img_tag(fig, alt=title, dpi=_MAP_DPI,
+                           max_width=_MAP_DISPLAY_PX)
 
 def _fig_to_img_tag(
     fig: plt.Figure, alt: str = "", dpi: int = 100, display_scale: float = 1.0,
