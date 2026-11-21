@@ -1,13 +1,14 @@
 """DBX entry wrapper for the HDX export (pipelines/export_hdx.py).
 
-Runs as the `hdx_export` task of the Storm Alert job, side by side with
-`run_alert` on the same job cluster, with the job's own parameters passed
-positionally:
+Runs as the `hdx_export` task of the Storm Alert job (and, with basin "sp",
+as its `hdx_export_sp` task), side by side with `run_alert` on the same job
+cluster, with the job's own parameters passed positionally:
 
     sys.argv[1] = issued_time   # YYYY-MM-DDTHH, or "" for realtime
     sys.argv[2] = test_email    # "True" -> write to the test prefix, never published
     sys.argv[3] = dry_run       # "True" -> build and log, upload nothing
     sys.argv[4] = stage         # "dev" | "prod" (ocha-stratus DB stage)
+    sys.argv[5] = basin         # "nhc" (default) | "sp" (South Pacific)
 
 Reusing the alert's live/test switch means the dev target (test_email=True)
 can never feed hdx-scraper-storms. No secrets beyond the cluster's DSCI_AZ_*
@@ -44,6 +45,7 @@ ISSUED_TIME = _arg(1)
 TEST = _arg(2, "True").strip().lower() == "true"
 DRY_RUN = _arg(3, "True").strip().lower() == "true"
 STAGE = _arg(4, "dev")
+BASIN = _arg(5, "nhc") or "nhc"
 
 env = dict(os.environ)
 env["PYTHONPATH"] = REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")
@@ -52,6 +54,8 @@ cmd = [sys.executable, os.path.join(REPO_ROOT, "pipelines", "export_hdx.py"),
        "--stage", STAGE]
 if ISSUED_TIME:
     cmd += ["--issued-time", ISSUED_TIME]
+if BASIN != "nhc":
+    cmd += ["--basin", BASIN]
 if TEST:
     cmd.append("--test")
 if DRY_RUN:
@@ -60,7 +64,8 @@ if DRY_RUN:
 if __name__ == "__main__":
     print(
         f"[run_hdx_export_job] repo_root={REPO_ROOT} STAGE={STAGE} TEST={TEST} "
-        f"DRY_RUN={DRY_RUN} issued_time={ISSUED_TIME or '(realtime)'}"
+        f"DRY_RUN={DRY_RUN} issued_time={ISSUED_TIME or '(realtime)'} "
+        f"basin={BASIN}"
     )
     rc = subprocess.run(cmd, cwd=REPO_ROOT, env=env, check=False).returncode
     # DBX treats a top-level sys.exit()/SystemExit (even code 0) as a task

@@ -49,28 +49,49 @@ well after the NHC run for that reason.
 
 latest/ only moves forward: a backfill run (an older issued_time) writes its
 dated folder but leaves latest/ alone.
+
+South Pacific (RSMC Nadi / FMS) storms are exported the same way under their
+own root (BLOB_ROOT_SP), by a second task of the same scheduled job. What
+differs:
+
+* The first column is `storm_id`, the FMS disturbance id (e.g. 2526-11F):
+  these storms have no ATCF id. The other columns are the NHC ones.
+* CHD is the only source (no GDACS or ADAM figures for the Pacific), so the
+  sources columns hold "CHD" or nothing and the caveat columns are empty.
+* The season is the Southern Hemisphere one, July to June, named by the year
+  it ends.
+* FMS forecasts arrive one storm at a time, at no fixed hour, so `as_of` is
+  the hour of the run. A storm is still active if it has an Official
+  forecast issued in the 24 hours up to `as_of` (SP_ENDED_AFTER) and that
+  forecast, or one of its track-uncertainty scenarios, puts people in the
+  country: the scenarios play the WSP's part. The alert's own "current"
+  window is 12 hours; here one skipped or late forecast must not mark a live
+  storm final on a public dataset, and going final half a day later costs
+  nothing. Running on the NHC job's six-hourly schedule, not on each
+  forecast, is what lets a storm go final at all: FMS just stops sending,
+  and no forecast means no run of the South Pacific alert job.
+* Only forecasts whose processing has finished, scenarios included
+  (SP_DONE_STAGE), are read. The pipeline marks a forecast's exposure done
+  before it computes the scenarios; a run in between would find no scenario
+  threat and call a country final that a shifted track still reaches.
 """
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Callable
 
 import ocha_stratus as stratus
 import pandas as pd
 from azure.core.exceptions import ResourceNotFoundError
 from sqlalchemy import Engine, text
 
+from src import data_sp
+from src.basins import NHC, SP, BasinProfile
 from src.constants import PROJECT_PREFIX
 from src.data import (
-    fetch_adam_current_exposure,
-    fetch_adam_current_exposure_adm1,
-    fetch_current_obsv_exposure,
-    fetch_current_obsv_exposure_adm1,
     fetch_fcast_exposure,
-    fetch_fcast_exposure_adm1,
-    fetch_fm_names,
-    fetch_gdacs_current_exposure,
-    fetch_gdacs_current_exposure_adm1,
     fetch_wsp_fcastonly_exposure,
     load_adm1_boundaries,
 )
@@ -82,6 +103,9 @@ BLOB_ROOT = f"{PROJECT_PREFIX}/processed/hdx"
 # Test runs (the dev bundle target, --send-test style manual runs) write here,
 # so the scraper never publishes a feature branch's output.
 BLOB_ROOT_TEST = f"{PROJECT_PREFIX}/processed/hdx_test"
+# South Pacific storms: their own manifest, read separately by the scraper.
+BLOB_ROOT_SP = f"{PROJECT_PREFIX}/processed/hdx_sp"
+BLOB_ROOT_SP_TEST = f"{PROJECT_PREFIX}/processed/hdx_sp_test"
 
 _WIND_SPEEDS_KT = (34, 50, 64)
 _SRC_LABELS = {"our": "CHD", "ADAM": "ADAM", "GDACS": "GDACS"}
@@ -106,6 +130,14 @@ HDX_CSV_COLS = [
     "caveat_50kt",
     "caveat_64kt",
 ]
+# South Pacific storms have no ATCF id: the FMS disturbance id goes in a
+# column named for what it is. Everything after it is the same.
+HDX_CSV_COLS_SP = ["storm_id", *HDX_CSV_COLS[1:]]
+# A South Pacific storm has ended once its last Official forecast is this old.
+SP_ENDED_AFTER = timedelta(hours=24)
+# Last stage ds-storms-pipeline marks in storms.fms_processing_completion for
+# a forecast (buffers, exposure, scenarios): the forecast is complete.
+SP_DONE_STAGE = "scenarios"
 
 
 def fetch_season_storms(engine: Engine, season: int, as_of: datetime) -> list[dict]:
@@ -208,6 +240,137 @@ def fetch_near_miss_iso3s(
     return sorted({r[1] for r in rows})
 
 
+def fetch_season_storms_sp(engine: Engine, season: int, as_of: datetime) -> list[dict]:
+    """South Pacific counterpart of fetch_season_storms: the FMS disturbances
+    of `season`, each with its latest Official forecast on or before `as_of`
+    that has been processed in full (SP_DONE_STAGE).
+
+    Returns the same keys, `atcf_id` holding the FMS disturbance id.
+    """
+    sql = text("""
+        SELECT s.disturbance_id, s.name, s.season, MAX(f.issued_time) AS issued_time
+        FROM storms.fms_storms s
+        JOIN storms.fms_forecasts f ON f.disturbance_id = s.disturbance_id
+        JOIN storms.fms_processing_completion c
+          ON c.disturbance_id = f.disturbance_id
+         AND c.issued_time = f.issued_time
+         AND c.stage = :stage
+        WHERE s.season = :season
+          AND f.track_type = :official
+          AND f.issued_time <= :as_of
+        GROUP BY s.disturbance_id, s.name, s.season
+        ORDER BY s.disturbance_id
+    """)
+    params = {
+        "season": season,
+        "as_of": as_of,
+        "official": data_sp.OFFICIAL_TRACK,
+        "stage": SP_DONE_STAGE,
+    }
+    with engine.connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [
+        {"atcf_id": r[0], "name": r[1], "season": r[2], "issued_time": r[3]}
+        for r in rows
+    ]
+
+
+def fetch_active_pairs_sp(
+    engine: Engine, atcf_ids: list[str], as_of: datetime
+) -> set[tuple[str, str]]:
+    """(disturbance id, iso3) pairs still under threat at `as_of`: the
+    storm's latest fully processed Official forecast was issued in the last
+    SP_ENDED_AFTER, and it or one of its track-uncertainty scenarios exposes
+    people in the country (admin 0). The alert's "still active" test, on a
+    longer window (see the module docstring)."""
+    sql = text("""
+        WITH cur AS (
+            SELECT f.disturbance_id, MAX(f.issued_time) AS it
+            FROM storms.fms_forecasts f
+            JOIN storms.fms_processing_completion c
+              ON c.disturbance_id = f.disturbance_id
+             AND c.issued_time = f.issued_time
+             AND c.stage = :stage
+            WHERE f.track_type = :official
+              AND f.issued_time <= :as_of
+            GROUP BY f.disturbance_id
+        )
+        SELECT e.disturbance_id, e.iso3
+        FROM storms.fms_tracks_fcastonly_exposure e
+        JOIN cur ON cur.disturbance_id = e.disturbance_id AND cur.it = e.issued_time
+        WHERE cur.it > :t_min AND e.admin_level = 0 AND e.pop_exposed > 0
+        UNION
+        SELECT e.disturbance_id, e.iso3
+        FROM storms.fms_tracks_scenario_exposure e
+        JOIN cur ON cur.disturbance_id = e.disturbance_id AND cur.it = e.issued_time
+        WHERE cur.it > :t_min AND e.admin_level = 0 AND e.pop_exposed > 0
+    """)
+    params = {
+        "as_of": as_of,
+        "t_min": as_of - SP_ENDED_AFTER,
+        "official": data_sp.OFFICIAL_TRACK,
+        "stage": SP_DONE_STAGE,
+    }
+    with engine.connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return {(r[0], r[1]) for r in rows if r[0] in atcf_ids}
+
+
+def fetch_near_miss_iso3s_sp(
+    engine: Engine, atcf_id: str, issued_time: datetime, as_of: datetime
+) -> list[str]:
+    """South Pacific counterpart of fetch_near_miss_iso3s: the countries of
+    the storm's most recent forecast with positive admin-0 forecast exposure,
+    [] if it never had any.
+
+    No waiting here. A storm's latest forecast is by definition one that
+    has been processed in full (fetch_season_storms_sp), so there is no
+    advisory whose figures may not have landed yet.
+    """
+    sql = text("""
+        SELECT DISTINCT iso3
+        FROM storms.fms_tracks_fcastonly_exposure
+        WHERE disturbance_id = :id
+          AND admin_level = 0
+          AND pop_exposed > 0
+          AND issued_time = (
+              SELECT MAX(issued_time)
+              FROM storms.fms_tracks_fcastonly_exposure
+              WHERE disturbance_id = :id
+                AND admin_level = 0
+                AND pop_exposed > 0
+                AND issued_time <= :issued_time
+          )
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"id": atcf_id, "issued_time": issued_time}).fetchall()
+    return sorted(r[0] for r in rows)
+
+
+@dataclass(frozen=True)
+class _Export:
+    """What differs between the basins' exports."""
+
+    root: str
+    root_test: str
+    columns: list[str]   # CSV columns; the first is the storm id
+    season_storms: Callable[[Engine, int, datetime], list[dict]]
+    active_pairs: Callable[[Engine, list[str], datetime], set[tuple[str, str]]]
+    near_miss_iso3s: Callable[[Engine, str, datetime, datetime], list[str]]
+
+
+_EXPORTS = {
+    NHC.key: _Export(
+        BLOB_ROOT, BLOB_ROOT_TEST, HDX_CSV_COLS,
+        fetch_season_storms, fetch_active_pairs, fetch_near_miss_iso3s,
+    ),
+    SP.key: _Export(
+        BLOB_ROOT_SP, BLOB_ROOT_SP_TEST, HDX_CSV_COLS_SP,
+        fetch_season_storms_sp, fetch_active_pairs_sp, fetch_near_miss_iso3s_sp,
+    ),
+}
+
+
 def _build_adm1_rows(
     atcf_id: str,
     storm_iso3s: set[str],
@@ -306,6 +469,7 @@ def build_storm_rows(
     active_iso3s: set[str],
     country_names: "CountryNames",
     keep_iso3s: list[str] | None = None,
+    basin: BasinProfile = NHC,
 ) -> pd.DataFrame:
     """Admin-0 + admin-1 rows for one storm at its latest advisory
     `issued_time`, in HDX_CSV_COLS order. Empty if the storm has no positive
@@ -317,24 +481,29 @@ def build_storm_rows(
     countries, reported at whatever the sources still show — zero from CHD).
     `active_iso3s` are the storm's countries still under threat at the
     current advisory; every other country is final.
+
+    Figures are read through `basin`'s data module, and the id column is
+    named as that basin's CSV names it (see _EXPORTS).
     """
+    D = basin.data
     ids = [atcf_id]
-    fcast_df = fetch_fcast_exposure(engine, issued_time)
+    fcast_df = D.fetch_fcast_exposure(engine, issued_time)
     fcast_df = fcast_df[fcast_df["atcf_id"] == atcf_id]
-    obsv_df = fetch_current_obsv_exposure(engine, ids, issued_time)
+    obsv_df = D.fetch_current_obsv_exposure(engine, ids, issued_time)
 
     storm_iso3s = sorted(
         set(fcast_df["iso3"])
         | set(obsv_df.loc[obsv_df["pop_exposed"] > 0, "iso3"])
         | set(keep_iso3s or ())
     )
+    cols = _EXPORTS[basin.key].columns
     if not storm_iso3s:
-        return pd.DataFrame(columns=HDX_CSV_COLS)
+        return pd.DataFrame(columns=cols)
     final_iso3s = set(storm_iso3s) - active_iso3s
     iso3_to_name = country_names.get(storm_iso3s)
 
-    gdacs_df = fetch_gdacs_current_exposure(engine, ids, issued_time)
-    adam_df = fetch_adam_current_exposure(engine, ids, issued_time)
+    gdacs_df = D.fetch_gdacs_current_exposure(engine, ids, issued_time)
+    adam_df = D.fetch_adam_current_exposure(engine, ids, issued_time)
 
     def _val(df: pd.DataFrame, iso3: str, wsp: int) -> int:
         sub = df[(df["iso3"] == iso3) & (df["wind_speed_kt"] == wsp)]
@@ -368,11 +537,11 @@ def build_storm_rows(
             row[f"caveat_{wsp}kt"] = ""
         rows.append(row)
 
-    fcast_adm1_df = fetch_fcast_exposure_adm1(engine, issued_time)
+    fcast_adm1_df = D.fetch_fcast_exposure_adm1(engine, issued_time)
     fcast_adm1_df = fcast_adm1_df[fcast_adm1_df["atcf_id"] == atcf_id]
-    obsv_adm1_df = fetch_current_obsv_exposure_adm1(engine, ids, issued_time)
-    gdacs_adm1_df = fetch_gdacs_current_exposure_adm1(engine, ids, issued_time)
-    adam_adm1_df = fetch_adam_current_exposure_adm1(engine, ids, issued_time)
+    obsv_adm1_df = D.fetch_current_obsv_exposure_adm1(engine, ids, issued_time)
+    gdacs_adm1_df = D.fetch_gdacs_current_exposure_adm1(engine, ids, issued_time)
+    adam_adm1_df = D.fetch_adam_current_exposure_adm1(engine, ids, issued_time)
 
     # GDACS adm1 units with no FieldMaps match arrive as fm_pcode=NaN
     # "orphan" rows; log them, then drop them (they can't be combined with the
@@ -395,14 +564,14 @@ def build_storm_rows(
             set(storm_iso3s),
             final_iso3s,
             iso3_to_name,
-            fetch_fm_names(engine, storm_iso3s),
+            D.fetch_fm_names(engine, storm_iso3s),
             fcast_adm1_df,
             obsv_adm1_df,
             gdacs_adm1_df,
             adam_adm1_df,
         )
     )
-    df = pd.DataFrame(rows).reindex(columns=HDX_CSV_COLS)
+    df = pd.DataFrame(rows).rename(columns={"atcf_id": cols[0]}).reindex(columns=cols)
     return df.sort_values(
         ["iso3", "admin_level", "admin_pcode"], na_position="first"
     ).reset_index(drop=True)
@@ -445,23 +614,30 @@ def export_season(
     db_stage: str,
     test: bool = False,
     dry_run: bool = False,
+    basin: BasinProfile = NHC,
 ) -> dict:
     """Build every current-season storm's CSV at `as_of` and park them on
     blob with a manifest (see the module docstring). Returns the manifest.
+
+    `basin` picks the storms (NHC by default, or the South Pacific), the
+    root they are written under and the name of the id column.
 
     `dry_run` builds and logs everything but uploads nothing. A storm whose
     rows fail to build is left out of the manifest (the scraper then leaves
     its HDX dataset as it was) and the run raises once the manifest is
     written, so the job's failure email fires.
     """
-    season = as_of.year
-    storms = fetch_season_storms(engine, season, as_of)
+    export = _EXPORTS[basin.key]
+    id_col = export.columns[0]
+    season = basin.season_of(as_of)
+    storms = export.season_storms(engine, season, as_of)
     logger.info(
-        "HDX export: %d storm(s) in season %d as of %s", len(storms), season, as_of
+        "HDX export (%s): %d storm(s) in season %d as of %s",
+        basin.key, len(storms), season, as_of,
     )
-    active = fetch_active_pairs(engine, [s["atcf_id"] for s in storms], as_of)
+    active = export.active_pairs(engine, [s["atcf_id"] for s in storms], as_of)
 
-    root = BLOB_ROOT_TEST if test else BLOB_ROOT
+    root = export.root_test if test else export.root
     folder = f"{root}/{as_of:%Y-%m-%dT%H}"
     country_names = CountryNames()
     entries: list[dict] = []
@@ -471,10 +647,11 @@ def export_season(
         storm_active = {iso3 for a, iso3 in active if a == aid}
         try:
             df = build_storm_rows(
-                engine, aid, storm["issued_time"], storm_active, country_names
+                engine, aid, storm["issued_time"], storm_active, country_names,
+                basin=basin,
             )
             if df.empty:
-                missed = fetch_near_miss_iso3s(engine, aid, storm["issued_time"], as_of)
+                missed = export.near_miss_iso3s(engine, aid, storm["issued_time"], as_of)
                 if missed:
                     logger.info(
                         "HDX export: %s has no exposure left; reporting %s at "
@@ -487,6 +664,7 @@ def export_season(
                         storm_active,
                         country_names,
                         keep_iso3s=missed,
+                        basin=basin,
                     )
         except Exception:
             logger.exception("HDX export: %s failed, left out of the manifest", aid)
@@ -497,7 +675,7 @@ def export_season(
             continue
         adm0 = df[df["admin_level"] == 0]
         entry = {
-            "atcf_id": aid,
+            id_col: aid,
             "name": storm["name"],
             "season": int(storm["season"]),
             "issued_time": storm["issued_time"].isoformat(),
@@ -522,8 +700,9 @@ def export_season(
         "generated_at": datetime.now(UTC).isoformat(),
         "as_of": as_of.isoformat(),
         "season": season,
+        "basin": basin.key,
         "db_stage": db_stage,
-        "columns": HDX_CSV_COLS,
+        "columns": export.columns,
         "storms": entries,
         "failed": failed,
     }
