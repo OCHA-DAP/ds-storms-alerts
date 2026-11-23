@@ -75,6 +75,7 @@ _HIST_COLOR = GREY_EDGE
 # Status colors are reserved for exactly this (state, not series identity).
 _WIND_RAMP = {
     34: ("#f6e9d4", "#d48f2a"),  # --hdx-warning-1 / --hdx-warning-5
+    48: ("#f3dad7", "#d06a5e"),  # Météo-France's middle threshold: as 50
     50: ("#f3dad7", "#d06a5e"),  # --hdx-error-1   / --hdx-error-4
     64: ("#e7b5af", "#9d372b"),  # --hdx-error-2   / --hdx-error-6
 }

@@ -12,8 +12,14 @@ country plus "Storm Alerts - South Pacific" (aggregate:sp), all also tagged
 basin:sp. Country lists are keyed by iso3 alone, so a country belongs to one
 basin's alerts.
 
+With --basin swio, creates only "Storm Alerts - South-West Indian Ocean"
+(aggregate:swio, basin:swio), private: while the South-West Indian Ocean
+alert is an OCHA-internal trial, every email of that basin goes to that one
+list (BasinProfile.recipient_tags) and there are no country lists. Its
+members are added by hand.
+
 Usage:
-    uv run python pipelines/setup_country_lists.py [--dry-run] [--basin sp]
+    uv run python pipelines/setup_country_lists.py [--dry-run] [--basin sp|swio]
 """
 
 import argparse
@@ -58,11 +64,19 @@ _SP_AGGREGATE = {
 }
 
 
+_SWIO_AGGREGATE = {
+    "name": f"{COUNTRY_LIST_NAME_PREFIX} - South-West Indian Ocean",
+    "tag": "aggregate:swio",
+    "description": "Receives every South-West Indian Ocean (RSMC La Réunion) storm email.",
+}
+
+
 def main(dry_run: bool = False, basin: str = "nhc") -> None:
     engine = stratus.get_engine(stage="dev")
     client = _admin_client()
-    aggregates = [_SP_AGGREGATE] if basin == "sp" else _AGGREGATE_LISTS
-    extra_tags = ["basin:sp"] if basin == "sp" else []
+    aggregates = {"sp": [_SP_AGGREGATE], "swio": [_SWIO_AGGREGATE]}.get(
+        basin, _AGGREGATE_LISTS)
+    extra_tags = [f"basin:{basin}"] if basin != "nhc" else []
 
     # --- Aggregate lists ---
     existing_all = client.fetch_all_lists(tag=COUNTRY_LIST_TAG)
@@ -82,9 +96,14 @@ def main(dry_run: bool = False, basin: str = "nhc") -> None:
         else:
             list_id = client.create_list(
                 name=agg["name"],
+                list_type="private" if basin == "swio" else "public",
                 tags=[COUNTRY_LIST_TAG, agg["tag"], *extra_tags],
             )
             print(f"  CREATE list {list_id}: {agg['name']!r} [{agg['tag']}]")
+
+    if basin == "swio":
+        print("\nNo country lists for the South-West Indian Ocean (internal trial).")
+        return
 
     # --- Per-country lists ---
     iso3s = (
@@ -143,6 +162,6 @@ if __name__ == "__main__":
         action="store_true",
         help="Print what would be created without making any API calls.",
     )
-    parser.add_argument("--basin", choices=["nhc", "sp"], default="nhc")
+    parser.add_argument("--basin", choices=["nhc", "sp", "swio"], default="nhc")
     args = parser.parse_args()
     main(dry_run=args.dry_run, basin=args.basin)

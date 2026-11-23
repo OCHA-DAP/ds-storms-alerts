@@ -164,9 +164,10 @@ def _build_subject(
 ) -> str:
     """[Cyclone monitoring] NHC forecast issued {ET time} (storm, storm)."""
     names = ", ".join(storm_names) if storm_names else "—"
-    if basin.key == "sp":
+    if basin.per_storm_times:
         return (
-            f"{prefix}[Cyclone monitoring] South Pacific: RSMC Nadi forecast "
+            f"{prefix}[Cyclone monitoring] {basin.region_name}: "
+            f"{basin.rsmc_name} forecast "
             f"issued {basin.format_time(issued_time_dt)} {basin.tz_label} "
             f"({names})"
         )
@@ -268,8 +269,10 @@ def parse_args() -> argparse.Namespace:
         choices=sorted(basins.BASINS),
         help=(
             "nhc (default): NHC Atlantic and eastern/central Pacific. "
-            "sp: South Pacific, from RSMC Nadi (FMS) forecasts; --issued-time "
-            "then means 'as of', and defaults to the latest processed forecast."
+            "sp: South Pacific, from RSMC Nadi (FMS) forecasts. swio: "
+            "South-West Indian Ocean, from RSMC La Réunion (Météo-France) "
+            "forecasts. For both, --issued-time means 'as of', and defaults "
+            "to the latest processed forecast."
         ),
     )
     return parser.parse_args()
@@ -366,10 +369,27 @@ def _target_list_ids(
     """
     if test:
         return list(TEST_LIST_IDS)
+    if basin.recipient_tags:
+        return _fetch_tagged_list_ids(client, basin.recipient_tags)
     if is_monitoring:
         return _fetch_monitoring_list_ids(client)
     logger.info(f"Resolving per-country lists for: {iso3s}")
     return resolve_country_list_ids(client, iso3s, basin=basin)
+
+
+def _fetch_tagged_list_ids(client, tags: tuple) -> list[int]:
+    """IDs of the lists carrying any of ``tags``: a basin whose emails all go
+    to fixed lists (BasinProfile.recipient_tags). Raises if there is none, so
+    a missing list fails the run instead of silently mailing nobody."""
+    ids = sorted({
+        lst["id"]
+        for lst in client.fetch_all_lists(tag=COUNTRY_LIST_TAG)
+        for tag in lst.get("tags", [])
+        if tag in tags
+    })
+    if not ids:
+        raise RuntimeError(f"No Listmonk list tagged {tags}.")
+    return ids
 
 
 def _fetch_monitoring_list_ids(client) -> list[int]:
@@ -471,6 +491,9 @@ def generate_monitoring_html(
         f"any monitored country.</p>"
     )
 
+    if basin.per_storm_times:
+        # The RSMC products are OCHA-internal: say so on every email.
+        intro = _SP_INTERNAL_NOTICE + intro
     sections: list[str] = [intro]
     for meta in active_meta:
         aid = meta["atcf_id"]
@@ -617,7 +640,7 @@ def generate_alert_html(
     hist_df = D.fetch_historical_obsv_exposure(
         engine, all_render_iso3s, exclude_atcf_ids=all_render_atcf_ids
     )
-    hist_df = hist_df[hist_df["season"] >= 2002].reset_index(drop=True)
+    hist_df = hist_df[hist_df["season"] >= basin.first_season].reset_index(drop=True)
     # Return periods assume the history covers every season since 2002
     # (n_seasons is fixed, exceedances are counted from hist_df). A thin
     # history — the prod DB right after the 2026-09-22 cutover holds no
@@ -653,7 +676,7 @@ def generate_alert_html(
     gdacs_hist_df = D.fetch_gdacs_historical_exposure(
         engine, all_render_iso3s, exclude_atcf_ids=all_render_atcf_ids
     )
-    gdacs_hist_df = gdacs_hist_df[gdacs_hist_df["season"] >= 2002].reset_index(drop=True)
+    gdacs_hist_df = gdacs_hist_df[gdacs_hist_df["season"] >= basin.first_season].reset_index(drop=True)
 
     logger.info("Fetching ADAM current exposure...")
     adam_cur_df = D.fetch_adam_current_exposure(engine, all_render_atcf_ids, issued_time_dt)
@@ -662,7 +685,7 @@ def generate_alert_html(
     adam_hist_df = D.fetch_adam_historical_exposure(
         engine, all_render_iso3s, exclude_atcf_ids=all_render_atcf_ids
     )
-    adam_hist_df = adam_hist_df[adam_hist_df["season"] >= 2002].reset_index(drop=True)
+    adam_hist_df = adam_hist_df[adam_hist_df["season"] >= basin.first_season].reset_index(drop=True)
 
     logger.info("Fetching track geometries...")
     tracks_gdf = D.fetch_track_geo(engine, all_fetch_atcf_ids, issued_time_dt)
@@ -830,7 +853,7 @@ def generate_alert_html(
     for aid, iso3 in final_update_pairs:
         storm_to_iso3s.setdefault(aid, set()).add(iso3)
 
-    wind_speeds_in_order = (64, 50, 34)
+    wind_speeds_in_order = tuple(reversed(basin.wind_speeds))
     x_max_per_wsp = {wsp: _max_for_wsp(wsp) for wsp in wind_speeds_in_order}
 
     def _storm_exposure_score(aid: str) -> float:
@@ -856,7 +879,7 @@ def generate_alert_html(
     def _country_rp_score(aid: str, iso3: str) -> float:
         """Max RP across all wind speeds for this country/storm (higher = rarer)."""
         best = 0.0
-        for _tw in (34, 50, 64):
+        for _tw in basin.wind_speeds:
             _tr = fcast_df[
                 (fcast_df["atcf_id"] == aid)
                 & (fcast_df["iso3"] == iso3)
@@ -882,6 +905,8 @@ def generate_alert_html(
 
     def _rp_numeric(forecast_val: float, iso3: str, wsp: int) -> float | None:
         if not rp_enabled or forecast_val <= 0:
+            return None
+        if basin.rp_wind_speeds is not None and wsp not in basin.rp_wind_speeds:
             return None
         hist_vals = hist_df[
             (hist_df["iso3"] == iso3) & (hist_df["wind_speed_kt"] == wsp)
@@ -968,7 +993,7 @@ def generate_alert_html(
                 storm_map_parts.append(_scenario_block_html(
                     aid, aid_tracks, aid_buffers, scen_env, scen_df,
                     fcast_df, obsv_df, background_gdf, aid_adm1,
-                    storm_h2_label, _cname,
+                    storm_h2_label, _cname, basin=basin,
                 ))
         # Email mode: the maps (combined exposure map + WSP probability map)
         # are built AFTER the country loop — the exposure map needs the
@@ -1001,7 +1026,7 @@ def generate_alert_html(
                 continue
 
             _toc_wsps: list[dict] = []
-            for _tw in (34, 50, 64):
+            for _tw in basin.wind_speeds:
                 _tr = fcast_df[
                     (fcast_df["atcf_id"] == aid)
                     & (fcast_df["iso3"] == iso3)
@@ -1045,7 +1070,7 @@ def generate_alert_html(
             if _toc_wsps:
                 # Find most similar historical storms by relative-difference score
                 # across all three wind speeds (lower score = more similar).
-                _curr_vec = {34: 0, 50: 0, 64: 0}
+                _curr_vec = {_ws: 0 for _ws in basin.wind_speeds}
                 for _tw_d in _toc_wsps:
                     _curr_vec[_tw_d["wsp"]] = _tw_d["total"]
 
@@ -1055,7 +1080,7 @@ def generate_alert_html(
                     if _aid_h not in _hist_storms_by_id:
                         _hist_storms_by_id[_aid_h] = {
                             "name": _hr["name"], "season": _hr["season"],
-                            34: 0, 50: 0, 64: 0,
+                            **{_ws: 0 for _ws in basin.wind_speeds},
                         }
                     _hist_storms_by_id[_aid_h][int(_hr["wind_speed_kt"])] = int(_hr["pop_exposed"])
 
@@ -1063,7 +1088,7 @@ def generate_alert_html(
                 for _hd in _hist_storms_by_id.values():
                     _score = sum(
                         abs(_curr_vec[_ws] - _hd[_ws]) / max(_curr_vec[_ws], _hd[_ws], 1)
-                        for _ws in (34, 50, 64)
+                        for _ws in basin.wind_speeds
                     )
                     _sim_scores.append((_score, _storm_label(_hd["name"], _hd["season"])))
                 _sim_scores.sort()
@@ -1072,7 +1097,7 @@ def generate_alert_html(
                 # and stretch the axis to keep them in frame.
                 _similar_vals = {
                     _storm_label(_hd["name"], _hd["season"]): {
-                        _ws: _hd[_ws] for _ws in (34, 50, 64)
+                        _ws: _hd[_ws] for _ws in basin.wind_speeds
                     }
                     for _hd in _hist_storms_by_id.values()
                     if _storm_label(_hd["name"], _hd["season"]) in _similar
@@ -1418,7 +1443,7 @@ def generate_alert_html(
             _adm1_rows = _build_adm1_rows(
                 aid, storm_to_iso3s[aid], final_update_pairs, iso3_to_name,
                 fm_name_by_pcode, fcast_adm1_df, obsv_adm1_df,
-                gdacs_adm1_df, adam_adm1_df,
+                gdacs_adm1_df, adam_adm1_df, wind_speeds=basin.wind_speeds,
             )
             adm1_exp = _pd.DataFrame(
                 [
@@ -1464,7 +1489,7 @@ def generate_alert_html(
                 storm_map_parts.append(_scenario_block_html(
                     aid, aid_tracks, aid_buffers, scen_env, scen_df,
                     fcast_df, obsv_df, background_gdf, aid_adm1,
-                    storm_h2_label, _cname,
+                    storm_h2_label, _cname, basin=basin,
                 ))
 
         howto_html = ""
@@ -1486,11 +1511,12 @@ def generate_alert_html(
                 "<b style='color:#5e6a6b'>Dots</b> are the current estimates "
                 "by source (labelled beneath the axis) &middot; "
                 "<b style='color:#5e6a6b'>vertical ticks</b> are past storms "
-                "since 2002, the most similar ones in bold &middot; the "
+                f"since {basin.history_since}, the most similar ones in bold &middot; the "
                 "<b style='color:#5e6a6b'>shaded curve</b>, where shown, is "
                 "the exposure distribution of every storm to affect the "
-                "country since 2002 &mdash; the same storms at every wind "
-                "speed, so at 50 and 64 kt it concentrates near zero (most "
+                f"country since {basin.history_since} &mdash; the same storms at every wind "
+                f"speed, so at {basin.wind_speeds[1]} and {basin.wind_speeds[2]} kt "
+                "it concentrates near zero (most "
                 "storms never bring those winds there) and a storm out in "
                 "the tail is genuinely rare &middot; the scale never runs "
                 "past the country's total population"
@@ -1692,13 +1718,15 @@ def generate_alert_html(
             "style='color:#1862d8'>the methodology</a> are online."
         )
     )
-    if basin.key == "sp":
+    if basin.per_storm_times:
         # No example-alerts link: the published examples are NHC storms.
         _sp_detail = (
             "" if full else (
                 " Full admin-1 figures are in the attached spreadsheet; "
                 "<a href='https://ocha-dap.github.io/ds-storms-alerts/guide.html' "
                 "style='color:#1862d8'>the methodology</a> is online."
+            ) if basin.public_links else (
+                " Full admin-1 figures are in the attached spreadsheet."
             )
         )
         intro_html = _SP_INTERNAL_NOTICE + _sp_intro_html(
@@ -1749,6 +1777,8 @@ def generate_alert_html(
             "within the forecast's position uncertainty would reach some; see "
             "<b>Track uncertainty</b> under each storm below.</p>"
         )
+    if not basin.public_links:
+        links_note = ""
     body = intro_html + _hr + summary_header + toc_html + links_note + already_passed_html
     if sections:
         body += _hr + _hr.join(sections)
@@ -1765,6 +1795,7 @@ def _build_adm1_rows(
     obsv_adm1_df,
     gdacs_adm1_df,
     adam_adm1_df,
+    wind_speeds: tuple = (34, 50, 64),
 ) -> list[dict]:
     """Build admin-1 workbook rows for one storm, MAX-combining the sources per FM unit.
 
@@ -1828,7 +1859,7 @@ def _build_adm1_rows(
     unit_vals: dict[tuple[str, str, int], dict[str, int]] = {}
     sources_used: dict[tuple[str, int], set[str]] = {}
     for iso3, pcode in adm1_keys:
-        for wsp in (34, 50, 64):
+        for wsp in wind_speeds:
             vals = {
                 "our": _num(f1, iso3, pcode, wsp) + _num(o1, iso3, pcode, wsp),
                 "ADAM": _num(a1, iso3, pcode, wsp),
@@ -1844,10 +1875,10 @@ def _build_adm1_rows(
     # included, matching the archive workbook's keep-zeros convention).
     out: list[dict] = []
     for iso3, pcode in sorted(adm1_keys):
-        if not any(v > 0 for wsp in (34, 50, 64)
+        if not any(v > 0 for wsp in wind_speeds
                    for v in unit_vals[(iso3, pcode, wsp)].values()):
             continue
-        for wsp in (34, 50, 64):
+        for wsp in wind_speeds:
             vals = unit_vals[(iso3, pcode, wsp)]
             used = sources_used.get((iso3, wsp), set())
             # Iterate in canonical order so the source list is stable.
@@ -1892,8 +1923,8 @@ def _email_readme_blocks(
     src/xlsx_style.build_readme)."""
     B = lambda k, t: (k, t)  # noqa: E731 (terse block builder)
     issued = issued_time_dt.strftime("%Y-%m-%d %H:00")
-    if basin.key == "sp":
-        return _sp_readme_blocks(B, storm_label, aid, issued, adm0, adm1)
+    if basin.per_storm_times:
+        return _sp_readme_blocks(B, storm_label, aid, issued, adm0, adm1, basin)
     return [
         B("title", f"Tropical Cyclone Population Exposure — {storm_label}"),
         B("subtitle", "Forecast-based estimates from CHD, GDACS and ADAM — "
@@ -1946,15 +1977,15 @@ def _email_readme_blocks(
 
 def _background_for(basin: BasinProfile):
     """World background layer for maps. Natural Earth 1:110m drops most
-    Pacific islands, so the South Pacific maps draw the covered countries'
-    own boundaries on top of it."""
+    small islands, so the RSMC maps draw the basin's island countries' own
+    boundaries on top of it (BasinProfile.map_islands)."""
     background = load_background_countries()
-    if basin.key != "sp":
+    if not basin.map_islands:
         return background
     import geopandas as _gpd
     import pandas as _pd
 
-    islands = load_adm0_boundaries(list(basin.data.SP_ISO3S))
+    islands = load_adm0_boundaries([iso3 for iso3, _ in basin.map_islands])
     if islands is None or islands.empty:
         return background
     islands = islands.to_crs(background.crs)
@@ -1968,10 +1999,11 @@ def _background_for(basin: BasinProfile):
 def _scenario_block_html(
     aid, aid_tracks, aid_buffers, scen_env, scen_df, fcast_df, obsv_df,
     background_gdf, aid_adm1, storm_label, cname,
+    basin: BasinProfile = basins.SP,
 ) -> str:
-    """Track-uncertainty section for one South Pacific storm: the outline of
+    """Track-uncertainty section for one RSMC storm: the outline of
     everywhere a shifted track brings 34 kt winds, and per country the
-    exposure under the most likely case (the FMS forecast track), the worst
+    exposure under the most likely case (the RSMC forecast track), the worst
     case and the best case (the most and fewest people exposed under the
     forecast or any shifted track)."""
     env = scen_env[scen_env["atcf_id"] == aid] if scen_env is not None else None
@@ -2001,7 +2033,7 @@ def _scenario_block_html(
         order += [i for i in rows_df["iso3"].unique() if i not in order]
         for iso3 in order:
             first = True
-            for wsp in (34, 50, 64):
+            for wsp in basin.wind_speeds:
                 r = rows_df[(rows_df["iso3"] == iso3) & (rows_df["wind_speed_kt"] == wsp)]
                 if r.empty:
                     continue
@@ -2033,10 +2065,10 @@ def _scenario_block_html(
         )
     note = (
         "<p style='font-size:0.8em;color:#7e8e8f;line-height:1.6;margin:4px 0 14px'>"
-        "FMS gives a position uncertainty for every forecast point, growing with "
+        f"{basin.centre_short} gives a position uncertainty for every forecast point, growing with "
         "lead time. Moving the whole forecast track by that distance in each of 36 "
         "directions shows how far the people exposed could change. Most likely "
-        "case is the exposure along the FMS forecast track. Worst and best case "
+        f"case is the exposure along the {basin.centre_short} forecast track. Worst and best case "
         "are the most and fewest people exposed under that track or any shifted "
         "track. The dashed outline is everywhere at least one of these "
         "shifted tracks brings 34 kt winds. All three columns include exposure "
@@ -2045,7 +2077,7 @@ def _scenario_block_html(
     return f"<h3 style='{_H3}'>Track uncertainty</h3>" + map_html + table + note
 
 
-# Orange notice at the top of every South Pacific email, laid out like the
+# Orange notice at the top of every RSMC email, laid out like the
 # campaign template's red TEST banner: the product is for OCHA's own use.
 _SP_INTERNAL_NOTICE = (
     "<div style='text-align:center;margin:0 0 16px'>"
@@ -2064,57 +2096,62 @@ def _sp_intro_html(basin, issued_time_dt, storm_names, full, _p, detail_sentence
     when = f"{basin.format_time(issued_time_dt)} ({basin.tz_label})"
     what = (
         "OCHA CHD estimates of the people exposed to the forecast winds, "
-        "computed from the RSMC Nadi forecast track and wind radii "
-        "(10-minute mean winds, the FMS convention), with the range the "
+        f"computed from the {basin.rsmc_name} forecast track and wind radii "
+        f"(10-minute mean winds, the {basin.centre_short} convention), with the range the "
         "track uncertainty allows"
     )
+    note = f" {basin.intro_note}" if basin.intro_note else ""
     if full:
         return (
-            f"<p style='{_p}'>RSMC Nadi (Fiji Meteorological Service) "
+            f"<p style='{_p}'>{basin.rsmc_long} "
             f"tropical cyclone forecasts as of {when} &middot; {n} active "
-            f"storm{'' if n == 1 else 's'}: <b>{names}</b>. {what}.</p>"
+            f"storm{'' if n == 1 else 's'}: <b>{names}</b>. {what}.{note}</p>"
         )
     return (
         f"<p style='{_p}'>Dear colleagues,</p>"
-        f"<p style='{_p}'>RSMC Nadi (Fiji Meteorological Service) has issued "
+        f"<p style='{_p}'>{basin.rsmc_long} has issued "
         f"its tropical cyclone forecast as of {when}. There "
         f"{'is' if n == 1 else 'are'} {n} active storm{'' if n == 1 else 's'}: "
         f"<b>{names}</b>.</p>"
-        f"<p style='{_p}'>This email gives {what}.{detail_sentence}</p>"
+        f"<p style='{_p}'>This email gives {what}.{note}{detail_sentence}</p>"
         f"<p style='{_p};margin-bottom:22px'>"
         f"Best regards,<br>OCHA Centre for Humanitarian Data</p>"
     )
 
 
-def _sp_readme_blocks(B, storm_label, aid, issued, adm0, adm1):
+def _sp_readme_blocks(B, storm_label, aid, issued, adm0, adm1,
+                      basin: BasinProfile = basins.SP):
+    """README blocks for an RSMC basin's workbook (South Pacific wording
+    when the profile is basins.SP)."""
+    ws = "/".join(str(w) for w in basin.wind_speeds)
     return [
         B("title", f"Tropical Cyclone Population Exposure — {storm_label}"),
-        B("subtitle", "Forecast-based estimates from the RSMC Nadi (FMS) "
-          "forecast track — admin 0 & admin 1"),
-        B("meta", f"OCHA Data Science Unit  ·  storm {aid}  ·  RSMC Nadi "
+        B("subtitle", f"Forecast-based estimates from the {basin.rsmc_name} "
+          f"({basin.centre_short}) forecast track — admin 0 & admin 1"),
+        B("meta", f"OCHA Data Science Unit  ·  storm {aid}  ·  {basin.rsmc_name} "
           f"forecast issued {issued} UTC"),
         B("gap", ""),
         B("h2", "What this file is"),
         B("body", "Live, forecast-based population-exposure estimates for this "
           "storm as of the forecast above: people inside the forecast wind "
           "footprint plus the track observed so far. Winds are 10-minute means "
-          "(FMS convention). Figures update with every forecast and can move up "
+          f"({basin.centre_short} convention). Figures update with every forecast and can move up "
           "or down."),
         B("gap", ""),
         B("h2", "Tabs"),
         B("bullet", f"adm0_exposure — country level ({len(adm0)} rows): one "
-          f"row per country × wind threshold (34/50/64 kt). The storm key on "
-          f"both exposure tabs is atcf_id, here the FMS disturbance id "
+          f"row per country × wind threshold ({ws} kt). The storm key on "
+          f"both exposure tabs is atcf_id, here {basin.id_label} "
           f"(e.g. {aid})."),
         B("bullet", f"adm1_exposure — subnational FieldMaps units "
           f"({len(adm1)} rows): one row per admin-1 unit × wind threshold, "
           f"for units with any exposure."),
         B("gap", ""),
         B("h2", "Reading the values"),
-        B("bullet", "CHD is our estimate from the RSMC Nadi forecast track and "
+        B("bullet", f"CHD is our estimate from the {basin.rsmc_name} forecast track and "
           "its wind radii, with admin areas extended 500 m into the sea so "
           "coastal and atoll populations are counted. No GDACS or ADAM figures "
-          "are included for the South Pacific."),
+          f"are included for the {basin.region_name}."),
         B("bullet", "is_final_alert = TRUE marks the last update for that "
           "country: the storm no longer poses a forecast threat there. Figures "
           "on a final row will not change unless the track turns back."),
@@ -2122,17 +2159,17 @@ def _sp_readme_blocks(B, storm_label, aid, issued, adm0, adm1):
 
 
 def _prev_kwargs(basin: BasinProfile, prev_issuances: dict | None) -> dict:
-    """South Pacific only: the forecasts of the last email sent stand for the
+    """RSMC basins only: the forecasts of the last email sent stand for the
     previous advisory (NHC's fetch takes no such argument)."""
-    return {"prev_issuances": prev_issuances} if basin.key == "sp" else {}
+    return {"prev_issuances": prev_issuances} if basin.per_storm_times else {}
 
 
-def _sp_send_signature(issuances: dict) -> str:
+def _sp_send_signature(issuances: dict, tag: str = "sp") -> str:
     """Plain alphanumeric token naming a set of (storm, forecast time) pairs."""
     import hashlib
 
     key = ",".join(f"{d}@{t:%Y%m%d%H%M}" for d, t in sorted(issuances.items()))
-    return "sp" + hashlib.sha1(key.encode()).hexdigest()[:12]
+    return tag + hashlib.sha1(key.encode()).hexdigest()[:12]
 
 
 # South Pacific send-once state lives in campaign names: each run reads the
@@ -2144,12 +2181,12 @@ _SP_DEFAULT_MAX_AGE = timedelta(hours=24)
 assert _SP_DEFAULT_MAX_AGE < timedelta(hours=_SP_CAMPAIGN_LOOKBACK_H)
 
 
-def _sp_campaign_suffix(issuances: dict) -> str:
-    """'<signature> <storm>@<YYYYMMDDHHMM>,...': appended to South Pacific
-    campaign names, so the next run can tell which forecasts were last sent
-    and whether these ones already were."""
+def _sp_campaign_suffix(issuances: dict, tag: str = "sp") -> str:
+    """'<signature> <storm>@<YYYYMMDDHHMM>,...': appended to RSMC campaign
+    names, so the next run can tell which forecasts were last sent and
+    whether these ones already were."""
     pairs = ",".join(f"{d}@{t:%Y%m%d%H%M}" for d, t in sorted(issuances.items()))
-    return f"{_sp_send_signature(issuances)} {pairs}".rstrip()
+    return f"{_sp_send_signature(issuances, tag)} {pairs}".rstrip()
 
 
 def _parse_sp_campaign_pairs(name: str) -> dict:
@@ -2195,29 +2232,32 @@ def _recent_campaigns(max_age_hours: float = 36, max_pages: int = 5) -> list[dic
 _SENT_STATUSES = frozenset({"scheduled", "running", "paused", "finished"})
 
 
-def _sp_sent_names(prefix: str, campaigns: list[dict]) -> list[str]:
-    """Names of the South Pacific campaigns with this prefix ("[TEST] " or
+def _sp_sent_names(prefix: str, campaigns: list[dict],
+                   basin: BasinProfile = basins.SP) -> list[str]:
+    """Names of this RSMC basin's campaigns with this prefix ("[TEST] " or
     "") that were sent, alert or monitoring, newest first."""
-    stem = f"{prefix}{basins.SP.campaign_slug}_"
+    stem = f"{prefix}{basin.campaign_slug}_"
     return [
         c.get("name", "") for c in campaigns
         if c.get("name", "").startswith(stem) and c.get("status") in _SENT_STATUSES
     ]
 
 
-def _sp_last_sent(prefix: str, campaigns: list[dict]) -> dict:
-    """{storm: issued_time} of the newest sent South Pacific campaign with
-    this prefix, alert or monitoring; {} when there is none."""
-    names = _sp_sent_names(prefix, campaigns)
+def _sp_last_sent(prefix: str, campaigns: list[dict],
+                  basin: BasinProfile = basins.SP) -> dict:
+    """{storm: issued_time} of the newest sent campaign of this RSMC basin
+    with this prefix, alert or monitoring; {} when there is none."""
+    names = _sp_sent_names(prefix, campaigns, basin)
     return _parse_sp_campaign_pairs(names[0]) if names else {}
 
 
-def _sp_already_sent(prefix: str, campaigns: list[dict], suffix: str) -> bool:
+def _sp_already_sent(prefix: str, campaigns: list[dict], suffix: str,
+                     basin: BasinProfile = basins.SP) -> bool:
     """Whether an email built from this set of forecasts went out, as an
     alert or as a monitoring email (the set, not the full name, decides: a
     final-notice alert and the monitoring email that would follow it on the
     next run are built from the same forecasts)."""
-    return any(n.endswith(f" {suffix}") for n in _sp_sent_names(prefix, campaigns))
+    return any(n.endswith(f" {suffix}") for n in _sp_sent_names(prefix, campaigns, basin))
 
 def _workbook_bytes(adm0_df, adm1_df, cav_df, readme_blocks) -> bytes:
     """Write the styled four-tab xlsx (README first) and return its bytes."""
@@ -2399,7 +2439,7 @@ def generate_exposure_workbook(
         # --- admin 0 (country) rows: one per (country, wind threshold) ---
         for _, iso3 in sorted(storm_to_pairs[aid], key=lambda p: p[1]):
             is_final = (aid, iso3) in final_update_pairs
-            for wsp in (34, 50, 64):
+            for wsp in basin.wind_speeds:
                 tr = fcast_df[
                     (fcast_df["atcf_id"] == aid)
                     & (fcast_df["iso3"] == iso3)
@@ -2456,6 +2496,7 @@ def generate_exposure_workbook(
             obsv_adm1_df,
             gdacs_adm1_df,
             adam_adm1_df,
+            wind_speeds=basin.wind_speeds,
         )
 
         adm0_df = _pd.DataFrame(rows).reindex(columns=_ADM0_COLS)
@@ -2495,13 +2536,14 @@ if __name__ == "__main__":
     if basin.key != "nhc":
         set_map_timezone(basin.tz, f"Forecast times are {basin.tz_label}.")
         set_map_view(basin.map_min_land_deg2, basin.map_frame_exposed)
-        if basin.key == "sp":
+        if basin.map_islands:
             # Name the islands on the maps: they are specks at storm scale.
             try:
                 import geopandas as _gpd
-                _isl = load_adm0_boundaries(list(D.SP_ISO3S)).to_crs("EPSG:4326")
+                _names = dict(basin.map_islands)
+                _isl = load_adm0_boundaries(list(_names)).to_crs("EPSG:4326")
                 set_map_country_labels(_gpd.GeoDataFrame(
-                    {"name": _isl["iso_3"].map(D.SP_COUNTRY_NAMES)},
+                    {"name": _isl["iso_3"].map(_names)},
                     geometry=_isl.geometry.values, crs=_isl.crs,
                 ).dropna(subset=["name"]))
             except Exception as exc:  # noqa: BLE001 — labels are a nicety
@@ -2515,8 +2557,8 @@ if __name__ == "__main__":
             f"No --issued-time provided; defaulted to most recent advisory "
             f"hour {issued_time_dt.isoformat()}"
         )
-        if basin.key == "sp" and not (args.preview or args.send_test):
-            # The latest FMS forecast stays the default however old it gets,
+        if basin.per_storm_times and not (args.preview or args.send_test):
+            # The latest RSMC forecast stays the default however old it gets,
             # while the send-once check only sees campaigns from the last
             # _SP_CAMPAIGN_LOOKBACK_H hours: a run long after the last
             # forecast would email it again. Past _SP_DEFAULT_MAX_AGE (shorter
@@ -2526,7 +2568,7 @@ if __name__ == "__main__":
             age = datetime.now(UTC).replace(tzinfo=None) - issued_time_dt
             if age > _SP_DEFAULT_MAX_AGE:
                 logger.info(
-                    f"Latest FMS forecast is {age} old (more than "
+                    f"Latest {basin.rsmc_name} forecast is {age} old (more than "
                     f"{_SP_DEFAULT_MAX_AGE}): nothing to send.")
                 sys.exit(0)
     issued_time = issued_time_dt.strftime("%Y-%m-%dT%H")
@@ -2546,15 +2588,15 @@ if __name__ == "__main__":
     prefix = "[TEST] " if TEST_EMAIL else ""
     sp_campaigns = None
     prev_issuances = None
-    if basin.key == "sp" and not preview:
+    if basin.per_storm_times and not preview:
         # The last email actually sent is the "previous advisory": its
         # forecasts decide which countries get a final notice, including the
         # countries of a storm FMS has stopped forecasting (within 36 h).
         try:
             sp_campaigns = _recent_campaigns(max_age_hours=_SP_CAMPAIGN_LOOKBACK_H)
-            prev_issuances = _sp_last_sent(prefix, sp_campaigns)
+            prev_issuances = _sp_last_sent(prefix, sp_campaigns, basin)
             logger.info(
-                f"Previous South Pacific email was built from: {prev_issuances or 'none'}")
+                f"Previous {basin.region_name} email was built from: {prev_issuances or 'none'}")
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 f"Could not read recent Listmonk campaigns ({exc!r}); final notices "
@@ -2586,12 +2628,13 @@ if __name__ == "__main__":
         campaign_name = f"{prefix}{basin.campaign_slug}_monitoring_{issued_time}"
     else:
         campaign_name = f"{prefix}{basin.campaign_slug}_{issued_time}"
-    if basin.key == "sp":
+    if basin.per_storm_times:
         # FMS forecasts arrive one storm at a time and every batch triggers a
         # run, so the same email could be built twice. Name the campaign by
         # the forecasts it is built from and send each set once; the next run
         # also reads its previous state from this name.
-        sp_suffix = _sp_campaign_suffix(D.fetch_current_issuances(engine, issued_time_dt))
+        sp_suffix = _sp_campaign_suffix(
+            D.fetch_current_issuances(engine, issued_time_dt), basin.key)
         campaign_name = f"{campaign_name} {sp_suffix}"
 
     if preview:
@@ -2667,7 +2710,7 @@ if __name__ == "__main__":
         client = ListmonkClient.from_env()
 
         if (sp_campaigns is not None and not args.send_test
-                and _sp_already_sent(prefix, sp_campaigns, sp_suffix)):
+                and _sp_already_sent(prefix, sp_campaigns, sp_suffix, basin)):
             logger.info(
                 f"A campaign named {campaign_name!r} exists already: these "
                 f"forecasts were emailed. Nothing to send."
