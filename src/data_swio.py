@@ -19,8 +19,12 @@ Differences from the South Pacific module:
   points; files Météo-France re-published more than 24 h late
   (late_reissue) are left out.
 * "Current" at time T means each system's latest forecast issued in
-  (T - 12 h, T] whose uncertainty scenarios are done (stage 'scenarios', the
-  last stage swio.py marks), so an email never goes out half-built.
+  [T - 18 h, T] whose uncertainty scenarios are done (stage 'scenarios', the
+  last stage swio.py marks) since it was last ingested, so an email never
+  goes out half-built, nor from a corrected file still being reprocessed.
+  18 h, not 12: Météo-France sometimes skips forecasts (a 12 h window
+  dropped a system after an 18 h gap and sent its countries a false "last
+  update").
 * The observed track is the analysis points (data_type 'analysis') of every
   forecast issued up to T, a later forecast's analysis of a time replacing an
   earlier one: the same points swio.py builds the observed swath from.
@@ -42,7 +46,7 @@ from sqlalchemy import Engine, bindparam, text
 from src.data import _disk_cached, load_adm1_boundaries
 from src.data_sp import season_of  # noqa: F401  (Southern Hemisphere: end year)
 
-CURRENT_WINDOW = timedelta(hours=12)
+CURRENT_WINDOW = timedelta(hours=18)
 MAX_LEADTIME_H = 120
 N_SCENARIOS = 36
 WIND_SPEEDS_KT = (34, 48, 64)
@@ -88,10 +92,10 @@ _CURRENT_CTE = f"""
         JOIN storms.mfr_processing_completion c
           ON c.disturbance_id = f.disturbance_id
          AND c.issued_time = f.issued_time
-         AND c.stage = :done
+         AND c.stage = :done AND c.completed_at >= f.ingested_at
         WHERE {_IS_FORECAST}
           AND f.issued_time <= :t
-          AND f.issued_time > :t_min
+          AND f.issued_time >= :t_min
         GROUP BY f.disturbance_id
     )
 """
@@ -116,7 +120,7 @@ def most_recent_advisory_time(engine: Engine) -> datetime:
         SELECT MAX(f.issued_time) FROM storms.mfr_forecasts f
         JOIN storms.mfr_processing_completion c
           ON c.disturbance_id = f.disturbance_id AND c.issued_time = f.issued_time
-         AND c.stage = :done
+         AND c.stage = :done AND c.completed_at >= f.ingested_at
         WHERE {_IS_FORECAST}
     """)
     with engine.connect() as conn:
@@ -256,6 +260,7 @@ def fetch_prev_any_pairs(
             JOIN storms.mfr_processing_completion c
               ON c.disturbance_id = f.disturbance_id
              AND c.issued_time = f.issued_time AND c.stage = :done
+             AND c.completed_at >= f.ingested_at
             WHERE {_IS_FORECAST}
               AND f.issued_time < cur.it
               AND f.issued_time >= cur.it - make_interval(hours => :prev_hours)
@@ -340,6 +345,23 @@ def fetch_historical_obsv_exposure(engine: Engine, iso3s: list[str], exclude_atc
     df["name"] = [_hist_name(sid, nm) for sid, nm in zip(df["storm_id"], df["mfr_name"])]
     df = df[~df["atcf_id"].isin(set(exclude_atcf_ids))]
     return df.reindex(columns=cols).reset_index(drop=True)
+
+
+def fetch_history_season_count(engine: Engine, first_season: int) -> int:
+    """Seasons (end year >= first_season) in which any past system exposed
+    anyone in any country: the check that the history table is filled,
+    taken over the whole basin. Counting only the countries in one email
+    switched return periods off for every country hit less than once in
+    most seasons (Mozambique, Réunion, Comoros ...)."""
+    sql = text("""
+        SELECT COUNT(DISTINCT b.season + 1)
+        FROM storms.swio_hist_wind_exposure e
+        JOIN storms.swio_hist_wind_buffers b
+          ON b.disturbance_id = e.disturbance_id AND b.wind_speed_kt = e.wind_speed_kt
+        WHERE e.admin_level = 0 AND e.pop_exposed > 0 AND b.season + 1 >= :first
+    """)
+    with engine.connect() as conn:
+        return int(conn.execute(sql, {"first": first_season}).scalar() or 0)
 
 
 @_cached

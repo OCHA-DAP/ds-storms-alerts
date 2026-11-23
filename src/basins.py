@@ -210,8 +210,10 @@ SWIO = BasinProfile(
     intro_note=(
         "Météo-France gives wind radii at 34, 48 and 64 kt, so the middle "
         "threshold here is 48 kt. Return periods are given at 48 kt only, "
-        "against storms since 1998/99: at 34 kt the older records give too "
-        "few wind radii for a fair comparison."
+        "against storms since 1998/99. Before 2010/11 Météo-France recorded "
+        "few 34 and 64 kt wind radii, so past exposure at those speeds is "
+        "partly modelled; the similar storms and the past storms on the "
+        "charts rest on it too."
     ),
     map_islands=tuple(_data_swio.SWIO_ISLAND_NAMES.items()),
 )

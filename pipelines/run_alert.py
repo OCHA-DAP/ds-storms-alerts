@@ -648,7 +648,12 @@ def generate_alert_html(
     # (every exposed country prints a red "26-year RP"). Gate RPs on the
     # history actually covering (almost) the whole window; the pills,
     # heading and chart labels all render cleanly for rp=None.
-    _hist_seasons = int(hist_df["season"].nunique()) if not hist_df.empty else 0
+    _count_seasons = getattr(D, "fetch_history_season_count", None)
+    if _count_seasons is not None:
+        # Basin-wide: a country rarely hit is not a sign of a thin history.
+        _hist_seasons = _count_seasons(engine, basin.first_season)
+    else:
+        _hist_seasons = int(hist_df["season"].nunique()) if not hist_df.empty else 0
     rp_enabled = _hist_seasons >= RP_MIN_HIST_SEASONS
     if not rp_enabled:
         logger.warning(
@@ -1002,7 +1007,17 @@ def generate_alert_html(
         toc_countries: list[dict] = []
         country_sections: list[str] = []
         adm0_exp_34: dict[str, int] = {}
-        for iso3 in sorted(storm_to_iso3s[aid], key=lambda c: -_country_rp_score(aid, c)):
+        if basin.per_storm_times:
+            # Ties (common when only one threshold has an RP) by exposure,
+            # then code, so the order does not change from run to run.
+            _country_order = sorted(
+                storm_to_iso3s[aid],
+                key=lambda c: (-_country_rp_score(aid, c),
+                               -_country_exposure_score(aid, c), c))
+        else:
+            _country_order = sorted(
+                storm_to_iso3s[aid], key=lambda c: -_country_rp_score(aid, c))
+        for iso3 in _country_order:
             _is_final = (aid, iso3) in final_update_pairs
 
             # Only render wind speeds that have current data for this (storm, country).
@@ -2342,6 +2357,15 @@ def generate_exposure_workbook(
         {(r.atcf_id, r.iso3) for r in fcast_df.itertuples()}
         | {(r.atcf_id, r.iso3) for r in wsp_exp_df.itertuples() if r.pop_exposed > 0}
     )
+    if basin.has_scenarios:
+        # As in generate_alert_html: a country a shifted track still reaches
+        # is not final, so the workbook must not mark it so either.
+        _scen_seed = sorted(
+            set(all_atcf_ids) | set(prev_atcf_ids)
+            | set(D.fetch_current_issuances(engine, issued_time_dt))
+        )
+        _scen = D.fetch_scenario_exposure(engine, _scen_seed, issued_time_dt)
+        current_any_pairs |= {(r.atcf_id, r.iso3) for r in _scen.itertuples()}
     # No observed-exposure filter: a pair that loses its forecast is final
     # whether or not the storm arrived. A near miss then reports rows of 0 with
     # an empty sources column, which is the honest record of what happened.
@@ -2603,6 +2627,14 @@ if __name__ == "__main__":
                 f"fall back to each storm's previous forecast, and the send-once "
                 f"check is off for this run.")
 
+    # The forecast set the campaign is named after, read before the body is
+    # built: if a forecast finishes processing meanwhile, the body may carry
+    # it but the name does not, so the next run sends again (a repeat)
+    # rather than taking it as sent (a forecast never emailed).
+    start_issuances = (
+        D.fetch_current_issuances(engine, issued_time_dt)
+        if basin.per_storm_times else None)
+
     result = generate_alert_html(
         engine, issued_time_dt, full=args.full, basin=basin,
         prev_issuances=prev_issuances)
@@ -2633,8 +2665,7 @@ if __name__ == "__main__":
         # run, so the same email could be built twice. Name the campaign by
         # the forecasts it is built from and send each set once; the next run
         # also reads its previous state from this name.
-        sp_suffix = _sp_campaign_suffix(
-            D.fetch_current_issuances(engine, issued_time_dt), basin.key)
+        sp_suffix = _sp_campaign_suffix(start_issuances, basin.key)
         campaign_name = f"{campaign_name} {sp_suffix}"
 
     if preview:
@@ -2676,13 +2707,20 @@ if __name__ == "__main__":
 
     if DRY_RUN:
         target = (
-            "monitoring list only" if is_monitoring
+            f"lists tagged {basin.recipient_tags}" if basin.recipient_tags
+            else "monitoring list only" if is_monitoring
             else f"countries {active_iso3s}"
         )
         logger.info(
             f"DRY_RUN=True — skipping email ({EMAIL_BACKEND}). "
             f"Would have sent: {subject!r} to {target}"
         )
+    elif EMAIL_BACKEND == "ses" and basin.recipient_tags:
+        # SES mails a fixed staff list and keeps no send-once record: it
+        # would ignore this basin's own list and resend on every run.
+        raise SystemExit(
+            f"EMAIL_BACKEND=ses is not supported for --basin {basin.key}: its "
+            f"emails go only to the Listmonk lists tagged {basin.recipient_tags}.")
     elif EMAIL_BACKEND == "ses":
         # Direct SMTP: explicit recipients instead of Listmonk lists, CID
         # inline images instead of media uploads, no template chrome.
