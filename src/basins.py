@@ -1,9 +1,11 @@
-"""Basin profiles: what differs between the NHC alert and the South Pacific one.
+"""Basin profiles: what differs between the NHC alert and the RSMC ones
+(South Pacific, South-West Indian Ocean).
 
-pipelines/run_alert.py renders one email layout for both. A profile carries
-the data module it reads (src.data for NHC, src.data_sp for RSMC Nadi), the
-time zone and wording of the forecast centre, which parts exist for that
-basin, and the Listmonk lists it mails.
+pipelines/run_alert.py renders one email layout for all of them. A profile
+carries the data module it reads (src.data for NHC, src.data_sp for RSMC
+Nadi, src.data_swio for RSMC La Réunion), the time zone its emails use, the
+wording of the forecast centre, which parts exist for that basin, and the Listmonk lists it
+mails.
 """
 
 from dataclasses import dataclass, field
@@ -14,11 +16,12 @@ from zoneinfo import ZoneInfo
 
 from src import data as _data_nhc
 from src import data_sp as _data_sp
+from src import data_swio as _data_swio
 
 
 def _time_formatter(tz: ZoneInfo) -> Callable[[datetime], str]:
     def fmt(dt: datetime) -> str:
-        """Naive = UTC, shown in the centre's local time, e.g. 'Jun. 6, 11am'."""
+        """Naive = UTC, shown in the basin's display time zone, e.g. 'Jun. 6, 11am'."""
         aware = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
         local = aware.astimezone(tz)
         hour = local.strftime("%I").lstrip("0") or "12"
@@ -39,6 +42,20 @@ def australian_category(wind_kt: float) -> str:
     for lo, cat in ((108, 5), (86, 4), (64, 3), (48, 2), (34, 1)):
         if wind_kt >= lo:
             return f"Category {cat}"
+    return ""
+
+
+def mfr_category(wind_kt: float) -> str:
+    """Météo-France's South-West Indian Ocean class for a 10-minute mean wind
+    (moderate tropical storm 34-47 kt ... very intense tropical cyclone
+    >= 116 kt); empty below gale force."""
+    for lo, label in ((116, "very intense tropical cyclone"),
+                      (90, "intense tropical cyclone"),
+                      (64, "tropical cyclone"),
+                      (48, "severe tropical storm"),
+                      (34, "moderate tropical storm")):
+        if wind_kt >= lo:
+            return label
     return ""
 
 
@@ -71,6 +88,33 @@ class BasinProfile:
     map_frame_exposed: bool = False
     season_of: Callable[[datetime], int] = field(default=lambda t: t.year)
     aggregate_tags: tuple = ("aggregate:all",)
+    # Wind thresholds of the exposure tables, lowest first.
+    wind_speeds: tuple = (34, 50, 64)
+    # Thresholds that get a return period; None = all of them.
+    rp_wind_speeds: tuple | None = None
+    # How the history's start is written in the email ("since 2002").
+    history_since: str = "2002"
+    # Storms have their own forecast times (RSMC basins): "current" is each
+    # storm's latest forecast, emails are sent once per set of forecasts.
+    per_storm_times: bool = False
+    # When set, every email of this basin (alert or monitoring) goes to the
+    # lists with these tags and nowhere else: no country lists, no shared
+    # monitoring list. For a basin still in an internal trial.
+    recipient_tags: tuple | None = None
+    # RSMC wording (per_storm_times basins).
+    region_name: str = ""          # "South Pacific"
+    rsmc_name: str = ""            # "RSMC Nadi"
+    rsmc_long: str = ""            # "RSMC Nadi (Fiji Meteorological Service)"
+    centre_short: str = ""         # "FMS": "the FMS convention", "FMS gives ..."
+    id_label: str = ""             # "the FMS disturbance id"
+    intro_note: str = ""           # extra sentence(s) after the intro
+    # Links to the public sign-up page, example alerts and methodology guide,
+    # which cover NHC only so far. Off for a basin still in an internal trial.
+    public_links: bool = True
+    # Island countries drawn from their own boundaries (Natural Earth 1:110m
+    # drops them) and named on the maps: ((iso3, name), ...). A tuple, not a
+    # dict, so the frozen profile stays hashable.
+    map_islands: tuple = ()
 
     @property
     def format_time(self) -> Callable[[datetime], str]:
@@ -120,6 +164,62 @@ SP = BasinProfile(
     map_min_land_deg2=0.1,
     map_frame_exposed=True,
     aggregate_tags=("aggregate:sp",),
+    per_storm_times=True,
+    region_name="South Pacific",
+    rsmc_name="RSMC Nadi",
+    rsmc_long="RSMC Nadi (Fiji Meteorological Service)",
+    centre_short="FMS",
+    id_label="the FMS disturbance id",
+    map_islands=tuple((i, _data_sp.SP_COUNTRY_NAMES.get(i)) for i in _data_sp.SP_ISO3S),
 )
 
-BASINS = {"nhc": NHC, "sp": SP}
+SWIO = BasinProfile(
+    key="swio",
+    data=_data_swio,
+    provider="RSMC La Réunion (Météo-France)",
+    # East Africa Time (EAT, UTC+3, no daylight saving), the time of
+    # the OCHA regional office for Southern and Eastern Africa; also the local
+    # time of Madagascar, Comoros and Mayotte. Mozambique is an hour behind,
+    # Mauritius, Réunion and Seychelles an hour ahead. Workbooks and the
+    # send-once campaign names stay in UTC.
+    tz=ZoneInfo("Africa/Nairobi"),
+    tz_label="EAT, UTC+3",
+    tz_abbr="EAT",
+    wind_note="10-minute mean winds (Météo-France)",
+    campaign_slug="ds-storms-alerts-swio",
+    category=mfr_category,
+    basin_name=lambda aid: "South-West Indian Ocean",
+    has_wsp=False,
+    has_gdacs_adam=False,
+    has_scenarios=True,
+    season_of=_data_swio.season_of,
+    # Return periods from 1998/99, at 48 kt only: before 2010/11 Météo-France
+    # gave too few 34 kt radii, and the modelled ones understate the big
+    # storms (ds-storms-pipeline swio_radii.py and its README).
+    first_season=1999,
+    history_since="1998/99",
+    rp_wind_speeds=(48,),
+    wind_speeds=_data_swio.WIND_SPEEDS_KT,
+    map_min_land_deg2=0.1,
+    map_frame_exposed=True,
+    aggregate_tags=("aggregate:swio",),
+    per_storm_times=True,
+    recipient_tags=("aggregate:swio",),
+    public_links=False,
+    region_name="South-West Indian Ocean",
+    rsmc_name="RSMC La Réunion",
+    rsmc_long="RSMC La Réunion (Météo-France)",
+    centre_short="Météo-France",
+    id_label="the Météo-France disturbance id",
+    intro_note=(
+        "Météo-France gives wind radii at 34, 48 and 64 kt, so the middle "
+        "threshold here is 48 kt. Return periods are given at 48 kt only, "
+        "against storms since 1998/99. Before 2010/11 Météo-France recorded "
+        "few 34 and 64 kt wind radii, so past exposure at those speeds is "
+        "partly modelled; the similar storms and the past storms on the "
+        "charts rest on it too."
+    ),
+    map_islands=tuple(_data_swio.SWIO_ISLAND_NAMES.items()),
+)
+
+BASINS = {"nhc": NHC, "sp": SP, "swio": SWIO}

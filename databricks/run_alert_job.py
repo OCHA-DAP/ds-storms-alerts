@@ -51,7 +51,7 @@ TEST_EMAIL = _arg(2, "True")
 DRY_RUN = _arg(3, "True")
 STAGE = _arg(4, "dev")
 EMAIL_BACKEND = _arg(5, "listmonk")
-BASIN = _arg(6, "nhc") or "nhc"  # "nhc" | "sp" (South Pacific job)
+BASIN = _arg(6, "nhc") or "nhc"  # "nhc" | "sp" | "swio" (RSMC jobs)
 
 # Listmonk config — absent from the cluster env on both targets, pulled from the dsci scope
 # (base URL + API creds, so dev/prod can't drift and repointing needs no code edit).

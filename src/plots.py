@@ -75,6 +75,7 @@ _HIST_COLOR = GREY_EDGE
 # Status colors are reserved for exactly this (state, not series identity).
 _WIND_RAMP = {
     34: ("#f6e9d4", "#d48f2a"),  # --hdx-warning-1 / --hdx-warning-5
+    48: ("#f3dad7", "#d06a5e"),  # Météo-France's middle threshold: as 50
     50: ("#f3dad7", "#d06a5e"),  # --hdx-error-1   / --hdx-error-4
     64: ("#e7b5af", "#9d372b"),  # --hdx-error-2   / --hdx-error-6
 }
@@ -128,8 +129,8 @@ _FCAST_TRACK = dict(color="#444444", linewidth=2, linestyle=(0, (2.4, 1.4)))
 _UTC = ZoneInfo("UTC")
 _NY = ZoneInfo("America/New_York")
 # Time zone of the time labels on forecast tracks, and the caption saying so.
-# NHC alerts use US Eastern; the South Pacific alert switches to Fiji time
-# (set_map_timezone, called once per run).
+# NHC alerts use US Eastern; the RSMC alerts switch to their basin's time zone
+# (Fiji time, East Africa Time) with set_map_timezone, called once per run.
 _MAP_TZ = _NY
 _MAP_TZ_NOTE = "Forecast times are US Eastern Time."
 
