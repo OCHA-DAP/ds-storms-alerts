@@ -129,8 +129,8 @@ _FCAST_TRACK = dict(color="#444444", linewidth=2, linestyle=(0, (2.4, 1.4)))
 _UTC = ZoneInfo("UTC")
 _NY = ZoneInfo("America/New_York")
 # Time zone of the time labels on forecast tracks, and the caption saying so.
-# NHC alerts use US Eastern; the South Pacific alert switches to Fiji time
-# (set_map_timezone, called once per run).
+# NHC alerts use US Eastern; the RSMC alerts switch to their basin's time zone
+# (Fiji time, Nairobi time) with set_map_timezone, called once per run.
 _MAP_TZ = _NY
 _MAP_TZ_NOTE = "Forecast times are US Eastern Time."
 

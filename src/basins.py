@@ -3,8 +3,8 @@
 
 pipelines/run_alert.py renders one email layout for all of them. A profile
 carries the data module it reads (src.data for NHC, src.data_sp for RSMC
-Nadi, src.data_swio for RSMC La Réunion), the time zone and wording of the
-forecast centre, which parts exist for that basin, and the Listmonk lists it
+Nadi, src.data_swio for RSMC La Réunion), the time zone its emails use, the
+wording of the forecast centre, which parts exist for that basin, and the Listmonk lists it
 mails.
 """
 
@@ -21,7 +21,7 @@ from src import data_swio as _data_swio
 
 def _time_formatter(tz: ZoneInfo) -> Callable[[datetime], str]:
     def fmt(dt: datetime) -> str:
-        """Naive = UTC, shown in the centre's local time, e.g. 'Jun. 6, 11am'."""
+        """Naive = UTC, shown in the basin's display time zone, e.g. 'Jun. 6, 11am'."""
         aware = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
         local = aware.astimezone(tz)
         hour = local.strftime("%I").lstrip("0") or "12"
@@ -177,10 +177,14 @@ SWIO = BasinProfile(
     key="swio",
     data=_data_swio,
     provider="RSMC La Réunion (Météo-France)",
-    # UTC: the basin spans UTC+2 (Mozambique) to UTC+4 (Mauritius, Réunion).
-    tz=ZoneInfo("UTC"),
-    tz_label="UTC",
-    tz_abbr="UTC",
+    # Nairobi time (East Africa Time, UTC+3, no daylight saving), the time of
+    # the OCHA regional office for Southern and Eastern Africa; also the local
+    # time of Madagascar, Comoros and Mayotte. Mozambique is an hour behind,
+    # Mauritius, Réunion and Seychelles an hour ahead. Workbooks and the
+    # send-once campaign names stay in UTC.
+    tz=ZoneInfo("Africa/Nairobi"),
+    tz_label="Nairobi time, UTC+3",
+    tz_abbr="Nairobi time",
     wind_note="10-minute mean winds (Météo-France)",
     campaign_slug="ds-storms-alerts-swio",
     category=mfr_category,
