@@ -177,14 +177,14 @@ SWIO = BasinProfile(
     key="swio",
     data=_data_swio,
     provider="RSMC La Réunion (Météo-France)",
-    # Nairobi time (East Africa Time, UTC+3, no daylight saving), the time of
+    # East Africa Time (EAT, UTC+3, no daylight saving), the time of
     # the OCHA regional office for Southern and Eastern Africa; also the local
     # time of Madagascar, Comoros and Mayotte. Mozambique is an hour behind,
     # Mauritius, Réunion and Seychelles an hour ahead. Workbooks and the
     # send-once campaign names stay in UTC.
     tz=ZoneInfo("Africa/Nairobi"),
-    tz_label="Nairobi time, UTC+3",
-    tz_abbr="Nairobi time",
+    tz_label="EAT, UTC+3",
+    tz_abbr="EAT",
     wind_note="10-minute mean winds (Météo-France)",
     campaign_slug="ds-storms-alerts-swio",
     category=mfr_category,

@@ -130,7 +130,7 @@ _UTC = ZoneInfo("UTC")
 _NY = ZoneInfo("America/New_York")
 # Time zone of the time labels on forecast tracks, and the caption saying so.
 # NHC alerts use US Eastern; the RSMC alerts switch to their basin's time zone
-# (Fiji time, Nairobi time) with set_map_timezone, called once per run.
+# (Fiji time, East Africa Time) with set_map_timezone, called once per run.
 _MAP_TZ = _NY
 _MAP_TZ_NOTE = "Forecast times are US Eastern Time."
 
